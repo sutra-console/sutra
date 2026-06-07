@@ -116,10 +116,40 @@ struct Connection {
     stop: Arc<AtomicBool>,
 }
 
+/// Rolling console buffer with a monotonic total, so a macro can scan only the
+/// output that arrived after a given point (for WAITFOR / RUN sentinels).
+#[derive(Default)]
+struct ConsoleBuf {
+    buf: VecDeque<u8>,
+    total: u64,
+}
+
+impl ConsoleBuf {
+    fn push(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if self.buf.len() >= CONSOLE_CAP {
+                self.buf.pop_front();
+            }
+            self.buf.push_back(b);
+        }
+        self.total += bytes.len() as u64;
+    }
+    fn tail(&self, max: usize) -> Vec<u8> {
+        let n = self.buf.len().min(max);
+        self.buf.iter().skip(self.buf.len() - n).copied().collect()
+    }
+    /// Bytes received since `seq`, plus the new total.
+    fn since(&self, seq: u64) -> (Vec<u8>, u64) {
+        let oldest = self.total - self.buf.len() as u64;
+        let start = if seq < oldest { 0 } else { (seq - oldest) as usize };
+        (self.buf.iter().skip(start).copied().collect(), self.total)
+    }
+}
+
 pub struct Shared {
     conn: Mutex<Option<Connection>>,
     seq: Mutex<u8>,
-    console: Mutex<VecDeque<u8>>,
+    console: Mutex<ConsoleBuf>,
     params: Mutex<SerialParams>,
     data_name: Mutex<Option<String>>,
     cmd_name: Mutex<Option<String>>,
@@ -134,7 +164,7 @@ impl Default for Shared {
         Shared {
             conn: Mutex::new(None),
             seq: Mutex::new(0),
-            console: Mutex::new(VecDeque::with_capacity(CONSOLE_CAP)),
+            console: Mutex::new(ConsoleBuf::default()),
             params: Mutex::new(SerialParams::default()),
             data_name: Mutex::new(None),
             cmd_name: Mutex::new(None),
@@ -154,13 +184,7 @@ impl Shared {
     }
 
     fn push_console(&self, bytes: &[u8]) {
-        let mut c = self.console.lock().unwrap();
-        for &b in bytes {
-            if c.len() >= CONSOLE_CAP {
-                c.pop_front();
-            }
-            c.push_back(b);
-        }
+        self.console.lock().unwrap().push(bytes);
     }
 }
 
@@ -425,10 +449,15 @@ pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFram
 
 /// Last `max` bytes of the DATA console as lossy UTF-8.
 pub fn read_console(shared: &Arc<Shared>, max: usize) -> String {
-    let c = shared.console.lock().unwrap();
-    let n = c.len().min(max);
-    let bytes: Vec<u8> = c.iter().skip(c.len() - n).copied().collect();
-    String::from_utf8_lossy(&bytes).into_owned()
+    String::from_utf8_lossy(&shared.console.lock().unwrap().tail(max)).into_owned()
+}
+
+fn console_since(shared: &Arc<Shared>, seq: u64) -> (Vec<u8>, u64) {
+    shared.console.lock().unwrap().since(seq)
+}
+
+fn console_seq(shared: &Arc<Shared>) -> u64 {
+    shared.console.lock().unwrap().total
 }
 
 // ---- snippet store (backend-owned, persisted, mirrored to UI + MCP) --------
@@ -463,6 +492,46 @@ fn persist(shared: &Arc<Shared>) {
 /// Full snippet list (for the app UI — includes text).
 pub fn snippets_all(shared: &Arc<Shared>) -> Vec<SnippetRec> {
     shared.snippets.lock().unwrap().clone()
+}
+
+/// Literal strings typed by SECRET snippets (bare lines + STRING args, escapes
+/// applied) — the bytes that could echo back. Used to redact MCP console reads.
+pub fn secret_literals(shared: &Arc<Shared>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let snips = shared.snippets.lock().unwrap();
+    for s in snips.iter().filter(|s| s.secret) {
+        for raw in s.text.split('\n') {
+            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            let trimmed = line.trim_start();
+            let mut w = trimmed.splitn(2, char::is_whitespace);
+            let mut kw = w.next().unwrap_or("").to_ascii_uppercase();
+            let mut rest = w.next().unwrap_or("");
+            if kw == "Q" || kw == "QUACK" {
+                let mut w2 = rest.trim_start().splitn(2, char::is_whitespace);
+                kw = w2.next().unwrap_or("").to_ascii_uppercase();
+                rest = w2.next().unwrap_or("");
+            }
+            let literal: Option<String> = match kw.as_str() {
+                "STRING" | "STRINGLN" => Some(rest.to_string()),
+                // command-only lines carry no typed secret
+                "REM" | "#" | "ENTER" | "CR" | "LF" | "CRLF" | "TAB" | "ESC" | "SPACE" | "DELAY"
+                | "WAIT" | "CTRL" | "CONTROL" | "HEX" | "REPEAT" | "TIMEOUT" | "WAITFOR"
+                | "EXPECT" | "RUN" | "SMARTWAIT" | "DO" | "WAITOK" | "IF" | "ELSE" | "END"
+                | "ENDIF" | "FI" => None,
+                _ => Some(line.trim().to_string()), // bare line
+            };
+            if let Some(lit) = literal {
+                let processed =
+                    String::from_utf8_lossy(&process_escapes(&lit)).trim().to_string();
+                if processed.len() >= 3 {
+                    out.push(processed);
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b.len().cmp(&a.len())); // redact longest matches first
+    out.dedup();
+    out
 }
 
 /// Name-only list (for the LLM — never includes text).
@@ -518,26 +587,38 @@ pub fn run_snippet(shared: &Arc<Shared>, name: &str) -> Result<(), String> {
     }
 }
 
-// ---- snippet macro player (Bash Bunny / DuckyScript style) ------------------
+// ---- snippet macro player (Bash Bunny / DuckyScript + expect) ---------------
 //
 // One command per line (case-insensitive). A line with no command keyword is
-// typed literally followed by Enter. Commands:
-//   REM <text>            comment
-//   STRING <text>         type text (no newline)
-//   STRINGLN <text>       type text + Enter
-//   ENTER / CR / LF / CRLF
-//   TAB / ESC / SPACE
-//   DELAY <ms> / WAIT <ms>
+// typed verbatim + Enter. Commands:
+//   REM / #               comment
+//   STRING / STRINGLN     type text (no newline / + Enter)
+//   ENTER CR LF CRLF TAB ESC SPACE
+//   DELAY/WAIT <ms>       pause
 //   CTRL <c>              control byte (CTRL c -> 0x03)
 //   HEX <hh hh ..>        raw bytes
-//   REPEAT <n>            repeat the previous line n times
-//   Q <cmd> / QUACK <cmd> Bash Bunny prefix (e.g. Q STRING foo, Q ENTER)
-// Text (STRING and bare lines) honors escapes: \n \r \t \0 \xHH \\.
+//   REPEAT <n>            repeat previous line n times
+//   Q/QUACK <cmd>         Bash Bunny prefix
+//   TIMEOUT <ms>          wait timeout for WAITFOR/RUN (default 10000)
+//   WAITFOR/EXPECT <text> block until text appears on the console
+//   RUN/SMARTWAIT/DO <cmd>  run cmd, wait for completion, capture exit code
+//   WAITOK                abort if the last RUN's exit code != 0
+//   IF OK | IF FAIL ... [ELSE] ... END   branch on last RUN exit code
+// Text honors escapes: \n \r \t \0 \xHH \\.
+
+const MAX_WAIT_MS: u64 = 600_000;
 
 #[derive(Clone)]
 enum Step {
     Bytes(Vec<u8>),
     Delay(u64),
+    Timeout(u64),
+    WaitFor(String),
+    Run(String),
+    WaitOk,
+    If(bool), // true = IF OK, false = IF FAIL
+    Else,
+    End,
 }
 
 fn process_escapes(s: &str) -> Vec<u8> {
@@ -618,23 +699,36 @@ fn parse_snippet(s: &str) -> Vec<Step> {
             kw = w2.next().unwrap_or("").to_ascii_uppercase();
             rest = w2.next().unwrap_or("");
         }
-        if kw == "REPEAT" {
-            let n = rest.trim().parse::<usize>().unwrap_or(0);
-            for _ in 0..n {
-                steps.extend(prev.iter().cloned());
+        match kw.as_str() {
+            "REPEAT" => {
+                let n = rest.trim().parse::<usize>().unwrap_or(0);
+                for _ in 0..n {
+                    steps.extend(prev.iter().cloned());
+                }
+                continue;
             }
-            continue;
+            "REM" | "#" => continue,
+            _ => {}
         }
-        let line_steps = match parse_command(&kw, rest) {
-            Some(v) => v,
-            // bare line: type it verbatim (preserving indentation) + Enter
-            None => {
-                let mut b = process_escapes(line);
-                b.push(b'\r');
-                vec![Step::Bytes(b)]
-            }
+        let line_steps: Vec<Step> = match kw.as_str() {
+            "TIMEOUT" => vec![Step::Timeout(rest.trim().parse().unwrap_or(10_000))],
+            "WAITFOR" | "EXPECT" => vec![Step::WaitFor(rest.to_string())],
+            "RUN" | "SMARTWAIT" | "DO" => vec![Step::Run(rest.to_string())],
+            "WAITOK" => vec![Step::WaitOk],
+            "IF" => vec![Step::If(!rest.trim().eq_ignore_ascii_case("fail"))],
+            "ELSE" => vec![Step::Else],
+            "END" | "ENDIF" | "FI" => vec![Step::End],
+            _ => match parse_command(&kw, rest) {
+                Some(v) => v,
+                // bare line: type it verbatim (preserving indentation) + Enter
+                None => {
+                    let mut b = process_escapes(line);
+                    b.push(b'\r');
+                    vec![Step::Bytes(b)]
+                }
+            },
         };
-        if kw != "REM" && kw != "#" {
+        if !matches!(kw.as_str(), "IF" | "ELSE" | "END" | "ENDIF" | "FI") {
             prev = line_steps.clone();
         }
         steps.extend(line_steps);
@@ -642,18 +736,138 @@ fn parse_snippet(s: &str) -> Vec<Step> {
     steps
 }
 
-/// Execute a snippet macro against the DATA port (background thread; honors delays).
+fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn next_marker_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static C: AtomicU64 = AtomicU64::new(1);
+    C.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Block until `needle` appears in console output after `*since`. Returns false on timeout.
+fn wait_for(shared: &Arc<Shared>, needle: &[u8], timeout_ms: u64, since: &mut u64) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(MAX_WAIT_MS));
+    let mut acc: Vec<u8> = Vec::new();
+    while Instant::now() < deadline {
+        let (new, total) = console_since(shared, *since);
+        *since = total;
+        if !new.is_empty() {
+            acc.extend_from_slice(&new);
+            if find_sub(&acc, needle).is_some() {
+                return true;
+            }
+            if acc.len() > 16384 {
+                acc.drain(0..acc.len() - 16384);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+/// Run a command and capture its exit code via a split-marker sentinel.
+fn run_command(shared: &Arc<Shared>, cmd: &str, timeout_ms: u64, since: &mut u64) -> Option<i64> {
+    let id = next_marker_id();
+    let needle = format!("sutra_{id}_:");
+    // The "" splits the literal so the echoed command line never matches `needle`.
+    let line = format!("{cmd}; echo \"ttlb\"\"uddy_{id}_:$?\"\r");
+    let _ = data_write(shared, line.as_bytes());
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(MAX_WAIT_MS));
+    let nb = needle.as_bytes();
+    let mut acc: Vec<u8> = Vec::new();
+    while Instant::now() < deadline {
+        let (new, total) = console_since(shared, *since);
+        *since = total;
+        if !new.is_empty() {
+            acc.extend_from_slice(&new);
+            if let Some(pos) = find_sub(&acc, nb) {
+                let after = &acc[pos + nb.len()..];
+                if let Some(nl) = after.iter().position(|&b| b == b'\n' || b == b'\r') {
+                    let num = String::from_utf8_lossy(&after[..nl]);
+                    return Some(num.trim().parse::<i64>().unwrap_or(-1));
+                }
+            }
+            if acc.len() > 16384 {
+                acc.drain(0..acc.len() - 16384);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None // timeout
+}
+
+struct IfFrame {
+    active: bool,
+    taken: bool,
+    parent: bool,
+}
+
+fn run_steps(shared: &Arc<Shared>, steps: &[Step]) {
+    let mut stack: Vec<IfFrame> = Vec::new();
+    let active = |st: &[IfFrame]| st.last().map_or(true, |f| f.active);
+    let mut last_exit: Option<i64> = None;
+    let mut timeout: u64 = 10_000;
+    let mut since: u64 = console_seq(shared);
+
+    for step in steps {
+        // control flow is processed regardless of the active state (to track nesting)
+        match step {
+            Step::If(want_ok) => {
+                let parent = active(&stack);
+                let cond = (last_exit == Some(0)) == *want_ok;
+                let a = parent && cond;
+                stack.push(IfFrame { active: a, taken: a, parent });
+                continue;
+            }
+            Step::Else => {
+                if let Some(f) = stack.last_mut() {
+                    f.active = f.parent && !f.taken;
+                    f.taken = true;
+                }
+                continue;
+            }
+            Step::End => {
+                stack.pop();
+                continue;
+            }
+            _ => {}
+        }
+        if !active(&stack) {
+            continue;
+        }
+        match step {
+            Step::Bytes(b) => {
+                let _ = data_write(shared, b);
+            }
+            Step::Delay(ms) => std::thread::sleep(Duration::from_millis((*ms).min(MAX_WAIT_MS))),
+            Step::Timeout(ms) => timeout = *ms,
+            Step::WaitFor(t) => {
+                if !wait_for(shared, t.as_bytes(), timeout, &mut since) {
+                    break; // timeout aborts the macro
+                }
+            }
+            Step::Run(cmd) => {
+                last_exit = run_command(shared, cmd, timeout, &mut since);
+            }
+            Step::WaitOk => {
+                if last_exit != Some(0) {
+                    break;
+                }
+            }
+            Step::If(_) | Step::Else | Step::End => {}
+        }
+    }
+}
+
+/// Execute a snippet macro against the DATA port on a background thread.
 pub fn play(shared: &Arc<Shared>, text: &str) {
     let steps = parse_snippet(text);
     let shared = shared.clone();
-    std::thread::spawn(move || {
-        for step in steps {
-            match step {
-                Step::Bytes(b) => {
-                    let _ = data_write(&shared, &b);
-                }
-                Step::Delay(ms) => std::thread::sleep(Duration::from_millis(ms.min(60_000))),
-            }
-        }
-    });
+    std::thread::spawn(move || run_steps(&shared, &steps));
 }

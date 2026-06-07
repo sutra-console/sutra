@@ -43,9 +43,12 @@ snippet's text**. So you can keep a `prod-login` snippet holding a password: the
 model applies it (`run_snippet "prod-login"`) without ever seeing the secret.
 Snippets the LLM creates appear live in the app.
 
-> Indirect-exposure caveat: if the target **echoes** what a snippet sends (some
-> consoles echo typed passwords), a later `read_console` could reveal it. Mark
-> sensitive snippets `secret` and be mindful of echoing targets.
+> Echo redaction: if the target **echoes** what a secret snippet typed (some
+> consoles echo passwords), `read_console` would otherwise leak it. So the typed
+> literals of every `secret` snippet (bare lines + `STRING` args, ≥3 chars) are
+> replaced with `<REDACTED>` in `read_console` output. The human terminal is
+> unaffected. Caveat: a transformed echo (e.g. masked `****`) won't match, and a
+> very short secret over-redacts — over-redaction is the safe failure mode.
 
 ### Snippet macros (Bash Bunny / DuckyScript style)
 
@@ -74,6 +77,31 @@ CTRL c
 | `REM <text>` | comment |
 | `Q <cmd>` / `QUACK <cmd>` | Bash Bunny prefix (`Q STRING foo`, `Q ENTER`) |
 | *(bare line)* | typed verbatim + Enter |
+
+**Expect / control flow** (synchronise to console output):
+
+| Command | Effect |
+|---------|--------|
+| `WAITFOR <text>` / `EXPECT <text>` | block until `<text>` appears on the console |
+| `RUN <cmd>` (`SMARTWAIT`/`DO`) | run `<cmd>`, **wait for it to finish**, capture exit code (sentinel) |
+| `WAITOK` | abort the macro if the last `RUN` exited non-zero |
+| `IF OK` / `IF FAIL` … `ELSE` … `END` | branch on the last `RUN`'s exit code |
+| `TIMEOUT <ms>` | wait timeout for `WAITFOR`/`RUN` (default 10000) |
+
+`RUN` captures `$?` by appending a split-marker `echo` (`echo "ttlb""uddy_N:$?"`) so
+the echoed command can't false-match — it needs a **POSIX shell** on the target.
+
+```
+WAITFOR login:
+admin
+WAITFOR Password:
+hunter2                 # bare line = typed + Enter (use a secret snippet for real creds)
+RUN systemctl is-active myapp
+IF FAIL
+  RUN systemctl restart myapp
+END
+WAITOK
+```
 
 `STRING` and bare lines honor `\n \r \t \0 \xHH \\` escapes.
 

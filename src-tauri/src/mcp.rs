@@ -122,13 +122,19 @@ impl TtlTools {
     }
 
     #[tool(
-        description = "Read the most recent output from the target device's serial console (the DATA port)."
+        description = "Read the most recent output from the target device's serial console (the DATA port). Secret-snippet contents that echo back are replaced with <REDACTED>."
     )]
     async fn read_console(
         &self,
         Parameters(ReadArgs { max_bytes }): Parameters<ReadArgs>,
     ) -> String {
-        serial::read_console(&self.shared, max_bytes.unwrap_or(4000) as usize)
+        let mut text = serial::read_console(&self.shared, max_bytes.unwrap_or(4000) as usize);
+        for sec in serial::secret_literals(&self.shared) {
+            if text.contains(&sec) {
+                text = text.replace(&sec, "<REDACTED>");
+            }
+        }
+        text
     }
 
     #[tool(
@@ -210,7 +216,7 @@ impl TtlTools {
     }
 
     #[tool(
-        description = "Create or update a reusable snippet (name + text). The text is a Bash Bunny / DuckyScript-style macro: ONE COMMAND PER LINE — STRING <t>, STRINGLN <t>, ENTER, DELAY <ms>, CTRL <c>, TAB, ESC, HEX <hh hh>, REPEAT <n>, REM <comment>, or Q <cmd>. A line with no keyword is typed verbatim then Enter. Re-using a name overwrites it. secret=true for sensitive content."
+        description = "Create or update a reusable snippet (name + text). The text is a Bash Bunny / DuckyScript + expect macro, ONE COMMAND PER LINE: STRING/STRINGLN <t>, ENTER, DELAY <ms>, CTRL <c>, TAB, ESC, HEX, REPEAT <n>, REM; plus WAITFOR <text> (wait until text appears), RUN <cmd> (run + wait for completion, capture exit code), WAITOK (abort if last RUN failed), IF OK|FAIL ... ELSE ... END, TIMEOUT <ms>. A bare line is typed verbatim then Enter. RUN needs a POSIX shell on the target. secret=true for sensitive content."
     )]
     async fn create_snippet(
         &self,

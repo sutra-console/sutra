@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog,
+  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,7 @@ import {
   Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Terminal, type TerminalHandle } from "@/components/Terminal";
+import { MacroHelp } from "@/components/MacroHelp";
 import {
   autodetect,
   connect as ttlConnect,
@@ -117,6 +118,7 @@ export default function App() {
   const [draftName, setDraftName] = useState("");
   const [draftText, setDraftText] = useState("");
   const [draftSecret, setDraftSecret] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
 
   // snippet drag-reorder (live projected order + ghost)
   const [dragName, setDragName] = useState<string | null>(null);
@@ -583,37 +585,57 @@ export default function App() {
 
       {/* add / edit snippet modal */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent>
+        <DialogContent className={cn(showHelp && "max-w-3xl")}>
           <DialogHeader>
-            <DialogTitle>{editOrig ? "Edit snippet" : "New snippet"}</DialogTitle>
-          </DialogHeader>
-          <Input placeholder="name" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
-          <Textarea
-            placeholder={"login\nDELAY 1000\nSTRING whoami\nENTER"}
-            value={draftText}
-            onChange={(e) => setDraftText(e.target.value)}
-            className="h-44 resize-none font-mono text-xs"
-          />
-          <p className="text-[10px] leading-tight text-muted-foreground">
-            One command per line (Ducky / Bash Bunny): <code>STRING</code>, <code>ENTER</code>,{" "}
-            <code>DELAY ms</code>, <code>CTRL c</code>, <code>HEX</code>, <code>REPEAT n</code> — or a
-            bare line = typed + Enter.
-          </p>
-          <Button variant="ghost" size="sm" className="w-fit gap-1.5" onClick={() => setDraftSecret(!draftSecret)}>
-            {draftSecret ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
-            {draftSecret ? "Secret (hidden from MCP)" : "Not secret"}
-          </Button>
-          <DialogFooter>
-            {editOrig && (
-              <Button variant="destructive" size="sm" className="mr-auto" onClick={deleteSnippet}>
-                <Trash2 /> Delete
+            <div className="flex items-center gap-2">
+              <DialogTitle>{editOrig ? "Edit snippet" : "New snippet"}</DialogTitle>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn("size-7", showHelp && "text-primary")}
+                title="Macro command reference"
+                onClick={() => setShowHelp((v) => !v)}
+              >
+                <CircleHelp />
               </Button>
-            )}
-            <DialogClose asChild>
-              <Button variant="ghost" size="sm">Cancel</Button>
-            </DialogClose>
-            <Button size="sm" onClick={saveSnippet}>{editOrig ? "Save" : "Add"}</Button>
-          </DialogFooter>
+            </div>
+          </DialogHeader>
+
+          <div className="flex gap-4">
+            <div className="flex min-w-0 flex-1 flex-col gap-3">
+              <Input placeholder="name" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
+              <Textarea
+                placeholder={"login\nDELAY 1000\nSTRING whoami\nENTER"}
+                value={draftText}
+                onChange={(e) => setDraftText(e.target.value)}
+                className="h-44 resize-none font-mono text-xs"
+              />
+              {!showHelp && (
+                <p className="text-[10px] leading-tight text-muted-foreground">
+                  One command per line. <code>STRING</code> <code>ENTER</code> <code>DELAY ms</code>{" "}
+                  <code>WAITFOR text</code> <code>RUN cmd</code> <code>IF OK…END</code> — or tap{" "}
+                  <CircleHelp className="inline size-3" /> for the full reference.
+                </p>
+              )}
+              <Button variant="ghost" size="sm" className="w-fit gap-1.5" onClick={() => setDraftSecret(!draftSecret)}>
+                {draftSecret ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
+                {draftSecret ? "Secret (hidden from MCP)" : "Not secret"}
+              </Button>
+              <DialogFooter>
+                {editOrig && (
+                  <Button variant="destructive" size="sm" className="mr-auto" onClick={deleteSnippet}>
+                    <Trash2 /> Delete
+                  </Button>
+                )}
+                <DialogClose asChild>
+                  <Button variant="ghost" size="sm">Cancel</Button>
+                </DialogClose>
+                <Button size="sm" onClick={saveSnippet}>{editOrig ? "Save" : "Add"}</Button>
+              </DialogFooter>
+            </div>
+
+            {showHelp && <MacroHelp />}
+          </div>
         </DialogContent>
       </Dialog>
 
