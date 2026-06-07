@@ -651,6 +651,8 @@ enum Step {
     If(bool), // true = IF OK, false = IF FAIL
     Else,
     End,
+    Call(String),        // $Name — run another snippet inline
+    SetOut(String, bool), // SET <name|index> <0|1> — drive an output over CMD
 }
 
 fn process_escapes(s: &str) -> Vec<u8> {
@@ -722,6 +724,13 @@ fn parse_snippet(s: &str) -> Vec<Step> {
     for raw in s.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         let trimmed = line.trim_start();
+        // $Name — call another snippet inline
+        if let Some(name) = trimmed.strip_prefix('$') {
+            let st = vec![Step::Call(name.trim().to_string())];
+            prev = st.clone();
+            steps.extend(st);
+            continue;
+        }
         let mut w = trimmed.splitn(2, char::is_whitespace);
         let mut kw = w.next().unwrap_or("").to_ascii_uppercase();
         let mut rest = w.next().unwrap_or("");
@@ -747,6 +756,14 @@ fn parse_snippet(s: &str) -> Vec<Step> {
             "WAITFOR" | "EXPECT" => vec![Step::WaitFor(rest.to_string())],
             "RUN" | "SMARTWAIT" | "DO" => vec![Step::Run(rest.to_string())],
             "WAITOK" => vec![Step::WaitOk],
+            "SET" => match rest.trim().rsplit_once(char::is_whitespace) {
+                // last token = value, everything before = target name (allows spaces)
+                Some((name, val)) => vec![Step::SetOut(
+                    name.trim().to_string(),
+                    matches!(val.trim().to_ascii_lowercase().as_str(), "1" | "on" | "true" | "high"),
+                )],
+                None => vec![],
+            },
             "IF" => vec![Step::If(!rest.trim().eq_ignore_ascii_case("fail"))],
             "ELSE" => vec![Step::Else],
             "END" | "ENDIF" | "FI" => vec![Step::End],
@@ -840,12 +857,46 @@ struct IfFrame {
     parent: bool,
 }
 
-fn run_steps(shared: &Arc<Shared>, steps: &[Step]) {
+const MAX_CALL_DEPTH: u32 = 8;
+
+fn snippet_text_by_name(shared: &Arc<Shared>, name: &str) -> Option<String> {
+    let want = name.trim().to_lowercase();
+    shared
+        .snippets
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.name.trim().to_lowercase() == want)
+        .map(|s| s.text.clone())
+}
+
+/// index -> name for the device's outputs (via INFO + OUTPUT_DESC).
+fn load_output_names(shared: &Arc<Shared>) -> Vec<String> {
+    use crate::protocol::msg;
+    let n = match send_cmd(shared, msg::INFO, vec![]) {
+        Ok(r) => *r.body.get(4).unwrap_or(&0), // n_outputs
+        Err(_) => return Vec::new(),
+    };
+    (0..n)
+        .map(|i| match send_cmd(shared, msg::OUTPUT_DESC, vec![i]) {
+            Ok(r) => String::from_utf8_lossy(r.body.get(3..).unwrap_or(&[])).into_owned(),
+            Err(_) => String::new(),
+        })
+        .collect()
+}
+
+fn norm_name(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect()
+}
+
+fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
     let mut stack: Vec<IfFrame> = Vec::new();
     let active = |st: &[IfFrame]| st.last().map_or(true, |f| f.active);
     let mut last_exit: Option<i64> = None;
     let mut timeout: u64 = 10_000;
     let mut since: u64 = console_seq(shared);
+    let mut out_names: Vec<String> = Vec::new();
+    let mut out_loaded = false;
 
     for step in steps {
         // control flow is processed regardless of the active state (to track nesting)
@@ -892,6 +943,29 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step]) {
                     break;
                 }
             }
+            Step::Call(name) => {
+                if depth < MAX_CALL_DEPTH {
+                    if let Some(text) = snippet_text_by_name(shared, name) {
+                        let sub = parse_snippet(&text);
+                        run_steps(shared, &sub, depth + 1);
+                    }
+                }
+            }
+            Step::SetOut(target, val) => {
+                let idx = if let Ok(i) = target.parse::<u8>() {
+                    Some(i)
+                } else {
+                    if !out_loaded {
+                        out_names = load_output_names(shared);
+                        out_loaded = true;
+                    }
+                    let want = norm_name(target);
+                    out_names.iter().position(|nm| norm_name(nm) == want).map(|p| p as u8)
+                };
+                if let Some(i) = idx {
+                    let _ = send_cmd(shared, crate::protocol::msg::OUTPUT_SET, vec![i, *val as u8]);
+                }
+            }
             Step::If(_) | Step::Else | Step::End => {}
         }
     }
@@ -901,5 +975,5 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step]) {
 pub fn play(shared: &Arc<Shared>, text: &str) {
     let steps = parse_snippet(text);
     let shared = shared.clone();
-    std::thread::spawn(move || run_steps(&shared, &steps));
+    std::thread::spawn(move || run_steps(&shared, &steps, 0));
 }

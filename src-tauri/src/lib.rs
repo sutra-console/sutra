@@ -115,14 +115,30 @@ fn snippets_set(state: tauri::State<AppState>, snippets: Vec<SnippetRec>) {
 }
 
 #[tauri::command]
-fn mcp_start(state: tauri::State<AppState>, port: u16) -> McpStatus {
+fn mcp_start(state: tauri::State<AppState>, port: u16) -> Result<McpStatus, String> {
     let mut guard = state.mcp.lock().unwrap();
     if let Some((ct, _)) = guard.take() {
-        ct.cancel();
+        ct.cancel(); // tell the old server to release the socket
     }
-    let ct = mcp::start(state.shared.clone(), port);
-    *guard = Some((ct, port));
-    McpStatus { running: true, url: Some(format!("http://127.0.0.1:{port}/mcp")) }
+    // Graceful shutdown of the old server is async, so the port may take a moment
+    // to free — retry the bind briefly before giving up.
+    let mut last = String::new();
+    for _ in 0..15 {
+        match mcp::start(state.shared.clone(), port) {
+            Ok(ct) => {
+                *guard = Some((ct, port));
+                return Ok(McpStatus {
+                    running: true,
+                    url: Some(format!("http://127.0.0.1:{port}/mcp")),
+                });
+            }
+            Err(e) => {
+                last = e;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    Err(format!("could not bind 127.0.0.1:{port} — {last}"))
 }
 
 #[tauri::command]

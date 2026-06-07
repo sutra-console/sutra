@@ -216,7 +216,7 @@ impl TtlTools {
     }
 
     #[tool(
-        description = "Create or update a reusable snippet (name + text). The text is a Bash Bunny / DuckyScript + expect macro, ONE COMMAND PER LINE: STRING/STRINGLN <t>, ENTER, DELAY <ms>, CTRL <c>, TAB, ESC, HEX, REPEAT <n>, REM; plus WAITFOR <text> (wait until text appears), RUN <cmd> (run + wait for completion, capture exit code), WAITOK (abort if last RUN failed), IF OK|FAIL ... ELSE ... END, TIMEOUT <ms>. A bare line is typed verbatim then Enter. RUN needs a POSIX shell on the target. secret=true for sensitive content."
+        description = "Create or update a reusable snippet (name + text). The text is a Bash Bunny / DuckyScript + expect macro, ONE COMMAND PER LINE: STRING/STRINGLN <t>, ENTER, DELAY <ms>, CTRL <c>, TAB, ESC, HEX, REPEAT <n>, REM; plus WAITFOR <text> (wait until text appears), RUN <cmd> (run + wait for completion, capture exit code), WAITOK (abort if last RUN failed), IF OK|FAIL ... ELSE ... END, TIMEOUT <ms>, SET <output> <0|1> (drive a relay/LED by name), $Name (run another snippet inline). A bare line is typed verbatim then Enter. RUN needs a POSIX shell on the target. secret=true for sensitive content."
     )]
     async fn create_snippet(
         &self,
@@ -374,8 +374,15 @@ impl ServerHandler for TtlTools {
     }
 }
 
-/// Start the MCP server on 127.0.0.1:<port>/mcp. Returns a token; cancel it to stop.
-pub fn start(shared: Arc<Shared>, port: u16) -> CancellationToken {
+/// Start the MCP server on 127.0.0.1:<port>/mcp. Binds synchronously so the
+/// caller learns immediately if the port is taken; returns a token to cancel it.
+pub fn start(shared: Arc<Shared>, port: u16) -> Result<CancellationToken, String> {
+    // std bind is synchronous -> the real error (e.g. EADDRINUSE) surfaces now,
+    // not in a detached task. Hand the socket to tokio for serving.
+    let std_listener =
+        std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+
     let ct = CancellationToken::new();
     let serve_ct = ct.clone();
     let service = StreamableHttpService::new(
@@ -385,14 +392,16 @@ pub fn start(shared: Arc<Shared>, port: u16) -> CancellationToken {
     );
     let router = axum::Router::new().nest_service("/mcp", service);
     tauri::async_runtime::spawn(async move {
-        match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-            Ok(listener) => {
-                let _ = axum::serve(listener, router)
-                    .with_graceful_shutdown(async move { serve_ct.cancelled().await })
-                    .await;
+        let listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("sutra MCP listener: {e}");
+                return;
             }
-            Err(e) => eprintln!("sutra MCP bind failed: {e}"),
-        }
+        };
+        let _ = axum::serve(listener, router)
+            .with_graceful_shutdown(async move { serve_ct.cancelled().await })
+            .await;
     });
-    ct
+    Ok(ct)
 }

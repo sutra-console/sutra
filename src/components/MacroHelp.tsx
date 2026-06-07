@@ -32,6 +32,13 @@ const SECTIONS: { title: string; items: [string, string][] }[] = [
     ],
   },
   {
+    title: "Outputs & calls",
+    items: [
+      ["SET <name> <0|1>", "drive an output by name (SET Relay1 0)"],
+      ["$Name", "run another snippet inline ($Login)"],
+    ],
+  },
+  {
     title: "Misc",
     items: [
       ["REM <t> · # <t>", "comment"],

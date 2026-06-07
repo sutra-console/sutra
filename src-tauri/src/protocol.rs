@@ -13,9 +13,11 @@ pub const RESP_FLAG: u8 = 0x80;
 pub mod msg {
     pub const PING: u8 = 0x01;
     pub const INFO: u8 = 0x02;
+    pub const DEVICE_NAME: u8 = 0x03;
     pub const OUTPUT_SET: u8 = 0x10;
     pub const OUTPUT_GET: u8 = 0x11;
     pub const OUTPUT_TOGGLE: u8 = 0x12;
+    pub const OUTPUT_DESC: u8 = 0x13;
     pub const SNIP_LIST: u8 = 0x20;
     pub const SNIP_META: u8 = 0x21;
     pub const SNIP_READ: u8 = 0x22;

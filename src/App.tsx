@@ -115,6 +115,7 @@ export default function App() {
   const [ports, setPorts] = useState<PortDesc[]>([]);
   const [connected, setConnected] = useState(false);
   const [linkOnline, setLinkOnline] = useState(true); // target present on the wire
+  const [dataPort, setDataPort] = useState<string | null>(null); // connected DATA port name
   const [hasCmd, setHasCmd] = useState(false);
   const [selectedPort, setSelectedPort] = useState("auto");
   const [profiles, setProfiles] = useState<Profile[]>(loadProfiles);
@@ -210,7 +211,7 @@ export default function App() {
     mcpStatus().then((st) => {
       setMcp(st);
       if (!st.running && settings.autoStartMcp) {
-        mcpStart(settings.mcpPort).then(setMcp).catch(() => {});
+        mcpStart(settings.mcpPort).then(setMcp).catch((e) => setStatus(`mcp: ${e}`));
       }
     }).catch(() => {});
 
@@ -241,6 +242,7 @@ export default function App() {
       setBaud(cs.params.baud);
       setParity(cs.params.parity as any);
       setStopBits(cs.params.stop_bits);
+      setDataPort(cs.data_port ?? null);
       setSelectedPort(cs.has_cmd ? "auto" : cs.data_port ?? "auto");
       setStatus(
         cs.has_cmd
@@ -269,11 +271,13 @@ export default function App() {
         const { data, cmd } = await autodetect();
         await ttlConnect(data, cmd);
         setHasCmd(true);
+        setDataPort(data);
         setStatus(`connected — DATA ${data} · CMD ${cmd}`);
         loadDevice();
       } else {
         await ttlConnect(selectedPort, null);
         setHasCmd(false);
+        setDataPort(selectedPort);
         clearDevice();
         setStatus(`serial — ${selectedPort} @ ${baud}`);
       }
@@ -291,6 +295,7 @@ export default function App() {
     await ttlDisconnect().catch(() => {});
     setConnected(false);
     setLinkOnline(true);
+    setDataPort(null);
     clearDevice();
     setStatus("disconnected");
   }
@@ -453,6 +458,72 @@ export default function App() {
           </PopoverContent>
         </Popover>
 
+        {/* DATA serial settings popover */}
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" className="gap-1.5">
+              <Settings2 className="size-3.5" />
+              {connected ? `${dataPort ?? selectedPort} @ ${baud}` : "serial"}
+              {connected && (
+                <span className={cn("size-1.5 rounded-full", linkOnline ? "bg-success" : "bg-destructive")} />
+              )}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-72">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Settings2 className="size-4" />
+                <span className="text-sm font-semibold">Serial — DATA</span>
+                {dataPort && (
+                  <Badge variant="secondary" className="ml-auto">{dataPort}</Badge>
+                )}
+              </div>
+              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                Baud
+                <Select value={String(baud)} onValueChange={(v) => setBaud(+v)}>
+                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {BAUDS.map((b) => (<SelectItem key={b} value={String(b)}>{b}</SelectItem>))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                Parity
+                <Select value={parity} onValueChange={(v) => setParity(v as any)} disabled={parityLocked}>
+                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">none</SelectItem>
+                    <SelectItem value="odd">odd</SelectItem>
+                    <SelectItem value="even">even</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                Stop bits
+                <Select value={String(stopBits)} onValueChange={(v) => setStopBits(+v)} disabled={stopLocked}>
+                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1</SelectItem>
+                    <SelectItem value="2">2</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button size="sm" variant="secondary" disabled={!connected} onClick={applySerial}>
+                Apply &amp; reconnect DATA
+              </Button>
+              <p className="text-[10px] leading-tight text-muted-foreground">
+                {!connected
+                  ? "Applied on connect. On a sutra only baud reaches the UART (8N1); on a generic adapter all settings apply."
+                  : hasCmd
+                    ? caps & CAP.PARITY
+                      ? "Baud + parity reach the UART; stop bits fixed at 1."
+                      : "sutra is 8N1 — only baud reaches the wire (build firmware with PARITY_SUPPORT for parity)."
+                    : "Applied to the serial adapter (real baud/parity/stop)."}
+              </p>
+            </div>
+          </PopoverContent>
+        </Popover>
+
         <span className="ml-1 truncate text-xs text-muted-foreground">{status}</span>
 
         <div className="ml-auto flex items-center gap-2">
@@ -558,58 +629,6 @@ export default function App() {
         </Card>
 
         <div className="flex w-80 shrink-0 flex-col gap-3 overflow-y-auto">
-          {/* serial settings */}
-          <Card>
-            <CardHeader className="flex-row items-center gap-2 py-3">
-              <Settings2 className="size-4" />
-              <CardTitle>Serial — DATA</CardTitle>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                Baud
-                <Select value={String(baud)} onValueChange={(v) => setBaud(+v)}>
-                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {BAUDS.map((b) => (<SelectItem key={b} value={String(b)}>{b}</SelectItem>))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                Parity
-                <Select value={parity} onValueChange={(v) => setParity(v as any)} disabled={parityLocked}>
-                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">none</SelectItem>
-                    <SelectItem value="odd">odd</SelectItem>
-                    <SelectItem value="even">even</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                Stop bits
-                <Select value={String(stopBits)} onValueChange={(v) => setStopBits(+v)} disabled={stopLocked}>
-                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="1">1</SelectItem>
-                    <SelectItem value="2">2</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <Button size="sm" variant="secondary" disabled={!connected} onClick={applySerial}>
-                Apply &amp; reconnect DATA
-              </Button>
-              <p className="text-[10px] leading-tight text-muted-foreground">
-                {!connected
-                  ? "Applied on connect. On a sutra only baud reaches the UART (8N1); on a generic adapter all settings apply."
-                  : hasCmd
-                    ? caps & CAP.PARITY
-                      ? "Baud + parity reach the UART; stop bits fixed at 1."
-                      : "sutra is 8N1 — only baud reaches the wire (build firmware with PARITY_SUPPORT for parity)."
-                    : "Applied to the serial adapter (real baud/parity/stop)."}
-              </p>
-            </CardContent>
-          </Card>
-
           {/* controls — self-described by the device */}
           <Card>
             <CardHeader className="flex-row items-center py-3">
