@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp,
+  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -25,7 +25,11 @@ import {
   listPorts,
   connState,
   outputToggle,
-  outputGet,
+  outputsBitmap,
+  getInfo,
+  getDeviceName,
+  getControls,
+  CAP,
   runText,
   setDataParams,
   saveSnippetToDevice,
@@ -38,11 +42,11 @@ import {
   mcpStop,
   mcpStatus,
   setMcpTools,
-  OUTPUT,
   type PortDesc,
   type McpStatus,
   type McpToolFlags,
   type SnippetRec,
+  type ControlDesc,
 } from "@/lib/ttl";
 
 const BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1500000];
@@ -81,6 +85,22 @@ const loadSettings = (): Settings => {
   }
 };
 
+// A saved connection. `transport` is the abstraction point for TCP/BLE later;
+// `target` is whatever that transport needs (serial port name, host:port, BLE id).
+interface Profile {
+  id: string;
+  name: string;
+  transport: "serial" | "tcp" | "ble";
+  target: string;
+}
+const loadProfiles = (): Profile[] => {
+  try {
+    return JSON.parse(localStorage.getItem("sutra.profiles") || "[]");
+  } catch {
+    return [];
+  }
+};
+
 const MCP_TOOL_OPTIONS: { key: keyof McpToolFlags; label: string; hint: string }[] = [
   { key: "consoleRead", label: "Read console", hint: "read_console" },
   { key: "consoleWrite", label: "Write console", hint: "write_console" },
@@ -95,8 +115,33 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [hasCmd, setHasCmd] = useState(false);
   const [selectedPort, setSelectedPort] = useState("auto");
+  const [profiles, setProfiles] = useState<Profile[]>(loadProfiles);
+  const [profilesOpen, setProfilesOpen] = useState(false);
+  const [profileName, setProfileName] = useState("");
+
+  function saveProfiles(list: Profile[]) {
+    setProfiles(list);
+    localStorage.setItem("sutra.profiles", JSON.stringify(list));
+  }
+  function addProfile() {
+    const target = selectedPort;
+    const name = profileName.trim() || (target === "auto" ? "sutra (auto)" : target);
+    const p: Profile = { id: crypto.randomUUID(), name, transport: "serial", target };
+    saveProfiles([...profiles.filter((x) => x.name !== name), p]);
+    setProfileName("");
+  }
+  function deleteProfile(id: string) {
+    saveProfiles(profiles.filter((p) => p.id !== id));
+  }
+  function loadProfile(p: Profile) {
+    setSelectedPort(p.target); // (serial only for now; transport routing comes with TCP/BLE)
+    setProfilesOpen(false);
+  }
   const [status, setStatus] = useState("disconnected");
-  const [outputs, setOutputs] = useState({ r1: false, r2: false, led: false });
+  const [outBitmap, setOutBitmap] = useState(0); // device output states (bit i = control i)
+  const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
+  const [deviceName, setDeviceName] = useState("");
+  const [caps, setCaps] = useState(0); // device capability bits (buddy only)
   const [snippets, setSnippets] = useState<SnippetRec[]>([]);
 
   const [baud, setBaud] = useState(115200);
@@ -195,7 +240,7 @@ export default function App() {
           ? `sutra — DATA ${cs.data_port} · CMD ${cs.cmd_port}`
           : `serial — ${cs.data_port} @ ${cs.params.baud}`
       );
-      if (cs.has_cmd) refreshOutputs();
+      if (cs.has_cmd) loadDevice();
     } catch {
       /* not connected / backend unavailable */
     }
@@ -217,11 +262,12 @@ export default function App() {
         const { data, cmd } = await autodetect();
         await ttlConnect(data, cmd);
         setHasCmd(true);
-        setStatus(`sutra — DATA ${data} · CMD ${cmd}`);
-        refreshOutputs();
+        setStatus(`connected — DATA ${data} · CMD ${cmd}`);
+        loadDevice();
       } else {
         await ttlConnect(selectedPort, null);
         setHasCmd(false);
+        clearDevice();
         setStatus(`serial — ${selectedPort} @ ${baud}`);
       }
       setConnected(true);
@@ -236,6 +282,7 @@ export default function App() {
   async function handleDisconnect() {
     await ttlDisconnect().catch(() => {});
     setConnected(false);
+    clearDevice();
     setStatus("disconnected");
   }
 
@@ -250,16 +297,30 @@ export default function App() {
 
   async function refreshOutputs() {
     try {
-      setOutputs(await outputGet());
+      setOutBitmap(await outputsBitmap());
     } catch {
       /* device may not implement OUTPUT_GET */
     }
   }
 
+  async function loadDevice() {
+    getDeviceName().then(setDeviceName).catch(() => {});
+    getControls().then(setControls).catch(() => {});
+    getInfo().then((i) => setCaps(i.caps)).catch(() => {});
+    refreshOutputs();
+  }
+
+  function clearDevice() {
+    setDeviceName("");
+    setControls([]);
+    setOutBitmap(0);
+    setCaps(0);
+  }
+
   async function toggle(index: number) {
     try {
-      await outputToggle(index);
-      refreshOutputs();
+      const r = await outputToggle(index); // resp body: [status, bitmap]
+      setOutBitmap(r.body[1] ?? 0);
     } catch (e) {
       setStatus(`cmd failed: ${e}`);
     }
@@ -325,6 +386,10 @@ export default function App() {
   }
 
   const ttlPorts = ports.filter((p) => p.is_sutra);
+  // On a sutra the firmware UART is 8N1 (1 stop, no parity) unless built with
+  // PARITY_SUPPORT. On a generic adapter parity/stop are real hardware settings.
+  const parityLocked = connected && hasCmd && !(caps & CAP.PARITY);
+  const stopLocked = connected && hasCmd;
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
@@ -334,6 +399,7 @@ export default function App() {
         <Badge variant={connected ? "success" : "secondary"} className="ml-1">
           {connected ? "online" : "offline"}
         </Badge>
+        {deviceName && <span className="text-xs text-muted-foreground">· {deviceName}</span>}
 
         {/* MCP settings popover */}
         <Popover>
@@ -394,6 +460,59 @@ export default function App() {
               ))}
             </SelectContent>
           </Select>
+          <Popover open={profilesOpen} onOpenChange={setProfilesOpen}>
+            <PopoverTrigger asChild>
+              <Button variant="outline" size="sm" title="Saved connections">
+                <Bookmark />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-72" align="end">
+              <div className="flex flex-col gap-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Saved connections
+                </div>
+                {profiles.length === 0 && (
+                  <p className="text-[11px] text-muted-foreground">None yet — save one below.</p>
+                )}
+                {profiles.map((p) => (
+                  <div key={p.id} className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 min-w-0 flex-1 justify-start gap-2"
+                      onClick={() => loadProfile(p)}
+                      title={p.target}
+                    >
+                      <span className="truncate">{p.name}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+                        {p.transport}
+                      </span>
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7 text-muted-foreground"
+                      title="Delete"
+                      onClick={() => deleteProfile(p.id)}
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                ))}
+                <div className="flex items-center gap-1 border-t pt-2">
+                  <Input
+                    className="h-8"
+                    placeholder={selectedPort === "auto" ? "name (auto buddy)" : `name (${selectedPort})`}
+                    value={profileName}
+                    onChange={(e) => setProfileName(e.target.value)}
+                  />
+                  <Button size="sm" onClick={addProfile} title="Save current selection">
+                    <Plus />
+                  </Button>
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
           <Button variant="outline" size="sm" onClick={refreshPorts} title="Rescan ports">
             <Usb />
           </Button>
@@ -445,7 +564,7 @@ export default function App() {
               </div>
               <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                 Parity
-                <Select value={parity} onValueChange={(v) => setParity(v as any)}>
+                <Select value={parity} onValueChange={(v) => setParity(v as any)} disabled={parityLocked}>
                   <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="none">none</SelectItem>
@@ -456,7 +575,7 @@ export default function App() {
               </div>
               <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                 Stop bits
-                <Select value={String(stopBits)} onValueChange={(v) => setStopBits(+v)}>
+                <Select value={String(stopBits)} onValueChange={(v) => setStopBits(+v)} disabled={stopLocked}>
                   <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="1">1</SelectItem>
@@ -468,42 +587,52 @@ export default function App() {
                 Apply &amp; reconnect DATA
               </Button>
               <p className="text-[10px] leading-tight text-muted-foreground">
-                Baud reaches the TTL UART (auto-followed). Parity/stop set the host CDC only until
-                firmware UART support lands.
+                {!connected
+                  ? "Applied on connect. On a sutra only baud reaches the UART (8N1); on a generic adapter all settings apply."
+                  : hasCmd
+                    ? caps & CAP.PARITY
+                      ? "Baud + parity reach the UART; stop bits fixed at 1."
+                      : "sutra is 8N1 — only baud reaches the wire (build firmware with PARITY_SUPPORT for parity)."
+                    : "Applied to the serial adapter (real baud/parity/stop)."}
               </p>
             </CardContent>
           </Card>
 
-          {/* outputs (sutra only) */}
+          {/* controls — self-described by the device */}
           <Card>
             <CardHeader className="flex-row items-center py-3">
-              <CardTitle>Outputs — CMD</CardTitle>
-              <Badge variant="secondary" className="ml-auto">sutra</Badge>
+              <CardTitle>Controls</CardTitle>
+              {deviceName && (
+                <Badge variant="secondary" className="ml-auto max-w-[10rem] truncate">
+                  {deviceName}
+                </Badge>
+              )}
             </CardHeader>
             <CardContent className="flex flex-col gap-2">
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { label: "Relay 1", on: outputs.r1, idx: OUTPUT.R1, hint: "P3.4" },
-                  { label: "Relay 2", on: outputs.r2, idx: OUTPUT.R2, hint: "P3.3" },
-                  { label: "Aux LED", on: outputs.led, idx: OUTPUT.LED, hint: "P1.4 ext" },
-                ].map((o) => (
-                  <Button
-                    key={o.idx}
-                    variant={o.on ? "default" : "outline"}
-                    size="sm"
-                    disabled={!connected || !hasCmd}
-                    onClick={() => toggle(o.idx)}
-                    title={o.hint}
-                    className="flex h-auto flex-col py-2"
-                  >
-                    <span className={o.on ? "" : "text-muted-foreground"}>{o.label}</span>
-                    <span className="text-[10px]">{o.on ? "ON" : "OFF"}</span>
-                  </Button>
-                ))}
-              </div>
-              {connected && !hasCmd && (
+              {controls.length > 0 ? (
+                <div className="grid grid-cols-3 gap-2">
+                  {controls.map((c) => {
+                    const on = !!(outBitmap & (1 << c.index));
+                    return (
+                      <Button
+                        key={c.index}
+                        variant={on ? "default" : "outline"}
+                        size="sm"
+                        disabled={!connected || !hasCmd}
+                        onClick={() => toggle(c.index)}
+                        className="flex h-auto flex-col py-2"
+                      >
+                        <span className={on ? "" : "text-muted-foreground"}>{c.name}</span>
+                        <span className="text-[10px]">{on ? "ON" : "OFF"}</span>
+                      </Button>
+                    );
+                  })}
+                </div>
+              ) : (
                 <p className="text-[10px] text-muted-foreground">
-                  Generic serial port — connect a sutra for relay/LED control.
+                  {connected && !hasCmd
+                    ? "Generic serial port — no device controls."
+                    : "No controls reported."}
                 </p>
               )}
             </CardContent>

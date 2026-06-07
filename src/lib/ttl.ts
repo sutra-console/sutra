@@ -5,9 +5,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export const MSG = {
   PING: 0x01,
   INFO: 0x02,
+  DEVICE_NAME: 0x03,
   OUTPUT_SET: 0x10,
   OUTPUT_GET: 0x11,
   OUTPUT_TOGGLE: 0x12,
+  OUTPUT_DESC: 0x13,
   SNIP_LIST: 0x20,
   SNIP_META: 0x21,
   SNIP_READ: 0x22,
@@ -71,6 +73,58 @@ export async function outputGet(): Promise<{ r1: boolean; r2: boolean; led: bool
 }
 
 export const snipRun = (id: number) => sendCmd(MSG.SNIP_RUN, [id]);
+
+// device capability bits (INFO body[3])
+export const CAP = { EEPROM: 0x01, OLED: 0x02, SPI: 0x04, PARITY: 0x08 } as const;
+
+export interface DeviceInfo {
+  fwVer: number;
+  caps: number;
+  nOutputs: number;
+  eepromKb: number;
+  protoVer: number;
+}
+export async function getInfo(): Promise<DeviceInfo> {
+  const b = (await sendCmd(MSG.INFO)).body; // [status, fwlo, fwhi, caps, nout, eekb, ver]
+  return {
+    fwVer: ((b[2] ?? 0) << 8) | (b[1] ?? 0),
+    caps: b[3] ?? 0,
+    nOutputs: b[4] ?? 0,
+    eepromKb: b[5] ?? 0,
+    protoVer: b[6] ?? 0,
+  };
+}
+
+// ---- self-describe ----
+const dec = new TextDecoder();
+export interface ControlDesc {
+  index: number;
+  type: number; // 0 = relay, 1 = led
+  name: string;
+}
+export async function getDeviceName(): Promise<string> {
+  const b = (await sendCmd(MSG.DEVICE_NAME)).body; // [status, name...]
+  return dec.decode(Uint8Array.from(b.slice(1)));
+}
+export async function getOutputDesc(index: number): Promise<ControlDesc> {
+  const b = (await sendCmd(MSG.OUTPUT_DESC, [index])).body; // [status, index, type, name...]
+  return { index: b[1] ?? index, type: b[2] ?? 0, name: dec.decode(Uint8Array.from(b.slice(3))) };
+}
+/** Enumerate the device's named controls (count from INFO, label/type per index). */
+export async function getControls(): Promise<ControlDesc[]> {
+  const info = await getInfo();
+  const out: ControlDesc[] = [];
+  for (let i = 0; i < info.nOutputs; i++) {
+    try {
+      out.push(await getOutputDesc(i));
+    } catch {
+      /* skip a control that fails to describe */
+    }
+  }
+  return out;
+}
+/** Output states as a bitmap (bit i = control index i). */
+export const outputsBitmap = async () => (await sendCmd(MSG.OUTPUT_GET)).body[1] ?? 0;
 
 const enc = new TextEncoder();
 /** Send a snippet's text straight out the DATA/UART now (raw, no macros). */
