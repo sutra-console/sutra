@@ -1,15 +1,38 @@
-import { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { init, Terminal as Ghostty, FitAddon } from "ghostty-web";
-import { onData, dataWrite } from "@/lib/ttl";
+import { onData, dataWrite, readConsole } from "@/lib/ttl";
 
 // WASM init is shared across all Terminal instances; run it once.
 let initialized: Promise<void> | null = null;
 const ensureInit = () => (initialized ??= init());
 
-export function Terminal({ connected }: { connected: boolean }) {
+export interface TerminalHandle {
+  focus: () => void;
+}
+
+export const Terminal = forwardRef<TerminalHandle, { connected: boolean }>(function Terminal(
+  { connected },
+  ref
+) {
   const hostRef = useRef<HTMLDivElement>(null);
   // ghostty-web's Terminal is xterm.js-API-compatible
   const termRef = useRef<any>(null);
+  const prevConnected = useRef(connected);
+
+  useImperativeHandle(ref, () => ({
+    focus: () => {
+      try {
+        termRef.current?.focus?.();
+      } catch {
+        /* ignore */
+      }
+      // fallback: focus the input element ghostty/xterm mounts in the host
+      const el = hostRef.current?.querySelector(
+        "textarea, canvas, [tabindex]"
+      ) as HTMLElement | null;
+      el?.focus?.();
+    },
+  }), []);
 
   useEffect(() => {
     let disposed = false;
@@ -44,7 +67,13 @@ export function Terminal({ connected }: { connected: boolean }) {
         dataWrite(Array.from(new TextEncoder().encode(d))).catch(() => {});
       });
 
-      term.write("\x1b[90msutra — connect a port to begin.\x1b[0m\r\n");
+      // seed with whatever the backend already buffered (survives webview reloads)
+      readConsole(32000)
+        .then((hist) => {
+          if (hist) term.write(hist);
+          else term.write("\x1b[90msutra — connect a port to begin.\x1b[0m\r\n");
+        })
+        .catch(() => {});
     });
 
     return () => {
@@ -58,8 +87,13 @@ export function Terminal({ connected }: { connected: boolean }) {
   }, []);
 
   useEffect(() => {
-    if (connected) termRef.current?.write("\x1b[32m● connected\x1b[0m\r\n");
+    const t = termRef.current;
+    if (t) {
+      if (connected && !prevConnected.current) t.write("\r\n\x1b[32m● connected\x1b[0m\r\n");
+      else if (!connected && prevConnected.current) t.write("\r\n\x1b[31m● disconnected\x1b[0m\r\n");
+    }
+    prevConnected.current = connected;
   }, [connected]);
 
   return <div ref={hostRef} className="h-full w-full" />;
-}
+});

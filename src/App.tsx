@@ -1,21 +1,28 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen,
+  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Terminal } from "@/components/Terminal";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import {
+  Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import { Terminal, type TerminalHandle } from "@/components/Terminal";
 import {
   autodetect,
   connect as ttlConnect,
   disconnect as ttlDisconnect,
   listPorts,
+  connState,
   outputToggle,
   outputGet,
   runText,
@@ -24,6 +31,7 @@ import {
   snippetsGet,
   snippetUpsert,
   snippetDelete,
+  snippetsSet,
   onSnippets,
   mcpStart,
   mcpStop,
@@ -36,6 +44,26 @@ import {
 
 const BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1500000];
 
+interface Settings {
+  autoStartMcp: boolean;
+  mcpPort: number;
+  rememberLastPort: boolean;
+  lastPort: string;
+}
+const DEFAULT_SETTINGS: Settings = {
+  autoStartMcp: false,
+  mcpPort: 8765,
+  rememberLastPort: true,
+  lastPort: "auto",
+};
+const loadSettings = (): Settings => {
+  try {
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem("sutra.settings") || "{}") };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+};
+
 export default function App() {
   const [ports, setPorts] = useState<PortDesc[]>([]);
   const [connected, setConnected] = useState(false);
@@ -44,26 +72,104 @@ export default function App() {
   const [status, setStatus] = useState("disconnected");
   const [outputs, setOutputs] = useState({ r1: false, r2: false, led: false });
   const [snippets, setSnippets] = useState<SnippetRec[]>([]);
-  const [newName, setNewName] = useState("");
-  const [newText, setNewText] = useState("");
 
   const [baud, setBaud] = useState(115200);
   const [parity, setParity] = useState<"none" | "odd" | "even">("none");
   const [stopBits, setStopBits] = useState(1);
 
   const [mcp, setMcp] = useState<McpStatus>({ running: false, url: null });
-  const [mcpPort, setMcpPort] = useState(8765);
+  const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const setSetting = <K extends keyof Settings>(k: K, v: Settings[K]) =>
+    setSettings((s) => ({ ...s, [k]: v }));
+
+  const terminalRef = useRef<TerminalHandle>(null);
+  const focusTerm = () => setTimeout(() => terminalRef.current?.focus(), 0);
+
+  // snippet add/edit dialog
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editOrig, setEditOrig] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [draftText, setDraftText] = useState("");
+  const [draftSecret, setDraftSecret] = useState(false);
+
+  // snippet drag-reorder (live projected order + ghost)
+  const [dragName, setDragName] = useState<string | null>(null);
+  const [overName, setOverName] = useState<string | null>(null);
+  const [insertAfter, setInsertAfter] = useState(false);
+
+  // the list as it would look if dropped right now
+  const orderedSnippets = (() => {
+    if (!dragName || !overName || dragName === overName) return snippets;
+    const moved = snippets.find((s) => s.name === dragName);
+    if (!moved) return snippets;
+    const arr = snippets.filter((s) => s.name !== dragName);
+    let idx = arr.findIndex((s) => s.name === overName);
+    if (idx === -1) return snippets;
+    if (insertAfter) idx += 1;
+    arr.splice(idx, 0, moved);
+    return arr;
+  })();
+
+  function commitReorder() {
+    if (dragName && overName && dragName !== overName) {
+      setSnippets(orderedSnippets); // optimistic; backend confirms via ttl://snippets
+      snippetsSet(orderedSnippets).catch(() => {});
+    }
+    setDragName(null);
+    setOverName(null);
+  }
 
   useEffect(() => {
     document.documentElement.classList.add("dark");
     refreshPorts();
     snippetsGet().then(setSnippets).catch(() => {});
-    mcpStatus().then(setMcp).catch(() => {});
+    syncConnState(); // adopt a connection the backend already holds (after a reload)
+
+    // remember-last-port: preselect it in the dropdown
+    if (settings.rememberLastPort && settings.lastPort) setSelectedPort(settings.lastPort);
+
+    // MCP: reflect current status, then auto-start on launch if enabled
+    mcpStatus().then((st) => {
+      setMcp(st);
+      if (!st.running && settings.autoStartMcp) {
+        mcpStart(settings.mcpPort).then(setMcp).catch(() => {});
+      }
+    }).catch(() => {});
+
     const un = onSnippets(setSnippets);
     return () => {
       un.then((f) => f()).catch(() => {});
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // persist settings
+  useEffect(() => {
+    localStorage.setItem("sutra.settings", JSON.stringify(settings));
+  }, [settings]);
+
+  /// Re-sync the UI to the backend's actual connection (it survives webview reloads).
+  async function syncConnState() {
+    try {
+      const cs = await connState();
+      if (!cs.connected) return;
+      setConnected(true);
+      setHasCmd(cs.has_cmd);
+      setBaud(cs.params.baud);
+      setParity(cs.params.parity as any);
+      setStopBits(cs.params.stop_bits);
+      setSelectedPort(cs.has_cmd ? "auto" : cs.data_port ?? "auto");
+      setStatus(
+        cs.has_cmd
+          ? `sutra — DATA ${cs.data_port} · CMD ${cs.cmd_port}`
+          : `serial — ${cs.data_port} @ ${cs.params.baud}`
+      );
+      if (cs.has_cmd) refreshOutputs();
+    } catch {
+      /* not connected / backend unavailable */
+    }
+  }
 
   async function refreshPorts() {
     try {
@@ -89,6 +195,8 @@ export default function App() {
         setStatus(`serial — ${selectedPort} @ ${baud}`);
       }
       setConnected(true);
+      if (settings.rememberLastPort) setSetting("lastPort", selectedPort);
+      focusTerm();
     } catch (e) {
       setStatus(`connect failed: ${e}`);
       setConnected(false);
@@ -125,20 +233,39 @@ export default function App() {
     } catch (e) {
       setStatus(`cmd failed: ${e}`);
     }
+    focusTerm();
   }
 
-  async function addSnippet() {
-    if (!newName.trim() || !newText) return;
-    await snippetUpsert(newName.trim(), newText, false);
-    setNewName("");
-    setNewText("");
+  function openAdd() {
+    setEditOrig(null);
+    setDraftName("");
+    setDraftText("");
+    setDraftSecret(false);
+    setDialogOpen(true);
+  }
+  function openEdit(s: SnippetRec) {
+    setEditOrig(s.name);
+    setDraftName(s.name);
+    setDraftText(s.text);
+    setDraftSecret(s.secret);
+    setDialogOpen(true);
+  }
+  async function saveSnippet() {
+    const name = draftName.trim();
+    if (!name || !draftText) return;
+    if (editOrig && editOrig !== name) await snippetDelete(editOrig);
+    await snippetUpsert(name, draftText, draftSecret);
+    setDialogOpen(false);
+  }
+  async function deleteSnippet() {
+    if (editOrig) await snippetDelete(editOrig);
+    setDialogOpen(false);
   }
 
   async function saveToDevice(s: SnippetRec, index: number) {
     setStatus(`saving "${s.name}" to buddi…`);
     try {
-      const res = await saveSnippetToDevice(index, s.name, s.text);
-      setStatus(`"${s.name}" → ${res}`);
+      setStatus(`"${s.name}" → ${await saveSnippetToDevice(index, s.name, s.text)}`);
     } catch (e) {
       setStatus(`save failed: ${e}`);
     }
@@ -146,7 +273,7 @@ export default function App() {
 
   async function toggleMcp() {
     try {
-      setMcp(mcp.running ? await mcpStop() : await mcpStart(mcpPort));
+      setMcp(mcp.running ? await mcpStop() : await mcpStart(settings.mcpPort));
     } catch (e) {
       setStatus(`mcp failed: ${e}`);
     }
@@ -162,12 +289,49 @@ export default function App() {
         <Badge variant={connected ? "success" : "secondary"} className="ml-1">
           {connected ? "online" : "offline"}
         </Badge>
-        {mcp.running && (
-          <Badge variant="outline" className="gap-1">
-            <Bot className="size-3" /> MCP
-          </Badge>
-        )}
-        <span className="ml-2 truncate text-xs text-muted-foreground">{status}</span>
+
+        {/* MCP settings popover */}
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" className="gap-1.5">
+              <Bot className="size-3.5" /> MCP
+              <span className={cn("size-1.5 rounded-full", mcp.running ? "bg-success" : "bg-muted-foreground/40")} />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-80">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Bot className="size-4" />
+                <span className="text-sm font-semibold">MCP server</span>
+                <Badge variant={mcp.running ? "success" : "secondary"} className="ml-auto">
+                  {mcp.running ? "on" : "off"}
+                </Badge>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">Port</span>
+                <Input type="number" className="h-8 w-24" value={settings.mcpPort} disabled={mcp.running} onChange={(e) => setSetting("mcpPort", +e.target.value)} />
+                <Button size="sm" className="ml-auto" variant={mcp.running ? "destructive" : "default"} onClick={toggleMcp}>
+                  {mcp.running ? "Stop" : "Start"}
+                </Button>
+              </div>
+              {mcp.url && (
+                <div className="flex items-center gap-1 rounded-md border px-2 py-1">
+                  <code className="min-w-0 flex-1 truncate text-[11px]">{mcp.url}</code>
+                  <Button variant="ghost" size="icon" className="size-6" title="Copy URL" onClick={() => mcp.url && navigator.clipboard.writeText(mcp.url)}>
+                    <Copy />
+                  </Button>
+                </div>
+              )}
+              <p className="text-[10px] leading-tight text-muted-foreground">
+                Lets an LLM read the console, run/author snippets &amp; control outputs. Snippet
+                contents (secrets) are never exposed — it can only run them by name.
+              </p>
+            </div>
+          </PopoverContent>
+        </Popover>
+
+        <span className="ml-1 truncate text-xs text-muted-foreground">{status}</span>
+
         <div className="ml-auto flex items-center gap-2">
           <Select value={selectedPort} onValueChange={setSelectedPort} disabled={connected}>
             <SelectTrigger className="w-44" title="Port to connect">
@@ -193,14 +357,13 @@ export default function App() {
               <PlugZap /> Disconnect
             </Button>
           ) : (
-            <Button
-              size="sm"
-              onClick={handleConnect}
-              disabled={selectedPort === "auto" && ttlPorts.length < 2}
-            >
+            <Button size="sm" onClick={handleConnect} disabled={selectedPort === "auto" && ttlPorts.length < 2}>
               <Plug /> Connect
             </Button>
           )}
+          <Button variant="ghost" size="icon" className="size-8" title="Settings" onClick={() => setSettingsOpen(true)}>
+            <Cog />
+          </Button>
         </div>
       </header>
 
@@ -214,7 +377,7 @@ export default function App() {
             </span>
           </CardHeader>
           <CardContent className="min-h-0 flex-1 bg-[#0a0a0b] p-2">
-            <Terminal connected={connected} />
+            <Terminal ref={terminalRef} connected={connected} />
           </CardContent>
         </Card>
 
@@ -231,9 +394,7 @@ export default function App() {
                 <Select value={String(baud)} onValueChange={(v) => setBaud(+v)}>
                   <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {BAUDS.map((b) => (
-                      <SelectItem key={b} value={String(b)}>{b}</SelectItem>
-                    ))}
+                    {BAUDS.map((b) => (<SelectItem key={b} value={String(b)}>{b}</SelectItem>))}
                   </SelectContent>
                 </Select>
               </div>
@@ -303,106 +464,180 @@ export default function App() {
             </CardContent>
           </Card>
 
-          {/* MCP */}
-          <Card>
-            <CardHeader className="flex-row items-center gap-2 py-3">
-              <Bot className="size-4" />
-              <CardTitle>MCP server</CardTitle>
-              <Badge variant={mcp.running ? "success" : "secondary"} className="ml-auto">
-                {mcp.running ? "on" : "off"}
-              </Badge>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-2">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">Port</span>
-                <Input
-                  type="number"
-                  className="h-8 w-24"
-                  value={mcpPort}
-                  disabled={mcp.running}
-                  onChange={(e) => setMcpPort(+e.target.value)}
-                />
-                <Button size="sm" className="ml-auto" variant={mcp.running ? "destructive" : "default"} onClick={toggleMcp}>
-                  {mcp.running ? "Stop" : "Start"}
-                </Button>
-              </div>
-              {mcp.url && (
-                <div className="flex items-center gap-1 rounded-md border px-2 py-1">
-                  <code className="min-w-0 flex-1 truncate text-[11px]">{mcp.url}</code>
-                  <Button variant="ghost" size="icon" className="size-6" title="Copy URL" onClick={() => mcp.url && navigator.clipboard.writeText(mcp.url)}>
-                    <Copy />
-                  </Button>
-                </div>
-              )}
-              <p className="text-[10px] leading-tight text-muted-foreground">
-                Lets an LLM read the console, run/author snippets &amp; control outputs. Snippet
-                contents (secrets) are never exposed — it can only run them by name.
-              </p>
-            </CardContent>
-          </Card>
-
           {/* snippets */}
           <Card className="flex min-h-0 flex-1 flex-col">
-            <CardHeader className="py-3">
+            <CardHeader className="flex-row items-center py-3">
               <CardTitle>Snippets</CardTitle>
+              <Button size="icon" variant="ghost" className="ml-auto size-7" title="New snippet" onClick={openAdd}>
+                <Plus />
+              </Button>
             </CardHeader>
-            <CardContent className="flex min-h-0 flex-1 flex-col gap-2">
-              <div className="flex flex-col gap-1.5 overflow-y-auto">
-                {snippets.length === 0 && (
-                  <p className="py-4 text-center text-xs text-muted-foreground">No snippets yet.</p>
-                )}
-                {snippets.map((s, i) => (
-                  <div key={s.name} className="flex items-center gap-1 rounded-md border px-2 py-1.5">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1">
-                        {s.secret && <Lock className="size-3 shrink-0 text-muted-foreground" />}
-                        <span className="truncate text-sm">{s.name}</span>
-                      </div>
-                      <div className="truncate font-mono text-[11px] text-muted-foreground">
-                        {s.secret ? "••••••••" : s.text}
-                      </div>
+            <CardContent className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
+              {snippets.length === 0 && (
+                <p className="py-4 text-center text-xs text-muted-foreground">No snippets yet.</p>
+              )}
+              {orderedSnippets.map((s, i) => (
+                <div
+                  key={s.name}
+                  draggable
+                  onDragStart={(e) => {
+                    setDragName(s.name);
+                    setOverName(s.name);
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", s.name); // Firefox needs payload
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    if (s.name === dragName) return;
+                    const r = e.currentTarget.getBoundingClientRect();
+                    const after = e.clientY > r.top + r.height / 2;
+                    if (overName !== s.name || insertAfter !== after) {
+                      setOverName(s.name);
+                      setInsertAfter(after);
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    commitReorder();
+                  }}
+                  onDragEnd={() => {
+                    setDragName(null);
+                    setOverName(null);
+                  }}
+                  className={cn(
+                    "flex items-center gap-1 rounded-md border px-2 py-1.5",
+                    dragName === s.name && "border-dashed border-primary/60 opacity-40"
+                  )}
+                >
+                  <GripVertical className="size-3.5 shrink-0 cursor-grab text-muted-foreground/50" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1">
+                      {s.secret && <Lock className="size-3 shrink-0 text-muted-foreground" />}
+                      <span className="truncate text-sm">{s.name}</span>
                     </div>
-                    <Button variant="ghost" size="icon" className="size-7" disabled={!connected} title="Run on target" onClick={() => runText(s.text)}>
-                      <Play />
-                    </Button>
-                    <Button variant="ghost" size="icon" className="size-7" disabled={!connected} title="Save to buddi (EEPROM)" onClick={() => saveToDevice(s, i)}>
+                    <div className="truncate font-mono text-[11px] text-muted-foreground">
+                      {s.secret ? "••••••••" : s.text.replace(/\n/g, " ⏎ ")}
+                    </div>
+                  </div>
+                  <Button variant="ghost" size="icon" className="size-7" disabled={!connected} title="Run on target" onClick={() => { runText(s.text); focusTerm(); }}>
+                    <Play />
+                  </Button>
+                  {hasCmd && (
+                    <Button variant="ghost" size="icon" className="size-7" title="Save to buddi (EEPROM)" onClick={() => saveToDevice(s, i)}>
                       <Database />
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-7 text-muted-foreground"
-                      title={s.secret ? "Unmark secret" : "Mark secret"}
-                      onClick={() => snippetUpsert(s.name, s.text, !s.secret)}
-                    >
-                      {s.secret ? <Lock /> : <LockOpen />}
-                    </Button>
-                    <Button variant="ghost" size="icon" className="size-7 text-muted-foreground" title="Delete" onClick={() => snippetDelete(s.name)}>
-                      <Trash2 />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-auto flex flex-col gap-1.5 border-t pt-2">
-                <Input placeholder="name" value={newName} onChange={(e) => setNewName(e.target.value)} />
-                <Textarea
-                  placeholder={"text / macro…\nlogin\n+++DELAY 1000+++\nwhoami +++ENTER+++"}
-                  value={newText}
-                  onChange={(e) => setNewText(e.target.value)}
-                  className="h-20 resize-none font-mono text-xs"
-                />
-                <p className="text-[10px] leading-tight text-muted-foreground">
-                  Newlines send as typed. Directives: <code>+++DELAY 3000+++</code>,{" "}
-                  <code>+++ENTER+++</code>, <code>+++CTRL C+++</code>, <code>+++HEX 1b 5b 41+++</code>.
-                </p>
-                <Button size="sm" variant="secondary" onClick={addSnippet}>
-                  <Plus /> Add snippet
-                </Button>
-              </div>
+                  )}
+                  <Button variant="ghost" size="icon" className="size-7 text-muted-foreground" title="Edit" onClick={() => openEdit(s)}>
+                    <Pencil />
+                  </Button>
+                </div>
+              ))}
             </CardContent>
           </Card>
         </div>
       </div>
+
+      {/* add / edit snippet modal */}
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{editOrig ? "Edit snippet" : "New snippet"}</DialogTitle>
+          </DialogHeader>
+          <Input placeholder="name" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
+          <Textarea
+            placeholder={"login\nDELAY 1000\nSTRING whoami\nENTER"}
+            value={draftText}
+            onChange={(e) => setDraftText(e.target.value)}
+            className="h-44 resize-none font-mono text-xs"
+          />
+          <p className="text-[10px] leading-tight text-muted-foreground">
+            One command per line (Ducky / Bash Bunny): <code>STRING</code>, <code>ENTER</code>,{" "}
+            <code>DELAY ms</code>, <code>CTRL c</code>, <code>HEX</code>, <code>REPEAT n</code> — or a
+            bare line = typed + Enter.
+          </p>
+          <Button variant="ghost" size="sm" className="w-fit gap-1.5" onClick={() => setDraftSecret(!draftSecret)}>
+            {draftSecret ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
+            {draftSecret ? "Secret (hidden from MCP)" : "Not secret"}
+          </Button>
+          <DialogFooter>
+            {editOrig && (
+              <Button variant="destructive" size="sm" className="mr-auto" onClick={deleteSnippet}>
+                <Trash2 /> Delete
+              </Button>
+            )}
+            <DialogClose asChild>
+              <Button variant="ghost" size="sm">Cancel</Button>
+            </DialogClose>
+            <Button size="sm" onClick={saveSnippet}>{editOrig ? "Save" : "Add"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* settings modal */}
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Settings</DialogTitle>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-4 py-1">
+            <div className="flex flex-col gap-2">
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                MCP server
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm">Auto-start on launch</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Start the MCP server automatically when the app opens.
+                  </div>
+                </div>
+                <Switch
+                  checked={settings.autoStartMcp}
+                  onCheckedChange={(v) => setSetting("autoStartMcp", v)}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm">Port</div>
+                <Input
+                  type="number"
+                  className="h-8 w-24"
+                  value={settings.mcpPort}
+                  onChange={(e) => setSetting("mcpPort", +e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 border-t pt-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Connection
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm">Remember last port</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Preselect the last connected port on launch.
+                  </div>
+                </div>
+                <Switch
+                  checked={settings.rememberLastPort}
+                  onCheckedChange={(v) => setSetting("rememberLastPort", v)}
+                />
+              </div>
+              <div className="text-[11px] text-muted-foreground">
+                Last used: <code>{settings.lastPort}</code>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button size="sm">Done</Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

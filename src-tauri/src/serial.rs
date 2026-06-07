@@ -462,14 +462,23 @@ pub fn run_snippet(shared: &Arc<Shared>, name: &str) -> Result<(), String> {
     }
 }
 
-// ---- snippet macro player ---------------------------------------------------
+// ---- snippet macro player (Bash Bunny / DuckyScript style) ------------------
 //
-// A snippet is literal text plus inline directives delimited by `+++`:
-//   hello +++DELAY 500+++ world +++ENTER+++
-// Directives (case-insensitive): DELAY/WAIT <ms>, ENTER, CR, LF, CRLF, TAB,
-// ESC, SPACE, CTRL <c>, STRING <text>, HEX <hh hh ..>.
-// Literal text honors escapes: \n \r \t \0 \xHH \\.
+// One command per line (case-insensitive). A line with no command keyword is
+// typed literally followed by Enter. Commands:
+//   REM <text>            comment
+//   STRING <text>         type text (no newline)
+//   STRINGLN <text>       type text + Enter
+//   ENTER / CR / LF / CRLF
+//   TAB / ESC / SPACE
+//   DELAY <ms> / WAIT <ms>
+//   CTRL <c>              control byte (CTRL c -> 0x03)
+//   HEX <hh hh ..>        raw bytes
+//   REPEAT <n>            repeat the previous line n times
+//   Q <cmd> / QUACK <cmd> Bash Bunny prefix (e.g. Q STRING foo, Q ENTER)
+// Text (STRING and bare lines) honors escapes: \n \r \t \0 \xHH \\.
 
+#[derive(Clone)]
 enum Step {
     Bytes(Vec<u8>),
     Delay(u64),
@@ -507,41 +516,72 @@ fn process_escapes(s: &str) -> Vec<u8> {
     out
 }
 
-fn parse_directive(d: &str) -> Option<Step> {
-    let mut it = d.splitn(2, char::is_whitespace);
-    let kw = it.next().unwrap_or("").to_ascii_uppercase();
-    let arg = it.next().unwrap_or("").trim();
-    match kw.as_str() {
-        "DELAY" | "WAIT" => arg.parse::<u64>().ok().map(Step::Delay),
-        "ENTER" | "CR" => Some(Step::Bytes(vec![b'\r'])),
-        "LF" => Some(Step::Bytes(vec![b'\n'])),
-        "CRLF" => Some(Step::Bytes(vec![b'\r', b'\n'])),
-        "TAB" => Some(Step::Bytes(vec![b'\t'])),
-        "ESC" => Some(Step::Bytes(vec![0x1b])),
-        "SPACE" => Some(Step::Bytes(vec![b' '])),
-        "CTRL" | "CONTROL" => arg
-            .chars()
-            .next()
-            .map(|c| Step::Bytes(vec![(c.to_ascii_uppercase() as u8) & 0x1f])),
-        "STRING" => Some(Step::Bytes(process_escapes(arg))),
-        "HEX" => Some(Step::Bytes(
-            arg.split_whitespace().filter_map(|h| u8::from_str_radix(h, 16).ok()).collect(),
-        )),
+/// Parse a known command keyword + its argument. None ⇒ not a command.
+fn parse_command(kw: &str, rest: &str) -> Option<Vec<Step>> {
+    let bytes = |b: Vec<u8>| Some(vec![Step::Bytes(b)]);
+    match kw {
+        "REM" | "#" => Some(vec![]),
+        "STRING" => bytes(process_escapes(rest)),
+        "STRINGLN" => {
+            let mut b = process_escapes(rest);
+            b.push(b'\r');
+            bytes(b)
+        }
+        "ENTER" | "CR" => bytes(vec![b'\r']),
+        "LF" => bytes(vec![b'\n']),
+        "CRLF" => bytes(vec![b'\r', b'\n']),
+        "TAB" => bytes(vec![b'\t']),
+        "ESC" | "ESCAPE" => bytes(vec![0x1b]),
+        "SPACE" => bytes(vec![b' ']),
+        "DELAY" | "WAIT" => Some(rest.trim().parse::<u64>().ok().map(Step::Delay).into_iter().collect()),
+        "CTRL" | "CONTROL" => Some(
+            rest.trim()
+                .chars()
+                .next()
+                .map(|c| Step::Bytes(vec![(c.to_ascii_uppercase() as u8) & 0x1f]))
+                .into_iter()
+                .collect(),
+        ),
+        "HEX" => bytes(rest.split_whitespace().filter_map(|h| u8::from_str_radix(h, 16).ok()).collect()),
         _ => None,
     }
 }
 
 fn parse_snippet(s: &str) -> Vec<Step> {
     let mut steps = Vec::new();
-    for (i, part) in s.split("+++").enumerate() {
-        if i % 2 == 0 {
-            let b = process_escapes(part);
-            if !b.is_empty() {
-                steps.push(Step::Bytes(b));
-            }
-        } else if let Some(step) = parse_directive(part.trim()) {
-            steps.push(step);
+    let mut prev: Vec<Step> = Vec::new(); // for REPEAT
+    for raw in s.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let trimmed = line.trim_start();
+        let mut w = trimmed.splitn(2, char::is_whitespace);
+        let mut kw = w.next().unwrap_or("").to_ascii_uppercase();
+        let mut rest = w.next().unwrap_or("");
+        // Bash Bunny Q/QUACK prefix: unwrap to the inner command
+        if kw == "Q" || kw == "QUACK" {
+            let mut w2 = rest.trim_start().splitn(2, char::is_whitespace);
+            kw = w2.next().unwrap_or("").to_ascii_uppercase();
+            rest = w2.next().unwrap_or("");
         }
+        if kw == "REPEAT" {
+            let n = rest.trim().parse::<usize>().unwrap_or(0);
+            for _ in 0..n {
+                steps.extend(prev.iter().cloned());
+            }
+            continue;
+        }
+        let line_steps = match parse_command(&kw, rest) {
+            Some(v) => v,
+            // bare line: type it verbatim (preserving indentation) + Enter
+            None => {
+                let mut b = process_escapes(line);
+                b.push(b'\r');
+                vec![Step::Bytes(b)]
+            }
+        };
+        if kw != "REM" && kw != "#" {
+            prev = line_steps.clone();
+        }
+        steps.extend(line_steps);
     }
     steps
 }

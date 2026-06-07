@@ -157,7 +157,7 @@ impl TtlTools {
     }
 
     #[tool(
-        description = "Create or update a reusable snippet (name + text). The text is a macro: literal text (with \\n \\t \\xHH escapes) plus inline directives delimited by +++ : +++DELAY <ms>+++, +++ENTER+++, +++TAB+++, +++ESC+++, +++CTRL <c>+++, +++HEX <hh hh>+++. Re-using a name overwrites it. secret=true for sensitive content."
+        description = "Create or update a reusable snippet (name + text). The text is a Bash Bunny / DuckyScript-style macro: ONE COMMAND PER LINE — STRING <t>, STRINGLN <t>, ENTER, DELAY <ms>, CTRL <c>, TAB, ESC, HEX <hh hh>, REPEAT <n>, REM <comment>, or Q <cmd>. A line with no keyword is typed verbatim then Enter. Re-using a name overwrites it. secret=true for sensitive content."
     )]
     async fn create_snippet(
         &self,

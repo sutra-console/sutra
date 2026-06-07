@@ -96,6 +96,8 @@ export const connState = () => invoke<ConnStateT>("conn_state");
 export const setDataParams = (params: SerialParams) =>
   invoke<void>("set_data_params", { params });
 export const reconnectData = () => invoke<void>("reconnect_data");
+/** Last `max` bytes of the DATA console buffer (lossy UTF-8). */
+export const readConsole = (max: number) => invoke<string>("read_console", { max });
 
 // ---- MCP server ----
 export interface McpStatus {
@@ -116,6 +118,9 @@ export const snippetsGet = () => invoke<SnippetRec[]>("snippets_get");
 export const snippetUpsert = (name: string, text: string, secret: boolean) =>
   invoke<void>("snippet_upsert", { name, text, secret });
 export const snippetDelete = (name: string) => invoke<void>("snippet_delete", { name });
+/** Replace the whole store (used to persist a reorder). */
+export const snippetsSet = (snippets: SnippetRec[]) =>
+  invoke<void>("snippets_set", { snippets });
 /** Fires when the store changes (incl. snippets the LLM creates via MCP). */
 export async function onSnippets(cb: (list: SnippetRec[]) => void): Promise<UnlistenFn> {
   return listen<SnippetRec[]>("ttl://snippets", (e) => cb(e.payload));

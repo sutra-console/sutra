@@ -32,28 +32,35 @@ Snippets the LLM creates appear live in the app.
 > consoles echo typed passwords), a later `read_console` could reveal it. Mark
 > sensitive snippets `secret` and be mindful of echoing targets.
 
-### Snippet macros
+### Snippet macros (Bash Bunny / DuckyScript style)
 
-Snippet text is a small (ducky-inspired) macro: **literal text** plus **inline
-directives** delimited by `+++`. Newlines send as typed.
+Snippet text is a line-based payload — **one command per line**. A line with no
+command keyword is **typed verbatim + Enter**.
 
 ```
-login
-+++DELAY 1000+++
-whoami +++ENTER+++
-+++CTRL C+++
+REM log in and look around
+admin
+DELAY 1000
+STRING whoami
+ENTER
+CTRL c
 ```
 
-| Directive | Effect |
-|-----------|--------|
-| `+++DELAY <ms>+++` / `+++WAIT <ms>+++` | pause (capped 60 s) |
-| `+++ENTER+++` / `+++CR+++` / `+++LF+++` / `+++CRLF+++` | newline variants |
-| `+++TAB+++` `+++ESC+++` `+++SPACE+++` | those keys |
-| `+++CTRL <c>+++` | control byte (e.g. `CTRL C` → 0x03) |
-| `+++HEX <hh hh ..>+++` | raw bytes |
-| `+++STRING <text>+++` | literal text (no newline) |
+| Command | Effect |
+|---------|--------|
+| `STRING <text>` | type text (no newline) |
+| `STRINGLN <text>` | type text + Enter |
+| `ENTER` / `CR` / `LF` / `CRLF` | newline variants |
+| `TAB` `ESC` `SPACE` | those keys |
+| `DELAY <ms>` / `WAIT <ms>` | pause (capped 60 s) |
+| `CTRL <c>` | control byte (`CTRL c` → 0x03) |
+| `HEX <hh hh ..>` | raw bytes |
+| `REPEAT <n>` | repeat the previous line n times |
+| `REM <text>` | comment |
+| `Q <cmd>` / `QUACK <cmd>` | Bash Bunny prefix (`Q STRING foo`, `Q ENTER`) |
+| *(bare line)* | typed verbatim + Enter |
 
-Literal text also honors `\n \r \t \0 \xHH \\` escapes.
+`STRING` and bare lines honor `\n \r \t \0 \xHH \\` escapes.
 
 ## Connect an MCP client
 
