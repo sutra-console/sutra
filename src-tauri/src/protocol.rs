@@ -18,6 +18,8 @@ pub mod msg {
     pub const OUTPUT_GET: u8 = 0x11;
     pub const OUTPUT_TOGGLE: u8 = 0x12;
     pub const OUTPUT_DESC: u8 = 0x13;
+    pub const INPUT_DESC: u8 = 0x14;
+    pub const INPUT_GET: u8 = 0x15;
     pub const SNIP_LIST: u8 = 0x20;
     pub const SNIP_META: u8 = 0x21;
     pub const SNIP_READ: u8 = 0x22;

@@ -27,6 +27,7 @@ const SECTIONS: { title: string; items: [string, string][] }[] = [
       ["WAITFOR <text>", "block until text appears on the console"],
       ["RUN <cmd>", "run cmd, wait for it to finish, capture exit code"],
       ["WAITOK", "abort the macro if the last RUN exited non-zero"],
+      ["WAITIO <in> <op> <v>", "wait until an input passes (WAITIO LDR > 124)"],
       ["IF OK · IF FAIL", "branch on the last RUN's exit code"],
       ["ELSE · END", "else branch · end the IF"],
     ],
@@ -48,10 +49,9 @@ const SECTIONS: { title: string; items: [string, string][] }[] = [
   },
 ];
 
-const EXAMPLE = `WAITFOR login:
-admin
-WAITFOR Password:
-hunter2
+const EXAMPLE = `$Login
+SET Relay1 1
+WAITIO LDR > 124
 RUN systemctl is-active app
 IF FAIL
   RUN systemctl restart app

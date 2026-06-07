@@ -651,8 +651,42 @@ enum Step {
     If(bool), // true = IF OK, false = IF FAIL
     Else,
     End,
-    Call(String),        // $Name — run another snippet inline
+    Call(String),         // $Name — run another snippet inline
     SetOut(String, bool), // SET <name|index> <0|1> — drive an output over CMD
+    WaitIo(String, Cmp, i64), // WAITIO <name> <op> <value> — wait on an input
+}
+
+#[derive(Clone, Copy)]
+enum Cmp {
+    Gt,
+    Lt,
+    Ge,
+    Le,
+    Eq,
+    Ne,
+}
+
+fn parse_cmp(s: &str) -> Option<Cmp> {
+    match s {
+        ">" => Some(Cmp::Gt),
+        "<" => Some(Cmp::Lt),
+        ">=" => Some(Cmp::Ge),
+        "<=" => Some(Cmp::Le),
+        "==" | "=" => Some(Cmp::Eq),
+        "!=" | "<>" => Some(Cmp::Ne),
+        _ => None,
+    }
+}
+
+fn cmp_ok(v: i64, cmp: Cmp, t: i64) -> bool {
+    match cmp {
+        Cmp::Gt => v > t,
+        Cmp::Lt => v < t,
+        Cmp::Ge => v >= t,
+        Cmp::Le => v <= t,
+        Cmp::Eq => v == t,
+        Cmp::Ne => v != t,
+    }
 }
 
 fn process_escapes(s: &str) -> Vec<u8> {
@@ -764,6 +798,15 @@ fn parse_snippet(s: &str) -> Vec<Step> {
                 )],
                 None => vec![],
             },
+            "WAITIO" => {
+                let p: Vec<&str> = rest.split_whitespace().collect();
+                match (p.first(), p.get(1).and_then(|o| parse_cmp(o)), p.get(2)) {
+                    (Some(name), Some(cmp), Some(val)) => {
+                        vec![Step::WaitIo(name.to_string(), cmp, val.parse::<i64>().unwrap_or(0))]
+                    }
+                    _ => vec![],
+                }
+            }
             "IF" => vec![Step::If(!rest.trim().eq_ignore_ascii_case("fail"))],
             "ELSE" => vec![Step::Else],
             "END" | "ENDIF" | "FI" => vec![Step::End],
@@ -889,6 +932,71 @@ fn norm_name(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect()
 }
 
+/// index -> name for the device's inputs (via INFO n_inputs + INPUT_DESC).
+fn load_input_names(shared: &Arc<Shared>) -> Vec<String> {
+    use crate::protocol::msg;
+    let n = match send_cmd(shared, msg::INFO, vec![]) {
+        Ok(r) => *r.body.get(7).unwrap_or(&0), // n_inputs
+        Err(_) => return Vec::new(),
+    };
+    (0..n)
+        .map(|i| match send_cmd(shared, msg::INPUT_DESC, vec![i]) {
+            Ok(r) => String::from_utf8_lossy(r.body.get(3..).unwrap_or(&[])).into_owned(),
+            Err(_) => String::new(),
+        })
+        .collect()
+}
+
+/// Read one input's current value (digital 0/1, analog 0-1023).
+fn read_input(shared: &Arc<Shared>, idx: u8) -> Option<u16> {
+    use crate::protocol::msg;
+    match send_cmd(shared, msg::INPUT_GET, vec![idx]) {
+        Ok(r) if r.body.first() == Some(&0) => {
+            let lo = *r.body.get(2).unwrap_or(&0) as u16;
+            let hi = *r.body.get(3).unwrap_or(&0) as u16;
+            Some((hi << 8) | lo)
+        }
+        _ => None,
+    }
+}
+
+/// Poll a named input until it satisfies the comparison, or timeout. Returns
+/// false on timeout or an unknown input (caller aborts the macro).
+fn wait_io(
+    shared: &Arc<Shared>,
+    name: &str,
+    cmp: Cmp,
+    threshold: i64,
+    timeout_ms: u64,
+    in_names: &mut Vec<String>,
+    in_loaded: &mut bool,
+) -> bool {
+    let idx = if let Ok(i) = name.parse::<u8>() {
+        Some(i)
+    } else {
+        if !*in_loaded {
+            *in_names = load_input_names(shared);
+            *in_loaded = true;
+        }
+        let want = norm_name(name);
+        in_names.iter().position(|n| norm_name(n) == want).map(|p| p as u8)
+    };
+    let idx = match idx {
+        Some(i) => i,
+        None => return false, // unknown input — can't satisfy
+    };
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(MAX_WAIT_MS));
+    while Instant::now() < deadline {
+        if let Some(v) = read_input(shared, idx) {
+            if cmp_ok(v as i64, cmp, threshold) {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
     let mut stack: Vec<IfFrame> = Vec::new();
     let active = |st: &[IfFrame]| st.last().map_or(true, |f| f.active);
@@ -897,6 +1005,8 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
     let mut since: u64 = console_seq(shared);
     let mut out_names: Vec<String> = Vec::new();
     let mut out_loaded = false;
+    let mut in_names: Vec<String> = Vec::new();
+    let mut in_loaded = false;
 
     for step in steps {
         // control flow is processed regardless of the active state (to track nesting)
@@ -964,6 +1074,11 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
                 };
                 if let Some(i) = idx {
                     let _ = send_cmd(shared, crate::protocol::msg::OUTPUT_SET, vec![i, *val as u8]);
+                }
+            }
+            Step::WaitIo(name, cmp, threshold) => {
+                if !wait_io(shared, name, *cmp, *threshold, timeout, &mut in_names, &mut in_loaded) {
+                    break; // timeout or unknown input aborts the macro
                 }
             }
             Step::If(_) | Step::Else | Step::End => {}

@@ -216,7 +216,7 @@ impl TtlTools {
     }
 
     #[tool(
-        description = "Create or update a reusable snippet (name + text). The text is a Bash Bunny / DuckyScript + expect macro, ONE COMMAND PER LINE: STRING/STRINGLN <t>, ENTER, DELAY <ms>, CTRL <c>, TAB, ESC, HEX, REPEAT <n>, REM; plus WAITFOR <text> (wait until text appears), RUN <cmd> (run + wait for completion, capture exit code), WAITOK (abort if last RUN failed), IF OK|FAIL ... ELSE ... END, TIMEOUT <ms>, SET <output> <0|1> (drive a relay/LED by name), $Name (run another snippet inline). A bare line is typed verbatim then Enter. RUN needs a POSIX shell on the target. secret=true for sensitive content."
+        description = "Create or update a reusable snippet (name + text). The text is a Bash Bunny / DuckyScript + expect macro, ONE COMMAND PER LINE: STRING/STRINGLN <t>, ENTER, DELAY <ms>, CTRL <c>, TAB, ESC, HEX, REPEAT <n>, REM; plus WAITFOR <text> (wait until text appears), RUN <cmd> (run + wait for completion, capture exit code), WAITOK (abort if last RUN failed), IF OK|FAIL ... ELSE ... END, TIMEOUT <ms>, SET <output> <0|1> (drive a relay/LED by name), WAITIO <input> <op> <value> (wait on a sensor, e.g. WAITIO LDR > 124), $Name (run another snippet inline). A bare line is typed verbatim then Enter. RUN needs a POSIX shell on the target. secret=true for sensitive content."
     )]
     async fn create_snippet(
         &self,

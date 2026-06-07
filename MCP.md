@@ -88,6 +88,7 @@ CTRL c
 | `IF OK` / `IF FAIL` … `ELSE` … `END` | branch on the last `RUN`'s exit code |
 | `TIMEOUT <ms>` | wait timeout for `WAITFOR`/`RUN` (default 10000) |
 | `SET <name\|index> <0\|1>` | drive an output by name (e.g. `SET Relay1 0`) — needs a CMD link |
+| `WAITIO <name> <op> <value>` | wait until an input passes (`WAITIO LDR > 124`); ops `> < >= <= == !=` |
 | `$Name` | run another snippet inline (e.g. `$Login`); nesting capped at depth 8 |
 
 `RUN` captures `$?` by appending a split-marker `echo` (`echo "ttlb""uddy_N:$?"`) so

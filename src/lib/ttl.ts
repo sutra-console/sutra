@@ -10,6 +10,8 @@ export const MSG = {
   OUTPUT_GET: 0x11,
   OUTPUT_TOGGLE: 0x12,
   OUTPUT_DESC: 0x13,
+  INPUT_DESC: 0x14,
+  INPUT_GET: 0x15,
   SNIP_LIST: 0x20,
   SNIP_META: 0x21,
   SNIP_READ: 0x22,
@@ -89,15 +91,17 @@ export interface DeviceInfo {
   nOutputs: number;
   eepromKb: number;
   protoVer: number;
+  nInputs: number;
 }
 export async function getInfo(): Promise<DeviceInfo> {
-  const b = (await sendCmd(MSG.INFO)).body; // [status, fwlo, fwhi, caps, nout, eekb, ver]
+  const b = (await sendCmd(MSG.INFO)).body; // [status, fwlo, fwhi, caps, nout, eekb, ver, nin?]
   return {
     fwVer: ((b[2] ?? 0) << 8) | (b[1] ?? 0),
     caps: b[3] ?? 0,
     nOutputs: b[4] ?? 0,
     eepromKb: b[5] ?? 0,
     protoVer: b[6] ?? 0,
+    nInputs: b[7] ?? 0,
   };
 }
 
@@ -131,6 +135,29 @@ export async function getControls(): Promise<ControlDesc[]> {
 }
 /** Output states as a bitmap (bit i = control index i). */
 export const outputsBitmap = async () => (await sendCmd(MSG.OUTPUT_GET)).body[1] ?? 0;
+
+// inputs (digital/analog) — mirror of the output self-describe
+export async function getInputDesc(index: number): Promise<ControlDesc> {
+  const b = (await sendCmd(MSG.INPUT_DESC, [index])).body; // [status, index, type, name...]
+  return { index: b[1] ?? index, type: b[2] ?? 0, name: dec.decode(Uint8Array.from(b.slice(3))) };
+}
+export async function getInputs(): Promise<ControlDesc[]> {
+  const info = await getInfo();
+  const out: ControlDesc[] = [];
+  for (let i = 0; i < info.nInputs; i++) {
+    try {
+      out.push(await getInputDesc(i));
+    } catch {
+      /* skip */
+    }
+  }
+  return out;
+}
+/** Read an input's current value (digital 0/1, analog 0-1023). */
+export async function readInput(index: number): Promise<number> {
+  const b = (await sendCmd(MSG.INPUT_GET, [index])).body; // [status, index, lo, hi]
+  return ((b[3] ?? 0) << 8) | (b[2] ?? 0);
+}
 
 const enc = new TextEncoder();
 /** Send a snippet's text straight out the DATA/UART now (raw, no macros). */
