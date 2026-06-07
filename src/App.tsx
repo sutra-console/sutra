@@ -38,6 +38,7 @@ import {
   snippetDelete,
   snippetsSet,
   onSnippets,
+  onLink,
   mcpStart,
   mcpStop,
   mcpStatus,
@@ -60,7 +61,7 @@ interface Settings {
 }
 const DEFAULT_SETTINGS: Settings = {
   autoStartMcp: false,
-  mcpPort: 8765,
+  mcpPort: 8551,
   rememberLastPort: true,
   lastPort: "auto",
   mcpTools: {
@@ -113,6 +114,7 @@ const MCP_TOOL_OPTIONS: { key: keyof McpToolFlags; label: string; hint: string }
 export default function App() {
   const [ports, setPorts] = useState<PortDesc[]>([]);
   const [connected, setConnected] = useState(false);
+  const [linkOnline, setLinkOnline] = useState(true); // target present on the wire
   const [hasCmd, setHasCmd] = useState(false);
   const [selectedPort, setSelectedPort] = useState("auto");
   const [profiles, setProfiles] = useState<Profile[]>(loadProfiles);
@@ -213,8 +215,13 @@ export default function App() {
     }).catch(() => {});
 
     const un = onSnippets(setSnippets);
+    const unLink = onLink((online) => {
+      setLinkOnline(online);
+      setStatus(online ? "target online" : "target offline — link lost, retrying…");
+    });
     return () => {
       un.then((f) => f()).catch(() => {});
+      unLink.then((f) => f()).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -271,6 +278,7 @@ export default function App() {
         setStatus(`serial — ${selectedPort} @ ${baud}`);
       }
       setConnected(true);
+      setLinkOnline(true);
       if (settings.rememberLastPort) setSetting("lastPort", selectedPort);
       focusTerm();
     } catch (e) {
@@ -282,6 +290,7 @@ export default function App() {
   async function handleDisconnect() {
     await ttlDisconnect().catch(() => {});
     setConnected(false);
+    setLinkOnline(true);
     clearDevice();
     setStatus("disconnected");
   }
@@ -396,8 +405,11 @@ export default function App() {
       <header className="flex items-center gap-3 border-b px-4 py-2.5">
         <Cpu className="size-5 text-primary" />
         <span className="font-semibold tracking-tight">sutra</span>
-        <Badge variant={connected ? "success" : "secondary"} className="ml-1">
-          {connected ? "online" : "offline"}
+        <Badge
+          variant={!connected ? "secondary" : linkOnline ? "success" : "destructive"}
+          className="ml-1"
+        >
+          {!connected ? "offline" : linkOnline ? "online" : "target offline"}
         </Badge>
         {deviceName && <span className="text-xs text-muted-foreground">· {deviceName}</span>}
 

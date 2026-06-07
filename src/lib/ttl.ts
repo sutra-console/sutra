@@ -60,6 +60,12 @@ export async function onData(cb: (bytes: Uint8Array) => void): Promise<UnlistenF
   return listen<number[]>("ttl://data", (e) => cb(Uint8Array.from(e.payload)));
 }
 
+/** Target link state: fires false when the DATA port drops (unplug / device
+ *  reset) and true when it auto-recovers. The connection stays open throughout. */
+export async function onLink(cb: (online: boolean) => void): Promise<UnlistenFn> {
+  return listen<boolean>("ttl://link", (e) => cb(e.payload));
+}
+
 // ---- high-level helpers ----
 export const ping = () => sendCmd(MSG.PING);
 export const outputSet = (index: number, on: boolean) =>

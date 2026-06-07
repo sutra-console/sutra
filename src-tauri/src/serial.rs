@@ -297,17 +297,49 @@ fn spawn_data_reader(
 ) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 256];
+        let mut online = true;
         while !stop.load(Ordering::Relaxed) {
             match port.read(&mut buf) {
                 Ok(0) => {}
                 Ok(n) => {
+                    if !online {
+                        online = true;
+                        let _ = app.emit("ttl://link", true); // target came back
+                    }
                     shared.push_console(&buf[..n]);
                     let _ = app.emit("ttl://data", buf[..n].to_vec());
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(_) => {
-                    let _ = app.emit("ttl://data-error", ());
-                    break;
+                    // The port dropped (unplug / device reset). Keep the
+                    // connection open, report the link offline, and try to reopen
+                    // so it comes back online on its own.
+                    if online {
+                        online = false;
+                        let _ = app.emit("ttl://link", false);
+                    }
+                    std::thread::sleep(Duration::from_millis(750));
+                    let name = match shared.data_name.lock().unwrap().clone() {
+                        Some(n) => n,
+                        None => break,
+                    };
+                    let params = shared.params.lock().unwrap().clone();
+                    if let Ok(mut fresh) = open_data(&name, &params) {
+                        let _ = fresh.write_data_terminal_ready(true);
+                        if let Ok(rd) = fresh.try_clone() {
+                            let mut guard = shared.conn.lock().unwrap();
+                            match guard.as_mut() {
+                                // still our connection — swap in the fresh handles
+                                Some(c) if Arc::ptr_eq(&c.stop, &stop) => {
+                                    c.data_writer = fresh;
+                                    drop(guard);
+                                    port = rd;
+                                }
+                                // replaced by a reconnect, or disconnected
+                                _ => return,
+                            }
+                        }
+                    }
                 }
             }
         }
