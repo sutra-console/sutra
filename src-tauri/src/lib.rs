@@ -5,7 +5,7 @@ mod serial;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use serial::{ConnState, PortDesc, RespFrame, SerialParams, Shared, SnippetRec};
+use serial::{ConnState, McpToolFlags, PortDesc, RespFrame, SerialParams, Shared, SnippetRec};
 use tauri::Manager;
 use tokio_util::sync::CancellationToken;
 
@@ -133,6 +133,12 @@ fn mcp_stop(state: tauri::State<AppState>) -> McpStatus {
     McpStatus { running: false, url: None }
 }
 
+/// Set which MCP tool groups are exposed to the LLM (applies on next MCP session).
+#[tauri::command]
+fn set_mcp_tools(state: tauri::State<AppState>, flags: McpToolFlags) {
+    serial::set_mcp_tools(&state.shared, flags);
+}
+
 #[tauri::command]
 fn mcp_status(state: tauri::State<AppState>) -> McpStatus {
     match &*state.mcp.lock().unwrap() {
@@ -175,7 +181,8 @@ pub fn run() {
             snippets_set,
             mcp_start,
             mcp_stop,
-            mcp_status
+            mcp_status,
+            set_mcp_tools
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -85,6 +85,31 @@ pub struct SnippetMeta {
     pub secret: bool,
 }
 
+/// Which groups of MCP tools are exposed to the LLM (set from the Settings page).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolFlags {
+    pub console_read: bool,
+    pub console_write: bool,
+    pub outputs: bool,
+    pub snippets_run: bool,
+    pub snippets_create: bool,
+    pub connection: bool,
+}
+
+impl Default for McpToolFlags {
+    fn default() -> Self {
+        McpToolFlags {
+            console_read: true,
+            console_write: true,
+            outputs: true,
+            snippets_run: true,
+            snippets_create: true,
+            connection: true,
+        }
+    }
+}
+
 struct Connection {
     cmd: Option<Box<dyn SerialPort>>, // None for a generic (non-sutra) port
     data_writer: Box<dyn SerialPort>,
@@ -101,6 +126,7 @@ pub struct Shared {
     snippets: Mutex<Vec<SnippetRec>>,
     snippets_path: Mutex<Option<std::path::PathBuf>>,
     app: Mutex<Option<AppHandle>>,
+    mcp_tools: Mutex<McpToolFlags>,
 }
 
 impl Default for Shared {
@@ -115,6 +141,7 @@ impl Default for Shared {
             snippets: Mutex::new(Vec::new()),
             snippets_path: Mutex::new(None),
             app: Mutex::new(None),
+            mcp_tools: Mutex::new(McpToolFlags::default()),
         }
     }
 }
@@ -342,6 +369,35 @@ pub fn state(shared: &Arc<Shared>) -> ConnState {
         has_cmd,
         params: shared.params.lock().unwrap().clone(),
     }
+}
+
+pub fn get_params(shared: &Arc<Shared>) -> SerialParams {
+    shared.params.lock().unwrap().clone()
+}
+
+/// Store params without reconnecting (used right before a connect).
+pub fn store_params(shared: &Arc<Shared>, params: SerialParams) {
+    *shared.params.lock().unwrap() = params;
+}
+
+pub fn get_mcp_tools(shared: &Arc<Shared>) -> McpToolFlags {
+    shared.mcp_tools.lock().unwrap().clone()
+}
+
+pub fn set_mcp_tools(shared: &Arc<Shared>, flags: McpToolFlags) {
+    *shared.mcp_tools.lock().unwrap() = flags;
+}
+
+/// connect/set_params variants the MCP server can call — they pull the AppHandle
+/// stashed in Shared (set during app setup) so the reader thread can be spawned.
+pub fn mcp_connect(shared: &Arc<Shared>, data_name: &str, cmd_name: Option<&str>) -> Result<(), String> {
+    let app = shared.app.lock().unwrap().clone().ok_or("app handle not ready")?;
+    connect(shared, app, data_name, cmd_name)
+}
+
+pub fn mcp_set_params(shared: &Arc<Shared>, params: SerialParams) -> Result<(), String> {
+    let app = shared.app.lock().unwrap().clone().ok_or("app handle not ready")?;
+    set_params(shared, app, params)
 }
 
 pub fn data_write(shared: &Arc<Shared>, bytes: &[u8]) -> Result<(), String> {

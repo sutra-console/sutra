@@ -18,6 +18,21 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `list_snippets` | — | snippet **names only** (never contents) |
 | `run_snippet` | `name` | runs a stored snippet by name (sends its text); returns `applied`, not the content |
 | `create_snippet` | `name`, `text`, `secret?` | author/overwrite a reusable snippet |
+| `list_serial_ports` | — | enumerate serial ports (sutra tagged) |
+| `connect_buddy` | — | auto-detect + connect a sutra (DATA+CMD) |
+| `connect_port` | `port`, `baud?`, `parity?`, `stop_bits?` | connect any serial port as a console |
+| `disconnect_port` | — | disconnect |
+| `set_serial` | `baud`, `parity?`, `stop_bits?` | change DATA serial params |
+| `connection_status` | — | current port/baud/buddy status |
+
+### Tool toggles (Settings ▸ MCP tools)
+
+Each group is individually switchable in the app's **Settings**. A disabled
+group is **removed from the router** — it doesn't appear in `tools/list` and any
+call is rejected, so the model can't even see it. Groups:
+`console_read`, `console_write`, `outputs`, `snippets_run`, `snippets_create`,
+`connection`. All on by default. Toggling restarts a running server so the change
+takes effect on the client's next list.
 
 ### Snippets & secrets (by design)
 

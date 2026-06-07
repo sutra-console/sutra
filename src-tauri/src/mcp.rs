@@ -62,10 +62,63 @@ pub struct CreateSnippetArgs {
     pub secret: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConnectPortArgs {
+    /// Serial port name, e.g. "COM23" or "/dev/ttyUSB0".
+    pub port: String,
+    /// Baud rate (omit to keep current).
+    pub baud: Option<u32>,
+    /// Parity: "none", "odd", or "even".
+    pub parity: Option<String>,
+    /// Stop bits: 1 or 2.
+    pub stop_bits: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetSerialArgs {
+    /// Baud rate.
+    pub baud: u32,
+    /// Parity: "none", "odd", or "even".
+    pub parity: Option<String>,
+    /// Stop bits: 1 or 2.
+    pub stop_bits: Option<u8>,
+}
+
 #[tool_router]
 impl TtlTools {
     pub fn new(shared: Arc<Shared>) -> Self {
-        Self { shared, tool_router: Self::tool_router() }
+        // Hide tool groups the user disabled in Settings (disabled routes vanish
+        // from list_all and are rejected by call).
+        let mut router = Self::tool_router();
+        let f = serial::get_mcp_tools(&shared);
+        if !f.console_read {
+            router.remove_route("read_console");
+        }
+        if !f.console_write {
+            router.remove_route("write_console");
+        }
+        if !f.outputs {
+            for n in ["get_outputs", "set_output", "device_info"] {
+                router.remove_route(n);
+            }
+        }
+        if !f.snippets_run {
+            for n in ["list_snippets", "run_snippet"] {
+                router.remove_route(n);
+            }
+        }
+        if !f.snippets_create {
+            router.remove_route("create_snippet");
+        }
+        if !f.connection {
+            for n in [
+                "list_serial_ports", "connect_buddy", "connect_port", "disconnect_port",
+                "set_serial", "connection_status",
+            ] {
+                router.remove_route(n);
+            }
+        }
+        Self { shared, tool_router: router }
     }
 
     #[tool(
@@ -167,6 +220,126 @@ impl TtlTools {
         let rec = serial::SnippetRec { name: name.clone(), text, secret: secret.unwrap_or(false) };
         let _ = tokio::task::spawn_blocking(move || serial::snippet_upsert(&shared, rec)).await;
         format!("saved snippet '{name}'")
+    }
+
+    #[tool(description = "List serial ports available on this machine (sutra ports are tagged).")]
+    async fn list_serial_ports(&self) -> String {
+        let ports = serial::list_ports();
+        if ports.is_empty() {
+            return "(no serial ports)".into();
+        }
+        ports
+            .iter()
+            .map(|p| {
+                let tag = if p.is_sutra {
+                    " [sutra]".to_string()
+                } else if let Some(pr) = &p.product {
+                    format!(" [{pr}]")
+                } else {
+                    String::new()
+                };
+                format!("{}{}", p.name, tag)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tool(description = "Auto-detect and connect to a sutra (opens both DATA and CMD ports).")]
+    async fn connect_buddy(&self) -> String {
+        let shared = self.shared.clone();
+        match tokio::task::spawn_blocking(move || {
+            let (data, cmd) = serial::autodetect()?;
+            serial::mcp_connect(&shared, &data, Some(&cmd))
+        })
+        .await
+        {
+            Ok(Ok(())) => "connected".into(),
+            Ok(Err(e)) => format!("error: {e}"),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Connect to a serial port by name as a console (DATA only). Optionally set baud/parity/stop."
+    )]
+    async fn connect_port(
+        &self,
+        Parameters(ConnectPortArgs { port, baud, parity, stop_bits }): Parameters<ConnectPortArgs>,
+    ) -> String {
+        let shared = self.shared.clone();
+        let p2 = port.clone();
+        match tokio::task::spawn_blocking(move || {
+            if baud.is_some() || parity.is_some() || stop_bits.is_some() {
+                let mut p = serial::get_params(&shared);
+                if let Some(b) = baud {
+                    p.baud = b;
+                }
+                if let Some(x) = parity {
+                    p.parity = x;
+                }
+                if let Some(x) = stop_bits {
+                    p.stop_bits = x;
+                }
+                serial::store_params(&shared, p);
+            }
+            serial::mcp_connect(&shared, &p2, None)
+        })
+        .await
+        {
+            Ok(Ok(())) => format!("connected to {port}"),
+            Ok(Err(e)) => format!("error: {e}"),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Disconnect the current serial connection.")]
+    async fn disconnect_port(&self) -> String {
+        serial::disconnect(&self.shared);
+        "disconnected".into()
+    }
+
+    #[tool(
+        description = "Change the DATA serial params (baud + optional parity/stop); reconnects if connected."
+    )]
+    async fn set_serial(
+        &self,
+        Parameters(SetSerialArgs { baud, parity, stop_bits }): Parameters<SetSerialArgs>,
+    ) -> String {
+        let shared = self.shared.clone();
+        match tokio::task::spawn_blocking(move || {
+            let mut p = serial::get_params(&shared);
+            p.baud = baud;
+            if let Some(x) = parity {
+                p.parity = x;
+            }
+            if let Some(x) = stop_bits {
+                p.stop_bits = x;
+            }
+            serial::mcp_set_params(&shared, p)
+        })
+        .await
+        {
+            Ok(Ok(())) => "ok".into(),
+            Ok(Err(e)) => format!("error: {e}"),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Report the current connection status (port, baud, whether a sutra).")]
+    async fn connection_status(&self) -> String {
+        let s = serial::state(&self.shared);
+        if !s.connected {
+            return "not connected".into();
+        }
+        format!(
+            "connected: DATA={} CMD={} buddy={} baud={} parity={} stop={}",
+            s.data_port.unwrap_or_default(),
+            s.cmd_port.unwrap_or_default(),
+            s.has_cmd,
+            s.params.baud,
+            s.params.parity,
+            s.params.stop_bits
+        )
     }
 }
 

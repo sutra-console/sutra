@@ -36,9 +36,11 @@ import {
   mcpStart,
   mcpStop,
   mcpStatus,
+  setMcpTools,
   OUTPUT,
   type PortDesc,
   type McpStatus,
+  type McpToolFlags,
   type SnippetRec,
 } from "@/lib/ttl";
 
@@ -49,20 +51,43 @@ interface Settings {
   mcpPort: number;
   rememberLastPort: boolean;
   lastPort: string;
+  mcpTools: McpToolFlags;
 }
 const DEFAULT_SETTINGS: Settings = {
   autoStartMcp: false,
   mcpPort: 8765,
   rememberLastPort: true,
   lastPort: "auto",
+  mcpTools: {
+    consoleRead: true,
+    consoleWrite: true,
+    outputs: true,
+    snippetsRun: true,
+    snippetsCreate: true,
+    connection: true,
+  },
 };
 const loadSettings = (): Settings => {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem("sutra.settings") || "{}") };
+    const s = JSON.parse(localStorage.getItem("sutra.settings") || "{}");
+    return {
+      ...DEFAULT_SETTINGS,
+      ...s,
+      mcpTools: { ...DEFAULT_SETTINGS.mcpTools, ...(s.mcpTools || {}) },
+    };
   } catch {
     return DEFAULT_SETTINGS;
   }
 };
+
+const MCP_TOOL_OPTIONS: { key: keyof McpToolFlags; label: string; hint: string }[] = [
+  { key: "consoleRead", label: "Read console", hint: "read_console" },
+  { key: "consoleWrite", label: "Write console", hint: "write_console" },
+  { key: "outputs", label: "Outputs & device info", hint: "set/get_output, device_info" },
+  { key: "snippetsRun", label: "List / run snippets", hint: "list_snippets, run_snippet" },
+  { key: "snippetsCreate", label: "Create snippets", hint: "create_snippet" },
+  { key: "connection", label: "Connection control", hint: "list ports, connect, set serial" },
+];
 
 export default function App() {
   const [ports, setPorts] = useState<PortDesc[]>([]);
@@ -125,6 +150,9 @@ export default function App() {
     refreshPorts();
     snippetsGet().then(setSnippets).catch(() => {});
     syncConnState(); // adopt a connection the backend already holds (after a reload)
+
+    // push saved MCP tool toggles to the backend
+    setMcpTools(settings.mcpTools).catch(() => {});
 
     // remember-last-port: preselect it in the dropdown
     if (settings.rememberLastPort && settings.lastPort) setSelectedPort(settings.lastPort);
@@ -276,6 +304,21 @@ export default function App() {
       setMcp(mcp.running ? await mcpStop() : await mcpStart(settings.mcpPort));
     } catch (e) {
       setStatus(`mcp failed: ${e}`);
+    }
+  }
+
+  async function setToolFlag(k: keyof McpToolFlags, v: boolean) {
+    const flags = { ...settings.mcpTools, [k]: v };
+    setSetting("mcpTools", flags);
+    await setMcpTools(flags).catch(() => {});
+    // apply to a running server by restarting it (the client reconnects & re-lists)
+    if (mcp.running) {
+      try {
+        await mcpStop();
+        setMcp(await mcpStart(settings.mcpPort));
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -628,6 +671,28 @@ export default function App() {
               <div className="text-[11px] text-muted-foreground">
                 Last used: <code>{settings.lastPort}</code>
               </div>
+            </div>
+
+            <div className="flex flex-col gap-2 border-t pt-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                MCP tools exposed to the LLM
+              </div>
+              {MCP_TOOL_OPTIONS.map((o) => (
+                <div key={o.key} className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm">{o.label}</div>
+                    <div className="font-mono text-[10px] text-muted-foreground">{o.hint}</div>
+                  </div>
+                  <Switch
+                    checked={settings.mcpTools[o.key]}
+                    onCheckedChange={(v) => setToolFlag(o.key, v)}
+                  />
+                </div>
+              ))}
+              <p className="text-[10px] leading-tight text-muted-foreground">
+                Disabled tools are hidden from the model entirely. Changing these restarts a running
+                MCP server.
+              </p>
             </div>
           </div>
 

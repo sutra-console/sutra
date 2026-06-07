@@ -108,6 +108,17 @@ export const mcpStart = (port: number) => invoke<McpStatus>("mcp_start", { port 
 export const mcpStop = () => invoke<McpStatus>("mcp_stop");
 export const mcpStatus = () => invoke<McpStatus>("mcp_status");
 
+/** Which MCP tool groups are exposed to the LLM. */
+export interface McpToolFlags {
+  consoleRead: boolean;
+  consoleWrite: boolean;
+  outputs: boolean;
+  snippetsRun: boolean;
+  snippetsCreate: boolean;
+  connection: boolean;
+}
+export const setMcpTools = (flags: McpToolFlags) => invoke<void>("set_mcp_tools", { flags });
+
 // ---- snippet store (backend-owned; shared with the MCP server) ----
 export interface SnippetRec {
   name: string;
