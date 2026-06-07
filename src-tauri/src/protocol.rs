@@ -1,4 +1,4 @@
-//! sutra CMD-port wire protocol — see ../../docs/PROTOCOL.md
+//! sutra CMD-port wire protocol — see protocol/PROTOCOL.md
 //!
 //! Binary frame on the wire:  COBS( TYPE SEQ LEN BODY[LEN] CRC8 ) 0x00
 //! Multi-byte integers are little-endian. BODY is capped at 64 bytes.

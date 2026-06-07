@@ -1,4 +1,4 @@
-// Front-end mirror of the sutra CMD protocol — see docs/PROTOCOL.md
+// Front-end mirror of the sutra CMD protocol — see protocol/PROTOCOL.md
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
