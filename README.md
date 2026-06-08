@@ -1,7 +1,38 @@
-# Tauri + React + Typescript
+# Sutra
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+**Sutra** is the *thread* — a desktop app (Tauri + React) that connects you, and
+an LLM, to a device's serial console.
 
-## Recommended IDE Setup
+> *sūtra* (Sanskrit सूत्र) — *"thread"; that which threads things together.*
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+It pairs with **[Duta](https://github.com/sutra-console/duta)** firmware over the
+shared **[skrit](https://github.com/sutra-console/skrit)** protocol — but also
+drives any plain COM port.
+
+## Features
+
+- **Universal serial console** (ghostty-web) — connect a Duta device *or* any
+  COM port; baud/parity/stop, named connection profiles, link online/offline.
+- **Snippets → macros** — line-based Bash Bunny/DuckyScript plus an expect engine:
+  `WAITFOR`, `RUN` (with exit-code capture), `IF OK…ELSE…END`, `SET` an output,
+  `WAITIO` on an input, `$call` another snippet. Secrets are never readable by the
+  LLM and are redacted from console reads.
+- **Device-driven controls** — the UI renders the relays/LED/inputs the device
+  *self-describes*, by name.
+- **MCP server** — per-tool toggles; lets an LLM read the console, run/author
+  snippets (run-by-name only), drive outputs, and manage the connection.
+
+## Run
+
+```sh
+bun install
+bun run tauri dev
+```
+
+## Protocol & MCP
+
+The app mirrors the skrit contract in
+[`src-tauri/src/protocol.rs`](src-tauri/src/protocol.rs) and
+[`src/lib/ttl.ts`](src/lib/ttl.ts); the spec is vendored in [PROTOCOL.md](PROTOCOL.md)
+(canonical home: the [skrit](https://github.com/sutra-console/skrit) repo). MCP
+usage is in [MCP.md](MCP.md).
