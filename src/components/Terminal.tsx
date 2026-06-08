@@ -71,7 +71,7 @@ export const Terminal = forwardRef<TerminalHandle, { connected: boolean }>(funct
       readConsole(32000)
         .then((hist) => {
           if (hist) term.write(hist);
-          else term.write("\x1b[90msutra — connect a port to begin.\x1b[0m\r\n");
+          else term.write("\x1b[90mSutra — connect a port to begin.\x1b[0m\r\n");
         })
         .catch(() => {});
     });

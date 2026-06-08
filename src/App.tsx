@@ -128,7 +128,7 @@ export default function App() {
   }
   function addProfile() {
     const target = selectedPort;
-    const name = profileName.trim() || (target === "auto" ? "sutra (auto)" : target);
+    const name = profileName.trim() || (target === "auto" ? "Duta (auto)" : target);
     const p: Profile = { id: crypto.randomUUID(), name, transport: "serial", target };
     saveProfiles([...profiles.filter((x) => x.name !== name), p]);
     setProfileName("");
@@ -246,7 +246,7 @@ export default function App() {
       setSelectedPort(cs.has_cmd ? "auto" : cs.data_port ?? "auto");
       setStatus(
         cs.has_cmd
-          ? `sutra — DATA ${cs.data_port} · CMD ${cs.cmd_port}`
+          ? `Duta — DATA ${cs.data_port} · CMD ${cs.cmd_port}`
           : `serial — ${cs.data_port} @ ${cs.params.baud}`
       );
       if (cs.has_cmd) loadDevice();
@@ -272,7 +272,7 @@ export default function App() {
         await ttlConnect(data, cmd);
         setHasCmd(true);
         setDataPort(data);
-        setStatus(`connected — DATA ${data} · CMD ${cmd}`);
+        setStatus(`Duta — DATA ${data} · CMD ${cmd}`);
         loadDevice();
       } else {
         await ttlConnect(selectedPort, null);
@@ -368,7 +368,7 @@ export default function App() {
   }
 
   async function saveToDevice(s: SnippetRec, index: number) {
-    setStatus(`saving "${s.name}" to buddi…`);
+    setStatus(`saving "${s.name}" to Duta…`);
     try {
       setStatus(`"${s.name}" → ${await saveSnippetToDevice(index, s.name, s.text)}`);
     } catch (e) {
@@ -409,7 +409,7 @@ export default function App() {
     <div className="flex h-screen flex-col bg-background text-foreground">
       <header className="flex items-center gap-3 border-b px-4 py-2.5">
         <Cpu className="size-5 text-primary" />
-        <span className="font-semibold tracking-tight">sutra</span>
+        <span className="font-semibold tracking-tight">Sutra</span>
         <Badge
           variant={!connected ? "secondary" : linkOnline ? "success" : "destructive"}
           className="ml-1"
@@ -513,11 +513,11 @@ export default function App() {
               </Button>
               <p className="text-[10px] leading-tight text-muted-foreground">
                 {!connected
-                  ? "Applied on connect. On a sutra only baud reaches the UART (8N1); on a generic adapter all settings apply."
+                  ? "Applied on connect. On a Duta only baud reaches the UART (8N1); on a generic adapter all settings apply."
                   : hasCmd
                     ? caps & CAP.PARITY
                       ? "Baud + parity reach the UART; stop bits fixed at 1."
-                      : "sutra is 8N1 — only baud reaches the wire (build firmware with PARITY_SUPPORT for parity)."
+                      : "Duta is 8N1 — only baud reaches the wire (build firmware with PARITY_SUPPORT for parity)."
                     : "Applied to the serial adapter (real baud/parity/stop)."}
               </p>
             </div>
@@ -533,12 +533,12 @@ export default function App() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="auto">
-                {ttlPorts.length >= 2 ? "sutra (auto)" : "sutra (none)"}
+                {ttlPorts.length >= 2 ? "Duta (auto)" : "Duta (none)"}
               </SelectItem>
               {ports.map((p) => (
                 <SelectItem key={p.name} value={p.name}>
                   {p.name}
-                  {p.is_sutra ? " · buddy" : p.product ? ` · ${p.product}` : ""}
+                  {p.is_sutra ? " · Duta" : p.product ? ` · ${p.product}` : ""}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -585,7 +585,7 @@ export default function App() {
                 <div className="flex items-center gap-1 border-t pt-2">
                   <Input
                     className="h-8"
-                    placeholder={selectedPort === "auto" ? "name (auto buddy)" : `name (${selectedPort})`}
+                    placeholder={selectedPort === "auto" ? "name (auto Duta)" : `name (${selectedPort})`}
                     value={profileName}
                     onChange={(e) => setProfileName(e.target.value)}
                   />
@@ -729,7 +729,7 @@ export default function App() {
                     <Play />
                   </Button>
                   {hasCmd && (
-                    <Button variant="ghost" size="icon" className="size-7" title="Save to buddi (EEPROM)" onClick={() => saveToDevice(s, i)}>
+                    <Button variant="ghost" size="icon" className="size-7" title="Save to Duta (EEPROM)" onClick={() => saveToDevice(s, i)}>
                       <Database />
                     </Button>
                   )}
