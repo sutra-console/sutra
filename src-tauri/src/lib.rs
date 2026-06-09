@@ -5,7 +5,7 @@ mod serial;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use serial::{ConnState, McpToolFlags, PortDesc, RespFrame, SerialParams, Shared, SnippetRec};
+use serial::{ConnState, McpToolFlags, PortDesc, RespFrame, SerialParams, Shared, MacroRec};
 use tauri::Manager;
 use tokio_util::sync::CancellationToken;
 
@@ -77,7 +77,7 @@ fn data_write(state: tauri::State<AppState>, bytes: Vec<u8>) -> Result<(), Strin
     serial::data_write(&state.shared, &bytes)
 }
 
-/// Run snippet text through the macro player (escapes + `+++DELAY/ENTER/CTRL...+++`).
+/// Run macro text through the macro player (escapes + `+++DELAY/ENTER/CTRL...+++`).
 #[tauri::command]
 fn run_text(state: tauri::State<AppState>, text: String) {
     serial::play(&state.shared, &text);
@@ -93,25 +93,25 @@ fn read_console(state: tauri::State<AppState>, max: usize) -> String {
     serial::read_console(&state.shared, max)
 }
 
-// ---- snippets (backend-owned store; mirrored to UI + MCP) ----
+// ---- macros (backend-owned store; mirrored to UI + MCP) ----
 #[tauri::command]
-fn snippets_get(state: tauri::State<AppState>) -> Vec<SnippetRec> {
-    serial::snippets_all(&state.shared)
+fn macros_get(state: tauri::State<AppState>) -> Vec<MacroRec> {
+    serial::macros_all(&state.shared)
 }
 
 #[tauri::command]
-fn snippet_upsert(state: tauri::State<AppState>, name: String, text: String, secret: bool) {
-    serial::snippet_upsert(&state.shared, SnippetRec { name, text, secret });
+fn macro_upsert(state: tauri::State<AppState>, name: String, text: String, secret: bool) {
+    serial::macro_upsert(&state.shared, MacroRec { name, text, secret });
 }
 
 #[tauri::command]
-fn snippet_delete(state: tauri::State<AppState>, name: String) {
-    serial::snippet_delete(&state.shared, &name);
+fn macro_delete(state: tauri::State<AppState>, name: String) {
+    serial::macro_delete(&state.shared, &name);
 }
 
 #[tauri::command]
-fn snippets_set(state: tauri::State<AppState>, snippets: Vec<SnippetRec>) {
-    serial::snippets_set(&state.shared, snippets);
+fn macros_set(state: tauri::State<AppState>, macros: Vec<MacroRec>) {
+    serial::macros_set(&state.shared, macros);
 }
 
 #[tauri::command]
@@ -176,7 +176,7 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            serial::init_snippets(&state.shared, app.handle().clone(), dir.join("snippets.json"));
+            serial::init_macros(&state.shared, app.handle().clone(), dir.join("macros.json"));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -191,10 +191,10 @@ pub fn run() {
             run_text,
             send_cmd,
             read_console,
-            snippets_get,
-            snippet_upsert,
-            snippet_delete,
-            snippets_set,
+            macros_get,
+            macro_upsert,
+            macro_delete,
+            macros_set,
             mcp_start,
             mcp_stop,
             mcp_status,

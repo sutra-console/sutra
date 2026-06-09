@@ -47,16 +47,16 @@ pub struct SetOutputArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RunSnippetArgs {
-    /// The exact name of the snippet to run (see list_snippets).
+pub struct RunMacroArgs {
+    /// The exact name of the macro to run (see list_macros).
     pub name: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CreateSnippetArgs {
-    /// Unique name for the snippet (re-using a name overwrites it).
+pub struct CreateMacroArgs {
+    /// Unique name for the macro (re-using a name overwrites it).
     pub name: String,
-    /// The text to send to the target console when the snippet runs.
+    /// The text to send to the target console when the macro runs.
     pub text: String,
     /// Mark as secret (sensitive). It still cannot be read back via MCP either way.
     pub secret: Option<bool>,
@@ -102,13 +102,13 @@ impl TtlTools {
                 router.remove_route(n);
             }
         }
-        if !f.snippets_run {
-            for n in ["list_snippets", "run_snippet"] {
+        if !f.macros_run {
+            for n in ["list_macros", "run_macro"] {
                 router.remove_route(n);
             }
         }
-        if !f.snippets_create {
-            router.remove_route("create_snippet");
+        if !f.macros_create {
+            router.remove_route("create_macro");
         }
         if !f.connection {
             for n in [
@@ -122,7 +122,7 @@ impl TtlTools {
     }
 
     #[tool(
-        description = "Read the most recent output from the target device's serial console (the DATA port). Secret-snippet contents that echo back are replaced with <REDACTED>."
+        description = "Read the most recent output from the target device's serial console (the DATA port). Secret-macro contents that echo back are replaced with <REDACTED>."
     )]
     async fn read_console(
         &self,
@@ -186,12 +186,12 @@ impl TtlTools {
     }
 
     #[tool(
-        description = "List available snippet NAMES. Snippet contents are never returned — secrets stay hidden."
+        description = "List available macro NAMES. Macro contents are never returned — secrets stay hidden."
     )]
-    async fn list_snippets(&self) -> String {
-        let metas = serial::snippet_metas(&self.shared);
+    async fn list_macros(&self) -> String {
+        let metas = serial::macro_metas(&self.shared);
         if metas.is_empty() {
-            return "(no snippets)".into();
+            return "(no macros)".into();
         }
         metas
             .iter()
@@ -201,14 +201,14 @@ impl TtlTools {
     }
 
     #[tool(
-        description = "Run a stored snippet by name — sends its text to the target console. Use this to apply secrets (passwords/keys) WITHOUT seeing them. Returns 'applied', not the content."
+        description = "Run a stored macro by name — sends its text to the target console. Use this to apply secrets (passwords/keys) WITHOUT seeing them. Returns 'applied', not the content."
     )]
-    async fn run_snippet(
+    async fn run_macro(
         &self,
-        Parameters(RunSnippetArgs { name }): Parameters<RunSnippetArgs>,
+        Parameters(RunMacroArgs { name }): Parameters<RunMacroArgs>,
     ) -> String {
         let shared = self.shared.clone();
-        match tokio::task::spawn_blocking(move || serial::run_snippet(&shared, &name)).await {
+        match tokio::task::spawn_blocking(move || serial::run_macro(&shared, &name)).await {
             Ok(Ok(())) => "applied".into(),
             Ok(Err(e)) => format!("error: {e}"),
             Err(e) => format!("error: {e}"),
@@ -216,16 +216,16 @@ impl TtlTools {
     }
 
     #[tool(
-        description = "Create or update a reusable snippet (name + text). The text is a Bash Bunny / DuckyScript + expect macro, ONE COMMAND PER LINE: STRING/STRINGLN <t>, ENTER, DELAY <ms>, CTRL <c>, TAB, ESC, HEX, REPEAT <n>, REM; plus WAITFOR <text> (wait until text appears), RUN <cmd> (run + wait for completion, capture exit code), WAITOK (abort if last RUN failed), IF OK|FAIL ... ELSE ... END, TIMEOUT <ms>, SET <output> <0|1> (drive a relay/LED by name), WAITIO <input> <op> <value> (wait on a sensor, e.g. WAITIO LDR > 124), $Name (run another snippet inline). A bare line is typed verbatim then Enter. RUN needs a POSIX shell on the target. secret=true for sensitive content."
+        description = "Create or update a reusable macro (name + text). The text is a Bash Bunny / DuckyScript + expect macro, ONE COMMAND PER LINE: STRING/STRINGLN <t>, ENTER, DELAY <ms>, CTRL <c>, TAB, ESC, HEX, REPEAT <n>, REM; plus WAITFOR <text> (wait until text appears), RUN <cmd> (run + wait for completion, capture exit code), WAITOK (abort if last RUN failed), IF OK|FAIL ... ELSE ... END, TIMEOUT <ms>, SET <output> <0|1> (drive a relay/LED by name), WAITIO <input> <op> <value> (wait on a sensor, e.g. WAITIO LDR > 124), $Name (run another macro inline). A bare line is typed verbatim then Enter. RUN needs a POSIX shell on the target. secret=true for sensitive content."
     )]
-    async fn create_snippet(
+    async fn create_macro(
         &self,
-        Parameters(CreateSnippetArgs { name, text, secret }): Parameters<CreateSnippetArgs>,
+        Parameters(CreateMacroArgs { name, text, secret }): Parameters<CreateMacroArgs>,
     ) -> String {
         let shared = self.shared.clone();
-        let rec = serial::SnippetRec { name: name.clone(), text, secret: secret.unwrap_or(false) };
-        let _ = tokio::task::spawn_blocking(move || serial::snippet_upsert(&shared, rec)).await;
-        format!("saved snippet '{name}'")
+        let rec = serial::MacroRec { name: name.clone(), text, secret: secret.unwrap_or(false) };
+        let _ = tokio::task::spawn_blocking(move || serial::macro_upsert(&shared, rec)).await;
+        format!("saved macro '{name}'")
     }
 
     #[tool(description = "List serial ports available on this machine (sutra ports are tagged).")]

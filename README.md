@@ -13,14 +13,16 @@ drives any plain COM port.
 
 - **Universal serial console** (ghostty-web) — connect a Duta device *or* any
   COM port; baud/parity/stop, named connection profiles, link online/offline.
-- **Snippets → macros** — line-based Bash Bunny/DuckyScript plus an expect engine:
-  `WAITFOR`, `RUN` (with exit-code capture), `IF OK…ELSE…END`, `SET` an output,
-  `WAITIO` on an input, `$call` another snippet. Secrets are never readable by the
-  LLM and are redacted from console reads.
+- **Macros** — saved, reorderable command scripts (line-based Bash Bunny /
+  DuckyScript) plus an expect engine: `WAITFOR`, `RUN` (with exit-code capture),
+  `IF OK…ELSE…END`, `SET` an output, `WAITIO` on an input, `$call` another macro.
+  A **run queue** shows in-flight macros (e.g. blocked on `WAITFOR`) and lets you
+  cancel them. Macros flagged secret are never readable by the LLM and are
+  redacted from console reads.
 - **Device-driven controls** — the UI renders the relays/LED/inputs the device
   *self-describes*, by name.
 - **MCP server** — per-tool toggles; lets an LLM read the console, run/author
-  snippets (run-by-name only), drive outputs, and manage the connection.
+  macros (run-by-name only), drive outputs, and manage the connection.
 
 ## Run
 

@@ -32,12 +32,12 @@ import {
   CAP,
   runText,
   setDataParams,
-  saveSnippetToDevice,
-  snippetsGet,
-  snippetUpsert,
-  snippetDelete,
-  snippetsSet,
-  onSnippets,
+  saveMacroToDevice,
+  macrosGet,
+  macroUpsert,
+  macroDelete,
+  macrosSet,
+  onMacros,
   onLink,
   mcpStart,
   mcpStop,
@@ -46,7 +46,7 @@ import {
   type PortDesc,
   type McpStatus,
   type McpToolFlags,
-  type SnippetRec,
+  type MacroRec,
   type ControlDesc,
 } from "@/lib/ttl";
 
@@ -68,8 +68,8 @@ const DEFAULT_SETTINGS: Settings = {
     consoleRead: true,
     consoleWrite: true,
     outputs: true,
-    snippetsRun: true,
-    snippetsCreate: true,
+    macrosRun: true,
+    macrosCreate: true,
     connection: true,
   },
 };
@@ -106,8 +106,8 @@ const MCP_TOOL_OPTIONS: { key: keyof McpToolFlags; label: string; hint: string }
   { key: "consoleRead", label: "Read console", hint: "read_console" },
   { key: "consoleWrite", label: "Write console", hint: "write_console" },
   { key: "outputs", label: "Outputs & device info", hint: "set/get_output, device_info" },
-  { key: "snippetsRun", label: "List / run snippets", hint: "list_snippets, run_snippet" },
-  { key: "snippetsCreate", label: "Create snippets", hint: "create_snippet" },
+  { key: "macrosRun", label: "List / run macros", hint: "list_macros, run_macro" },
+  { key: "macrosCreate", label: "Create macros", hint: "create_macro" },
   { key: "connection", label: "Connection control", hint: "list ports, connect, set serial" },
 ];
 
@@ -145,7 +145,7 @@ export default function App() {
   const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
   const [deviceName, setDeviceName] = useState("");
   const [caps, setCaps] = useState(0); // device capability bits (buddy only)
-  const [snippets, setSnippets] = useState<SnippetRec[]>([]);
+  const [macros, setMacros] = useState<MacroRec[]>([]);
 
   const [baud, setBaud] = useState(115200);
   const [parity, setParity] = useState<"none" | "odd" | "even">("none");
@@ -160,7 +160,7 @@ export default function App() {
   const terminalRef = useRef<TerminalHandle>(null);
   const focusTerm = () => setTimeout(() => terminalRef.current?.focus(), 0);
 
-  // snippet add/edit dialog
+  // macro add/edit dialog
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editOrig, setEditOrig] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
@@ -168,19 +168,19 @@ export default function App() {
   const [draftSecret, setDraftSecret] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
 
-  // snippet drag-reorder (live projected order + ghost)
+  // macro drag-reorder (live projected order + ghost)
   const [dragName, setDragName] = useState<string | null>(null);
   const [overName, setOverName] = useState<string | null>(null);
   const [insertAfter, setInsertAfter] = useState(false);
 
   // the list as it would look if dropped right now
-  const orderedSnippets = (() => {
-    if (!dragName || !overName || dragName === overName) return snippets;
-    const moved = snippets.find((s) => s.name === dragName);
-    if (!moved) return snippets;
-    const arr = snippets.filter((s) => s.name !== dragName);
+  const orderedMacros = (() => {
+    if (!dragName || !overName || dragName === overName) return macros;
+    const moved = macros.find((s) => s.name === dragName);
+    if (!moved) return macros;
+    const arr = macros.filter((s) => s.name !== dragName);
     let idx = arr.findIndex((s) => s.name === overName);
-    if (idx === -1) return snippets;
+    if (idx === -1) return macros;
     if (insertAfter) idx += 1;
     arr.splice(idx, 0, moved);
     return arr;
@@ -188,8 +188,8 @@ export default function App() {
 
   function commitReorder() {
     if (dragName && overName && dragName !== overName) {
-      setSnippets(orderedSnippets); // optimistic; backend confirms via ttl://snippets
-      snippetsSet(orderedSnippets).catch(() => {});
+      setMacros(orderedMacros); // optimistic; backend confirms via ttl://macros
+      macrosSet(orderedMacros).catch(() => {});
     }
     setDragName(null);
     setOverName(null);
@@ -198,7 +198,7 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.add("dark");
     refreshPorts();
-    snippetsGet().then(setSnippets).catch(() => {});
+    macrosGet().then(setMacros).catch(() => {});
     syncConnState(); // adopt a connection the backend already holds (after a reload)
 
     // push saved MCP tool toggles to the backend
@@ -215,7 +215,7 @@ export default function App() {
       }
     }).catch(() => {});
 
-    const un = onSnippets(setSnippets);
+    const un = onMacros(setMacros);
     const unLink = onLink((online) => {
       setLinkOnline(online);
       setStatus(online ? "target online" : "target offline — link lost, retrying…");
@@ -348,29 +348,29 @@ export default function App() {
     setDraftSecret(false);
     setDialogOpen(true);
   }
-  function openEdit(s: SnippetRec) {
+  function openEdit(s: MacroRec) {
     setEditOrig(s.name);
     setDraftName(s.name);
     setDraftText(s.text);
     setDraftSecret(s.secret);
     setDialogOpen(true);
   }
-  async function saveSnippet() {
+  async function saveMacro() {
     const name = draftName.trim();
     if (!name || !draftText) return;
-    if (editOrig && editOrig !== name) await snippetDelete(editOrig);
-    await snippetUpsert(name, draftText, draftSecret);
+    if (editOrig && editOrig !== name) await macroDelete(editOrig);
+    await macroUpsert(name, draftText, draftSecret);
     setDialogOpen(false);
   }
-  async function deleteSnippet() {
-    if (editOrig) await snippetDelete(editOrig);
+  async function deleteMacro() {
+    if (editOrig) await macroDelete(editOrig);
     setDialogOpen(false);
   }
 
-  async function saveToDevice(s: SnippetRec, index: number) {
+  async function saveToDevice(s: MacroRec, index: number) {
     setStatus(`saving "${s.name}" to Duta…`);
     try {
-      setStatus(`"${s.name}" → ${await saveSnippetToDevice(index, s.name, s.text)}`);
+      setStatus(`"${s.name}" → ${await saveMacroToDevice(index, s.name, s.text)}`);
     } catch (e) {
       setStatus(`save failed: ${e}`);
     }
@@ -451,7 +451,7 @@ export default function App() {
                 </div>
               )}
               <p className="text-[10px] leading-tight text-muted-foreground">
-                Lets an LLM read the console, run/author snippets &amp; control outputs. Snippet
+                Lets an LLM read the console, run/author macros &amp; control outputs. Macro
                 contents (secrets) are never exposed — it can only run them by name.
               </p>
             </div>
@@ -669,19 +669,19 @@ export default function App() {
             </CardContent>
           </Card>
 
-          {/* snippets */}
+          {/* macros */}
           <Card className="flex min-h-0 flex-1 flex-col">
             <CardHeader className="flex-row items-center py-3">
-              <CardTitle>Snippets</CardTitle>
-              <Button size="icon" variant="ghost" className="ml-auto size-7" title="New snippet" onClick={openAdd}>
+              <CardTitle>Macros</CardTitle>
+              <Button size="icon" variant="ghost" className="ml-auto size-7" title="New macro" onClick={openAdd}>
                 <Plus />
               </Button>
             </CardHeader>
             <CardContent className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
-              {snippets.length === 0 && (
-                <p className="py-4 text-center text-xs text-muted-foreground">No snippets yet.</p>
+              {macros.length === 0 && (
+                <p className="py-4 text-center text-xs text-muted-foreground">No macros yet.</p>
               )}
-              {orderedSnippets.map((s, i) => (
+              {orderedMacros.map((s, i) => (
                 <div
                   key={s.name}
                   draggable
@@ -743,12 +743,12 @@ export default function App() {
         </div>
       </div>
 
-      {/* add / edit snippet modal */}
+      {/* add / edit macro modal */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className={cn(showHelp && "max-w-3xl")}>
           <DialogHeader>
             <div className="flex items-center gap-2">
-              <DialogTitle>{editOrig ? "Edit snippet" : "New snippet"}</DialogTitle>
+              <DialogTitle>{editOrig ? "Edit macro" : "New macro"}</DialogTitle>
               <Button
                 variant="ghost"
                 size="icon"
@@ -783,14 +783,14 @@ export default function App() {
               </Button>
               <DialogFooter>
                 {editOrig && (
-                  <Button variant="destructive" size="sm" className="mr-auto" onClick={deleteSnippet}>
+                  <Button variant="destructive" size="sm" className="mr-auto" onClick={deleteMacro}>
                     <Trash2 /> Delete
                   </Button>
                 )}
                 <DialogClose asChild>
                   <Button variant="ghost" size="sm">Cancel</Button>
                 </DialogClose>
-                <Button size="sm" onClick={saveSnippet}>{editOrig ? "Save" : "Add"}</Button>
+                <Button size="sm" onClick={saveMacro}>{editOrig ? "Save" : "Add"}</Button>
               </DialogFooter>
             </div>
 

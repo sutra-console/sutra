@@ -160,9 +160,9 @@ export async function readInput(index: number): Promise<number> {
 }
 
 const enc = new TextEncoder();
-/** Send a snippet's text straight out the DATA/UART now (raw, no macros). */
+/** Send a macro's text straight out the DATA/UART now (raw, no macros). */
 export const runTextNow = (text: string) => dataWrite(Array.from(enc.encode(text)));
-/** Run snippet text through the macro player (escapes + `+++DELAY/ENTER/CTRL...+++`). */
+/** Run macro text through the macro player (escapes + `+++DELAY/ENTER/CTRL...+++`). */
 export const runText = (text: string) => invoke<void>("run_text", { text });
 
 // ---- DATA serial params ----
@@ -200,31 +200,31 @@ export interface McpToolFlags {
   consoleRead: boolean;
   consoleWrite: boolean;
   outputs: boolean;
-  snippetsRun: boolean;
-  snippetsCreate: boolean;
+  macrosRun: boolean;
+  macrosCreate: boolean;
   connection: boolean;
 }
 export const setMcpTools = (flags: McpToolFlags) => invoke<void>("set_mcp_tools", { flags });
 
-// ---- snippet store (backend-owned; shared with the MCP server) ----
-export interface SnippetRec {
+// ---- macro store (backend-owned; shared with the MCP server) ----
+export interface MacroRec {
   name: string;
   text: string;
   secret: boolean;
 }
-export const snippetsGet = () => invoke<SnippetRec[]>("snippets_get");
-export const snippetUpsert = (name: string, text: string, secret: boolean) =>
-  invoke<void>("snippet_upsert", { name, text, secret });
-export const snippetDelete = (name: string) => invoke<void>("snippet_delete", { name });
+export const macrosGet = () => invoke<MacroRec[]>("macros_get");
+export const macroUpsert = (name: string, text: string, secret: boolean) =>
+  invoke<void>("macro_upsert", { name, text, secret });
+export const macroDelete = (name: string) => invoke<void>("macro_delete", { name });
 /** Replace the whole store (used to persist a reorder). */
-export const snippetsSet = (snippets: SnippetRec[]) =>
-  invoke<void>("snippets_set", { snippets });
-/** Fires when the store changes (incl. snippets the LLM creates via MCP). */
-export async function onSnippets(cb: (list: SnippetRec[]) => void): Promise<UnlistenFn> {
-  return listen<SnippetRec[]>("ttl://snippets", (e) => cb(e.payload));
+export const macrosSet = (macros: MacroRec[]) =>
+  invoke<void>("macros_set", { macros });
+/** Fires when the store changes (incl. macros the LLM creates via MCP). */
+export async function onMacros(cb: (list: MacroRec[]) => void): Promise<UnlistenFn> {
+  return listen<MacroRec[]>("ttl://macros", (e) => cb(e.payload));
 }
 
-// ---- snippet -> device EEPROM (Save to buddi) ----
+// ---- macro -> device EEPROM (Save to buddi) ----
 export function statusText(s: number | null): string {
   switch (s) {
     case 0: return "ok";
@@ -245,8 +245,8 @@ function crc16(data: number[]): number {
 
 const DEV_CHUNK = 60; // SNIP_WRITE_DATA body = id+off(2)+bytes <= 64
 
-/** Push a snippet into the device's EEPROM store (graceful STORAGE_ERR until fitted). */
-export async function saveSnippetToDevice(
+/** Push a macro into the device's EEPROM store (graceful STORAGE_ERR until fitted). */
+export async function saveMacroToDevice(
   id: number,
   name: string,
   text: string

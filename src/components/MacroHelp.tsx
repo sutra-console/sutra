@@ -1,4 +1,4 @@
-// Command reference shown in the snippet modal's pop-out sidebar.
+// Command reference shown in the macro modal's pop-out sidebar.
 
 const SECTIONS: { title: string; items: [string, string][] }[] = [
   {
@@ -36,7 +36,7 @@ const SECTIONS: { title: string; items: [string, string][] }[] = [
     title: "Outputs & calls",
     items: [
       ["SET <name> <0|1>", "drive an output by name (SET Relay1 0)"],
-      ["$Name", "run another snippet inline ($Login)"],
+      ["$Name", "run another macro inline ($Login)"],
     ],
   },
   {

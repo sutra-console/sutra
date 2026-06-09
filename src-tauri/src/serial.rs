@@ -68,10 +68,10 @@ pub struct ConnState {
     pub params: SerialParams,
 }
 
-/// A snippet as mirrored from the app. The MCP server holds this so it can
-/// *run* snippets by name without ever exposing `text` (secrets stay hidden).
+/// A macro as mirrored from the app. The MCP server holds this so it can
+/// *run* macros by name without ever exposing `text` (secrets stay hidden).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnippetRec {
+pub struct MacroRec {
     pub name: String,
     pub text: String,
     #[serde(default)]
@@ -80,7 +80,7 @@ pub struct SnippetRec {
 
 /// Name-only view returned to the LLM (no `text`).
 #[derive(Debug, Clone, Serialize)]
-pub struct SnippetMeta {
+pub struct MacroMeta {
     pub name: String,
     pub secret: bool,
 }
@@ -92,8 +92,8 @@ pub struct McpToolFlags {
     pub console_read: bool,
     pub console_write: bool,
     pub outputs: bool,
-    pub snippets_run: bool,
-    pub snippets_create: bool,
+    pub macros_run: bool,
+    pub macros_create: bool,
     pub connection: bool,
 }
 
@@ -103,8 +103,8 @@ impl Default for McpToolFlags {
             console_read: true,
             console_write: true,
             outputs: true,
-            snippets_run: true,
-            snippets_create: true,
+            macros_run: true,
+            macros_create: true,
             connection: true,
         }
     }
@@ -153,8 +153,8 @@ pub struct Shared {
     params: Mutex<SerialParams>,
     data_name: Mutex<Option<String>>,
     cmd_name: Mutex<Option<String>>,
-    snippets: Mutex<Vec<SnippetRec>>,
-    snippets_path: Mutex<Option<std::path::PathBuf>>,
+    macros: Mutex<Vec<MacroRec>>,
+    macros_path: Mutex<Option<std::path::PathBuf>>,
     app: Mutex<Option<AppHandle>>,
     mcp_tools: Mutex<McpToolFlags>,
 }
@@ -168,8 +168,8 @@ impl Default for Shared {
             params: Mutex::new(SerialParams::default()),
             data_name: Mutex::new(None),
             cmd_name: Mutex::new(None),
-            snippets: Mutex::new(Vec::new()),
-            snippets_path: Mutex::new(None),
+            macros: Mutex::new(Vec::new()),
+            macros_path: Mutex::new(None),
             app: Mutex::new(None),
             mcp_tools: Mutex::new(McpToolFlags::default()),
         }
@@ -492,22 +492,22 @@ fn console_seq(shared: &Arc<Shared>) -> u64 {
     shared.console.lock().unwrap().total
 }
 
-// ---- snippet store (backend-owned, persisted, mirrored to UI + MCP) --------
+// ---- macro store (backend-owned, persisted, mirrored to UI + MCP) --------
 
-/// Wire up the persistence path + app handle and load snippets from disk.
-pub fn init_snippets(shared: &Arc<Shared>, app: AppHandle, path: std::path::PathBuf) {
+/// Wire up the persistence path + app handle and load macros from disk.
+pub fn init_macros(shared: &Arc<Shared>, app: AppHandle, path: std::path::PathBuf) {
     *shared.app.lock().unwrap() = Some(app);
     if let Ok(data) = std::fs::read(&path) {
-        if let Ok(list) = serde_json::from_slice::<Vec<SnippetRec>>(&data) {
-            *shared.snippets.lock().unwrap() = list;
+        if let Ok(list) = serde_json::from_slice::<Vec<MacroRec>>(&data) {
+            *shared.macros.lock().unwrap() = list;
         }
     }
-    *shared.snippets_path.lock().unwrap() = Some(path);
+    *shared.macros_path.lock().unwrap() = Some(path);
 }
 
 fn persist(shared: &Arc<Shared>) {
-    let list = shared.snippets.lock().unwrap().clone();
-    if let Some(path) = shared.snippets_path.lock().unwrap().clone() {
+    let list = shared.macros.lock().unwrap().clone();
+    if let Some(path) = shared.macros_path.lock().unwrap().clone() {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -515,22 +515,22 @@ fn persist(shared: &Arc<Shared>) {
             let _ = std::fs::write(&path, json);
         }
     }
-    // notify the UI so LLM-created/changed snippets appear live
+    // notify the UI so LLM-created/changed macros appear live
     if let Some(app) = shared.app.lock().unwrap().clone() {
-        let _ = app.emit("ttl://snippets", &list);
+        let _ = app.emit("ttl://macros", &list);
     }
 }
 
-/// Full snippet list (for the app UI — includes text).
-pub fn snippets_all(shared: &Arc<Shared>) -> Vec<SnippetRec> {
-    shared.snippets.lock().unwrap().clone()
+/// Full macro list (for the app UI — includes text).
+pub fn macros_all(shared: &Arc<Shared>) -> Vec<MacroRec> {
+    shared.macros.lock().unwrap().clone()
 }
 
-/// Literal strings typed by SECRET snippets (bare lines + STRING args, escapes
+/// Literal strings typed by SECRET macros (bare lines + STRING args, escapes
 /// applied) — the bytes that could echo back. Used to redact MCP console reads.
 pub fn secret_literals(shared: &Arc<Shared>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let snips = shared.snippets.lock().unwrap();
+    let snips = shared.macros.lock().unwrap();
     for s in snips.iter().filter(|s| s.secret) {
         for raw in s.text.split('\n') {
             let line = raw.strip_suffix('\r').unwrap_or(raw);
@@ -567,20 +567,20 @@ pub fn secret_literals(shared: &Arc<Shared>) -> Vec<String> {
 }
 
 /// Name-only list (for the LLM — never includes text).
-pub fn snippet_metas(shared: &Arc<Shared>) -> Vec<SnippetMeta> {
+pub fn macro_metas(shared: &Arc<Shared>) -> Vec<MacroMeta> {
     shared
-        .snippets
+        .macros
         .lock()
         .unwrap()
         .iter()
-        .map(|s| SnippetMeta { name: s.name.clone(), secret: s.secret })
+        .map(|s| MacroMeta { name: s.name.clone(), secret: s.secret })
         .collect()
 }
 
-/// Insert or replace a snippet by name.
-pub fn snippet_upsert(shared: &Arc<Shared>, rec: SnippetRec) {
+/// Insert or replace a macro by name.
+pub fn macro_upsert(shared: &Arc<Shared>, rec: MacroRec) {
     {
-        let mut list = shared.snippets.lock().unwrap();
+        let mut list = shared.macros.lock().unwrap();
         if let Some(existing) = list.iter_mut().find(|s| s.name == rec.name) {
             *existing = rec;
         } else {
@@ -590,21 +590,21 @@ pub fn snippet_upsert(shared: &Arc<Shared>, rec: SnippetRec) {
     persist(shared);
 }
 
-pub fn snippet_delete(shared: &Arc<Shared>, name: &str) {
-    shared.snippets.lock().unwrap().retain(|s| s.name != name);
+pub fn macro_delete(shared: &Arc<Shared>, name: &str) {
+    shared.macros.lock().unwrap().retain(|s| s.name != name);
     persist(shared);
 }
 
 /// Replace the whole store (used to sync from the UI in one shot).
-pub fn snippets_set(shared: &Arc<Shared>, list: Vec<SnippetRec>) {
-    *shared.snippets.lock().unwrap() = list;
+pub fn macros_set(shared: &Arc<Shared>, list: Vec<MacroRec>) {
+    *shared.macros.lock().unwrap() = list;
     persist(shared);
 }
 
-/// Run a snippet by name through the macro player. Never returns the text.
-pub fn run_snippet(shared: &Arc<Shared>, name: &str) -> Result<(), String> {
+/// Run a macro by name through the macro player. Never returns the text.
+pub fn run_macro(shared: &Arc<Shared>, name: &str) -> Result<(), String> {
     let text = shared
-        .snippets
+        .macros
         .lock()
         .unwrap()
         .iter()
@@ -615,11 +615,11 @@ pub fn run_snippet(shared: &Arc<Shared>, name: &str) -> Result<(), String> {
             play(shared, &t);
             Ok(())
         }
-        None => Err(format!("no snippet named '{name}'")),
+        None => Err(format!("no macro named '{name}'")),
     }
 }
 
-// ---- snippet macro player (Bash Bunny / DuckyScript + expect) ---------------
+// ---- macro macro player (Bash Bunny / DuckyScript + expect) ---------------
 //
 // One command per line (case-insensitive). A line with no command keyword is
 // typed verbatim + Enter. Commands:
@@ -651,7 +651,7 @@ enum Step {
     If(bool), // true = IF OK, false = IF FAIL
     Else,
     End,
-    Call(String),         // $Name — run another snippet inline
+    Call(String),         // $Name — run another macro inline
     SetOut(String, bool), // SET <name|index> <0|1> — drive an output over CMD
     WaitIo(String, Cmp, i64), // WAITIO <name> <op> <value> — wait on an input
 }
@@ -752,13 +752,13 @@ fn parse_command(kw: &str, rest: &str) -> Option<Vec<Step>> {
     }
 }
 
-fn parse_snippet(s: &str) -> Vec<Step> {
+fn parse_macro(s: &str) -> Vec<Step> {
     let mut steps = Vec::new();
     let mut prev: Vec<Step> = Vec::new(); // for REPEAT
     for raw in s.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         let trimmed = line.trim_start();
-        // $Name — call another snippet inline
+        // $Name — call another macro inline
         if let Some(name) = trimmed.strip_prefix('$') {
             let st = vec![Step::Call(name.trim().to_string())];
             prev = st.clone();
@@ -902,10 +902,10 @@ struct IfFrame {
 
 const MAX_CALL_DEPTH: u32 = 8;
 
-fn snippet_text_by_name(shared: &Arc<Shared>, name: &str) -> Option<String> {
+fn macro_text_by_name(shared: &Arc<Shared>, name: &str) -> Option<String> {
     let want = name.trim().to_lowercase();
     shared
-        .snippets
+        .macros
         .lock()
         .unwrap()
         .iter()
@@ -1055,8 +1055,8 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
             }
             Step::Call(name) => {
                 if depth < MAX_CALL_DEPTH {
-                    if let Some(text) = snippet_text_by_name(shared, name) {
-                        let sub = parse_snippet(&text);
+                    if let Some(text) = macro_text_by_name(shared, name) {
+                        let sub = parse_macro(&text);
                         run_steps(shared, &sub, depth + 1);
                     }
                 }
@@ -1086,9 +1086,9 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
     }
 }
 
-/// Execute a snippet macro against the DATA port on a background thread.
+/// Execute a macro macro against the DATA port on a background thread.
 pub fn play(shared: &Arc<Shared>, text: &str) {
-    let steps = parse_snippet(text);
+    let steps = parse_macro(text);
     let shared = shared.clone();
     std::thread::spawn(move || run_steps(&shared, &steps, 0));
 }
