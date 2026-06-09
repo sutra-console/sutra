@@ -225,10 +225,16 @@ export interface MacroRec {
   name: string;
   text: string;
   secret: boolean;
+  set: string; // project/collection ("" = default)
 }
 export const macrosGet = () => invoke<MacroRec[]>("macros_get");
-export const macroUpsert = (name: string, text: string, secret: boolean) =>
-  invoke<void>("macro_upsert", { name, text, secret });
+export const macroUpsert = (name: string, text: string, secret: boolean, set: string) =>
+  invoke<void>("macro_upsert", { name, text, secret, set });
+/** Export a set (or all macros if set is omitted) to a JSON file at `path`. */
+export const exportSet = (path: string, set?: string) =>
+  invoke<void>("export_set", { path, set: set ?? null });
+/** Import a macro-set JSON file; returns how many were merged. */
+export const importSet = (path: string) => invoke<number>("import_set", { path });
 export const macroDelete = (name: string) => invoke<void>("macro_delete", { name });
 /** Replace the whole store (used to persist a reorder). */
 export const macrosSet = (macros: MacroRec[]) =>

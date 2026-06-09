@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X,
+  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Terminal, type TerminalHandle } from "@/components/Terminal";
 import { MacroHelp } from "@/components/MacroHelp";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import {
   autodetect,
   connect as ttlConnect,
@@ -37,6 +38,8 @@ import {
   macroUpsert,
   macroDelete,
   macrosSet,
+  exportSet,
+  importSet,
   onMacros,
   macroRuns,
   cancelRun,
@@ -171,7 +174,9 @@ export default function App() {
   const [draftName, setDraftName] = useState("");
   const [draftText, setDraftText] = useState("");
   const [draftSecret, setDraftSecret] = useState(false);
+  const [draftSet, setDraftSet] = useState("");
   const [showHelp, setShowHelp] = useState(false);
+  const [setFilter, setSetFilter] = useState(""); // active project/set ("" = all)
 
   // macro drag-reorder (live projected order + ghost)
   const [dragName, setDragName] = useState<string | null>(null);
@@ -355,6 +360,7 @@ export default function App() {
     setDraftName("");
     setDraftText("");
     setDraftSecret(false);
+    setDraftSet(setFilter); // default new macro to the active project
     setDialogOpen(true);
   }
   function openEdit(s: MacroRec) {
@@ -362,14 +368,49 @@ export default function App() {
     setDraftName(s.name);
     setDraftText(s.text);
     setDraftSecret(s.secret);
+    setDraftSet(s.set);
     setDialogOpen(true);
   }
   async function saveMacro() {
     const name = draftName.trim();
     if (!name || !draftText) return;
     if (editOrig && editOrig !== name) await macroDelete(editOrig);
-    await macroUpsert(name, draftText, draftSecret);
+    await macroUpsert(name, draftText, draftSecret, draftSet.trim());
     setDialogOpen(false);
+  }
+
+  // distinct project/set names present in the store
+  const sets = Array.from(new Set(macros.map((m) => m.set).filter(Boolean))).sort();
+  const shownMacros = orderedMacros.filter((s) => !setFilter || s.set === setFilter);
+
+  async function doExport() {
+    const label = setFilter || "macros";
+    const path = await save({
+      defaultPath: `${label}.macroset.json`,
+      filters: [{ name: "Macro set", extensions: ["json"] }],
+    });
+    if (!path) return;
+    try {
+      await exportSet(path, setFilter || undefined);
+      setStatus(`exported ${setFilter ? `set "${setFilter}"` : "all macros"} → ${path}`);
+    } catch (e) {
+      setStatus(`export failed: ${e}`);
+    }
+  }
+
+  async function doImport() {
+    const path = await open({
+      multiple: false,
+      filters: [{ name: "Macro set", extensions: ["json"] }],
+    });
+    if (!path || typeof path !== "string") return;
+    try {
+      const n = await importSet(path);
+      setStatus(`imported ${n} macro${n === 1 ? "" : "s"}`);
+      macrosGet().then(setMacros).catch(() => {});
+    } catch (e) {
+      setStatus(`import failed: ${e}`);
+    }
   }
   async function deleteMacro() {
     if (editOrig) await macroDelete(editOrig);
@@ -711,17 +752,38 @@ export default function App() {
 
           {/* macros */}
           <Card className="flex min-h-0 flex-1 flex-col">
-            <CardHeader className="flex-row items-center py-3">
-              <CardTitle>Macros</CardTitle>
-              <Button size="icon" variant="ghost" className="ml-auto size-7" title="New macro" onClick={openAdd}>
-                <Plus />
-              </Button>
+            <CardHeader className="flex-col items-stretch gap-2 py-3">
+              <div className="flex items-center gap-1">
+                <CardTitle>Macros</CardTitle>
+                <Button size="icon" variant="ghost" className="ml-auto size-7" title="Import a set (.json)" onClick={doImport}>
+                  <Upload />
+                </Button>
+                <Button size="icon" variant="ghost" className="size-7" title="Export this set (.json)" onClick={doExport}>
+                  <Download />
+                </Button>
+                <Button size="icon" variant="ghost" className="size-7" title="New macro" onClick={openAdd}>
+                  <Plus />
+                </Button>
+              </div>
+              <Select value={setFilter || "__all"} onValueChange={(v) => setSetFilter(v === "__all" ? "" : v)}>
+                <SelectTrigger className="h-7 text-xs" title="Project / set">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all">All sets</SelectItem>
+                  {sets.map((s) => (
+                    <SelectItem key={s} value={s}>{s}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </CardHeader>
             <CardContent className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
-              {macros.length === 0 && (
-                <p className="py-4 text-center text-xs text-muted-foreground">No macros yet.</p>
+              {shownMacros.length === 0 && (
+                <p className="py-4 text-center text-xs text-muted-foreground">
+                  {macros.length === 0 ? "No macros yet." : "No macros in this set."}
+                </p>
               )}
-              {orderedMacros.map((s, i) => (
+              {shownMacros.map((s, i) => (
                 <div
                   key={s.name}
                   draggable
@@ -760,6 +822,11 @@ export default function App() {
                     <div className="flex items-center gap-1">
                       {s.secret && <Lock className="size-3 shrink-0 text-muted-foreground" />}
                       <span className="truncate text-sm">{s.name}</span>
+                      {!setFilter && s.set && (
+                        <Badge variant="secondary" className="ml-auto shrink-0 px-1 py-0 text-[9px]">
+                          {s.set}
+                        </Badge>
+                      )}
                     </div>
                     <div className="truncate font-mono text-[11px] text-muted-foreground">
                       {s.secret ? "••••••••" : s.text.replace(/\n/g, " ⏎ ")}
@@ -803,7 +870,21 @@ export default function App() {
 
           <div className="flex gap-4">
             <div className="flex min-w-0 flex-1 flex-col gap-3">
-              <Input placeholder="name" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
+              <div className="flex gap-2">
+                <Input placeholder="name" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
+                <Input
+                  className="w-36"
+                  placeholder="set (optional)"
+                  value={draftSet}
+                  onChange={(e) => setDraftSet(e.target.value)}
+                  list="macro-sets"
+                />
+                <datalist id="macro-sets">
+                  {sets.map((s) => (
+                    <option key={s} value={s} />
+                  ))}
+                </datalist>
+              </div>
               <Textarea
                 placeholder={"login\nDELAY 1000\nSTRING whoami\nENTER"}
                 value={draftText}

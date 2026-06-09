@@ -223,7 +223,7 @@ impl TtlTools {
         Parameters(CreateMacroArgs { name, text, secret }): Parameters<CreateMacroArgs>,
     ) -> String {
         let shared = self.shared.clone();
-        let rec = serial::MacroRec { name: name.clone(), text, secret: secret.unwrap_or(false) };
+        let rec = serial::MacroRec { name: name.clone(), text, secret: secret.unwrap_or(false), set: String::new() };
         let _ = tokio::task::spawn_blocking(move || serial::macro_upsert(&shared, rec)).await;
         format!("saved macro '{name}'")
     }

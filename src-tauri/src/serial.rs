@@ -76,6 +76,8 @@ pub struct MacroRec {
     pub text: String,
     #[serde(default)]
     pub secret: bool,
+    #[serde(default)]
+    pub set: String, // project/collection this macro belongs to ("" = default)
 }
 
 /// Name-only view returned to the LLM (no `text`).
@@ -601,6 +603,23 @@ pub fn macro_delete(shared: &Arc<Shared>, name: &str) {
 pub fn macros_set(shared: &Arc<Shared>, list: Vec<MacroRec>) {
     *shared.macros.lock().unwrap() = list;
     persist(shared);
+}
+
+/// Merge imported macros into the store (upsert by name). Returns the count.
+pub fn macros_import(shared: &Arc<Shared>, recs: Vec<MacroRec>) -> usize {
+    let n = recs.len();
+    {
+        let mut list = shared.macros.lock().unwrap();
+        for rec in recs {
+            if let Some(existing) = list.iter_mut().find(|s| s.name == rec.name) {
+                *existing = rec;
+            } else {
+                list.push(rec);
+            }
+        }
+    }
+    persist(shared);
+    n
 }
 
 /// Run a macro by name through the macro player. Never returns the text.

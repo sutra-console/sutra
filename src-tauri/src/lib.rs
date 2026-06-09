@@ -112,8 +112,46 @@ fn macros_get(state: tauri::State<AppState>) -> Vec<MacroRec> {
 }
 
 #[tauri::command]
-fn macro_upsert(state: tauri::State<AppState>, name: String, text: String, secret: bool) {
-    serial::macro_upsert(&state.shared, MacroRec { name, text, secret });
+fn macro_upsert(state: tauri::State<AppState>, name: String, text: String, secret: bool, set: String) {
+    serial::macro_upsert(&state.shared, MacroRec { name, text, secret, set });
+}
+
+#[derive(Serialize, serde::Deserialize)]
+struct MacroSetFile {
+    set: String,
+    version: u32,
+    macros: Vec<MacroRec>,
+}
+
+/// Export a set (or all macros) to a JSON file at `path`.
+#[tauri::command]
+fn export_set(state: tauri::State<AppState>, path: String, set: Option<String>) -> Result<(), String> {
+    let all = serial::macros_all(&state.shared);
+    let macros: Vec<MacroRec> = match &set {
+        Some(s) => all.into_iter().filter(|m| &m.set == s).collect(),
+        None => all,
+    };
+    let doc = MacroSetFile { set: set.unwrap_or_default(), version: 1, macros };
+    let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// Import a macro-set JSON file at `path` (merge by name). Returns the count.
+#[tauri::command]
+fn import_set(state: tauri::State<AppState>, path: String) -> Result<usize, String> {
+    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let doc: MacroSetFile = serde_json::from_str(&json).map_err(|e| format!("bad set file: {e}"))?;
+    let recs: Vec<MacroRec> = doc
+        .macros
+        .into_iter()
+        .map(|mut m| {
+            if m.set.is_empty() {
+                m.set = doc.set.clone();
+            }
+            m
+        })
+        .collect();
+    Ok(serial::macros_import(&state.shared, recs))
 }
 
 #[tauri::command]
@@ -181,6 +219,7 @@ fn mcp_status(state: tauri::State<AppState>) -> McpStatus {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
             let state = app.state::<AppState>();
@@ -209,6 +248,8 @@ pub fn run() {
             macro_upsert,
             macro_delete,
             macros_set,
+            export_set,
+            import_set,
             mcp_start,
             mcp_stop,
             mcp_status,
