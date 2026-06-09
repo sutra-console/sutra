@@ -1,4 +1,4 @@
-// Front-end mirror of the sutra CMD protocol — see protocol/PROTOCOL.md
+// Front-end mirror of the skrit CMD protocol — see protocol/PROTOCOL.md
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -32,7 +32,7 @@ export interface PortDesc {
   product: string | null;
   manufacturer: string | null;
   serial_number: string | null;
-  is_sutra: boolean;
+  is_duta: boolean;
 }
 
 export interface RespFrame {
@@ -49,7 +49,7 @@ export interface DetectResult {
 
 export const listPorts = () => invoke<PortDesc[]>("list_ports");
 export const autodetect = () => invoke<DetectResult>("autodetect");
-/** Connect a DATA port. Pass cmdPort for a sutra, or null/omit for any generic serial port. */
+/** Connect a DATA port. Pass cmdPort for a Duta, or null/omit for any generic serial port. */
 export const connect = (dataPort: string, cmdPort?: string | null) =>
   invoke<void>("connect", { dataPort, cmdPort: cmdPort ?? null });
 export const disconnect = () => invoke<void>("disconnect");

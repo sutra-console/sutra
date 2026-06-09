@@ -1,4 +1,4 @@
-//! Device discovery + connection management for sutra.
+//! Device discovery + connection management for Duta.
 //!
 //! Shared state (Arc<Shared>) is reachable from both Tauri commands and the
 //! embedded MCP server: the live connection, a rolling console buffer, the
@@ -16,8 +16,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::protocol::{msg, Frame, FrameReader};
 
-pub const SUTRA_VID: u16 = 0x1209;
-pub const SUTRA_PID: u16 = 0xC550;
+pub const DUTA_VID: u16 = 0x1209;
+pub const DUTA_PID: u16 = 0xC550;
 const CONSOLE_CAP: usize = 64 * 1024; // rolling DATA-console buffer for the UI/MCP
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,7 +28,7 @@ pub struct PortDesc {
     pub product: Option<String>,
     pub manufacturer: Option<String>,
     pub serial_number: Option<String>,
-    pub is_sutra: bool,
+    pub is_duta: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,7 +64,7 @@ pub struct ConnState {
     pub connected: bool,
     pub data_port: Option<String>,
     pub cmd_port: Option<String>,
-    pub has_cmd: bool, // true only with a sutra (relays/LED/INFO available)
+    pub has_cmd: bool, // true only with a Duta (relays/LED/INFO available)
     pub params: SerialParams,
 }
 
@@ -111,7 +111,7 @@ impl Default for McpToolFlags {
 }
 
 struct Connection {
-    cmd: Option<Box<dyn SerialPort>>, // None for a generic (non-sutra) port
+    cmd: Option<Box<dyn SerialPort>>, // None for a generic (non-Duta) port
     data_writer: Box<dyn SerialPort>,
     stop: Arc<AtomicBool>,
 }
@@ -201,8 +201,8 @@ pub fn list_ports() -> Vec<PortDesc> {
                 }
                 _ => (None, None, None, None, None),
             };
-            let is_sutra = vid == Some(SUTRA_VID) && pid == Some(SUTRA_PID);
-            PortDesc { name: p.port_name, vid, pid, product, manufacturer, serial_number, is_sutra }
+            let is_duta = vid == Some(DUTA_VID) && pid == Some(DUTA_PID);
+            PortDesc { name: p.port_name, vid, pid, product, manufacturer, serial_number, is_duta }
         })
         .collect()
 }
@@ -274,9 +274,9 @@ pub fn probe_is_cmd(name: &str) -> bool {
 
 pub fn autodetect() -> Result<(String, String), String> {
     let ports: Vec<String> =
-        list_ports().into_iter().filter(|p| p.is_sutra).map(|p| p.name).collect();
+        list_ports().into_iter().filter(|p| p.is_duta).map(|p| p.name).collect();
     if ports.len() < 2 {
-        return Err(format!("expected 2 sutra ports, found {}", ports.len()));
+        return Err(format!("expected 2 Duta ports, found {}", ports.len()));
     }
     for cand in &ports {
         if probe_is_cmd(cand) {
@@ -346,7 +346,7 @@ fn spawn_data_reader(
     });
 }
 
-/// Connect a DATA port. `cmd_name` is the sutra CMD interface, or None for a
+/// Connect a DATA port. `cmd_name` is the Duta CMD interface, or None for a
 /// generic serial port (console only — no relay/LED/INFO).
 pub fn connect(
     shared: &Arc<Shared>,
@@ -472,7 +472,7 @@ pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFram
     let cmd = conn
         .cmd
         .as_mut()
-        .ok_or("no command port — connect a sutra for relay/LED/INFO")?;
+        .ok_or("no command port — connect a Duta for relay/LED/INFO")?;
     cmd.write_all(&wire).map_err(|e| format!("cmd write: {e}"))?;
     cmd.flush().ok();
     let resp = read_response(cmd, 1000)?;
@@ -867,7 +867,7 @@ fn run_command(shared: &Arc<Shared>, cmd: &str, timeout_ms: u64, since: &mut u64
     let id = next_marker_id();
     let needle = format!("sutra_{id}_:");
     // The "" splits the literal so the echoed command line never matches `needle`.
-    let line = format!("{cmd}; echo \"ttlb\"\"uddy_{id}_:$?\"\r");
+    let line = format!("{cmd}; echo \"sut\"\"ra_{id}_:$?\"\r");
     let _ = data_write(shared, line.as_bytes());
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(MAX_WAIT_MS));

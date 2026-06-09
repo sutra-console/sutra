@@ -1,4 +1,4 @@
-# sutra MCP server
+# Sutra MCP server
 
 The desktop app embeds an **MCP server** so an LLM can read the target device's
 serial console and drive it. It's **off by default** — enable it in the app's
@@ -18,8 +18,8 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `list_snippets` | — | snippet **names only** (never contents) |
 | `run_snippet` | `name` | runs a stored snippet by name (sends its text); returns `applied`, not the content |
 | `create_snippet` | `name`, `text`, `secret?` | author/overwrite a reusable snippet |
-| `list_serial_ports` | — | enumerate serial ports (sutra tagged) |
-| `connect_buddy` | — | auto-detect + connect a sutra (DATA+CMD) |
+| `list_serial_ports` | — | enumerate serial ports (Duta tagged) |
+| `connect_buddy` | — | auto-detect + connect a Duta (DATA+CMD) |
 | `connect_port` | `port`, `baud?`, `parity?`, `stop_bits?` | connect any serial port as a console |
 | `disconnect_port` | — | disconnect |
 | `set_serial` | `baud`, `parity?`, `stop_bits?` | change DATA serial params |
@@ -112,14 +112,14 @@ WAITOK
 
 **Claude Code:**
 ```bash
-claude mcp add --transport http sutra http://127.0.0.1:8765/mcp
+claude mcp add --transport http sutra http://127.0.0.1:8551/mcp
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
-    "sutra": { "type": "streamable-http", "url": "http://127.0.0.1:8765/mcp" }
+    "sutra": { "type": "streamable-http", "url": "http://127.0.0.1:8551/mcp" }
   }
 }
 ```

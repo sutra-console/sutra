@@ -156,7 +156,7 @@ impl TtlTools {
         }
     }
 
-    #[tool(description = "Get sutra device info (firmware version, capabilities, output count).")]
+    #[tool(description = "Get Duta device info (firmware version, capabilities, output count).")]
     async fn device_info(&self) -> String {
         match self.cmd(msg::INFO, vec![]).await {
             Ok(r) => format!("status={:?} body={:?}", r.status, r.body),
@@ -228,7 +228,7 @@ impl TtlTools {
         format!("saved macro '{name}'")
     }
 
-    #[tool(description = "List serial ports available on this machine (sutra ports are tagged).")]
+    #[tool(description = "List serial ports available on this machine (Duta ports are tagged).")]
     async fn list_serial_ports(&self) -> String {
         let ports = serial::list_ports();
         if ports.is_empty() {
@@ -237,8 +237,8 @@ impl TtlTools {
         ports
             .iter()
             .map(|p| {
-                let tag = if p.is_sutra {
-                    " [sutra]".to_string()
+                let tag = if p.is_duta {
+                    " [Duta]".to_string()
                 } else if let Some(pr) = &p.product {
                     format!(" [{pr}]")
                 } else {
@@ -250,7 +250,7 @@ impl TtlTools {
             .join("\n")
     }
 
-    #[tool(description = "Auto-detect and connect to a sutra (opens both DATA and CMD ports).")]
+    #[tool(description = "Auto-detect and connect to a Duta (opens both DATA and CMD ports).")]
     async fn connect_buddy(&self) -> String {
         let shared = self.shared.clone();
         match tokio::task::spawn_blocking(move || {
@@ -331,7 +331,7 @@ impl TtlTools {
         }
     }
 
-    #[tool(description = "Report the current connection status (port, baud, whether a sutra).")]
+    #[tool(description = "Report the current connection status (port, baud, whether a Duta).")]
     async fn connection_status(&self) -> String {
         let s = serial::state(&self.shared);
         if !s.connected {
@@ -364,7 +364,7 @@ impl ServerHandler for TtlTools {
         ServerInfo {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             instructions: Some(
-                "sutra bridges a target device's serial console. Use read_console to see recent \
+                "Sutra bridges a target device's serial console. Use read_console to see recent \
                  output and write_console to type commands/keystrokes. set_output toggles the \
                  relays and aux LED."
                     .into(),
@@ -395,7 +395,7 @@ pub fn start(shared: Arc<Shared>, port: u16) -> Result<CancellationToken, String
         let listener = match tokio::net::TcpListener::from_std(std_listener) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("sutra MCP listener: {e}");
+                eprintln!("Sutra MCP listener: {e}");
                 return;
             }
         };

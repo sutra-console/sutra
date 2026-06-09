@@ -399,8 +399,8 @@ export default function App() {
     }
   }
 
-  const ttlPorts = ports.filter((p) => p.is_sutra);
-  // On a sutra the firmware UART is 8N1 (1 stop, no parity) unless built with
+  const ttlPorts = ports.filter((p) => p.is_duta);
+  // On a Duta the firmware UART is 8N1 (1 stop, no parity) unless built with
   // PARITY_SUPPORT. On a generic adapter parity/stop are real hardware settings.
   const parityLocked = connected && hasCmd && !(caps & CAP.PARITY);
   const stopLocked = connected && hasCmd;
@@ -538,7 +538,7 @@ export default function App() {
               {ports.map((p) => (
                 <SelectItem key={p.name} value={p.name}>
                   {p.name}
-                  {p.is_sutra ? " · Duta" : p.product ? ` · ${p.product}` : ""}
+                  {p.is_duta ? " · Duta" : p.product ? ` · ${p.product}` : ""}
                 </SelectItem>
               ))}
             </SelectContent>

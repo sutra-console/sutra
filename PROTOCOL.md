@@ -1,4 +1,4 @@
-# sutra CMD-port wire protocol
+# skrit CMD-port wire protocol
 
 The device exposes **two USB-CDC interfaces**:
 
@@ -136,7 +136,7 @@ on-device menu to reuse the vocabulary:
 
 ```
 PING            -> PONG
-ID              -> sutra v<n>
+ID              -> Duta v<n>
 STATUS          -> R1=0 R2=0 LED=0
 R1 ON|OFF|TOGGLE
 R2 ON|OFF|TOGGLE
