@@ -12,14 +12,14 @@ export const MSG = {
   OUTPUT_DESC: 0x13,
   INPUT_DESC: 0x14,
   INPUT_GET: 0x15,
-  SNIP_LIST: 0x20,
-  SNIP_META: 0x21,
-  SNIP_READ: 0x22,
-  SNIP_WRITE_BEGIN: 0x23,
-  SNIP_WRITE_DATA: 0x24,
-  SNIP_WRITE_END: 0x25,
-  SNIP_DELETE: 0x26,
-  SNIP_RUN: 0x27,
+  MACRO_LIST: 0x20,
+  MACRO_META: 0x21,
+  MACRO_READ: 0x22,
+  MACRO_WRITE_BEGIN: 0x23,
+  MACRO_WRITE_DATA: 0x24,
+  MACRO_WRITE_END: 0x25,
+  MACRO_DELETE: 0x26,
+  MACRO_RUN: 0x27,
 } as const;
 
 export const OUTPUT = { R1: 0, R2: 1, LED: 2 } as const;
@@ -80,16 +80,16 @@ export async function outputGet(): Promise<{ r1: boolean; r2: boolean; led: bool
   return { r1: !!(bm & 1), r2: !!(bm & 2), led: !!(bm & 4) };
 }
 
-export const snipRun = (id: number) => sendCmd(MSG.SNIP_RUN, [id]);
+export const deviceRunMacro = (id: number) => sendCmd(MSG.MACRO_RUN, [id]);
 
 // device capability bits (INFO body[3])
-export const CAP = { EEPROM: 0x01, OLED: 0x02, SPI: 0x04, PARITY: 0x08 } as const;
+export const CAP = { STORE: 0x01, OLED: 0x02, SPI: 0x04, PARITY: 0x08 } as const;
 
 export interface DeviceInfo {
   fwVer: number;
   caps: number;
   nOutputs: number;
-  eepromKb: number;
+  storeKb: number;
   protoVer: number;
   nInputs: number;
 }
@@ -99,7 +99,7 @@ export async function getInfo(): Promise<DeviceInfo> {
     fwVer: ((b[2] ?? 0) << 8) | (b[1] ?? 0),
     caps: b[3] ?? 0,
     nOutputs: b[4] ?? 0,
-    eepromKb: b[5] ?? 0,
+    storeKb: b[5] ?? 0,
     protoVer: b[6] ?? 0,
     nInputs: b[7] ?? 0,
   };
@@ -248,7 +248,7 @@ export async function onMacros(cb: (list: MacroRec[]) => void): Promise<Unlisten
 export function statusText(s: number | null): string {
   switch (s) {
     case 0: return "ok";
-    case 4: return "no EEPROM on device yet";
+    case 4: return "device has no macro storage";
     case 5: return "not found";
     default: return `error (status ${s})`;
   }
@@ -263,7 +263,7 @@ function crc16(data: number[]): number {
   return crc & 0xffff;
 }
 
-const DEV_CHUNK = 60; // SNIP_WRITE_DATA body = id+off(2)+bytes <= 64
+const DEV_CHUNK = 60; // MACRO_WRITE_DATA body = id+off(2)+bytes <= 64
 
 /** Push a macro into the device's EEPROM store (graceful STORAGE_ERR until fitted). */
 export async function saveMacroToDevice(
@@ -274,16 +274,16 @@ export async function saveMacroToDevice(
   const nameB = Array.from(enc.encode(name)).slice(0, 16);
   const data = Array.from(enc.encode(text));
   const total = data.length;
-  let r = await sendCmd(MSG.SNIP_WRITE_BEGIN, [
+  let r = await sendCmd(MSG.MACRO_WRITE_BEGIN, [
     id, total & 0xff, (total >> 8) & 0xff, nameB.length, ...nameB,
   ]);
   if (r.status !== 0) return statusText(r.status);
   for (let off = 0; off < total; off += DEV_CHUNK) {
     const chunk = data.slice(off, off + DEV_CHUNK);
-    r = await sendCmd(MSG.SNIP_WRITE_DATA, [id, off & 0xff, (off >> 8) & 0xff, ...chunk]);
+    r = await sendCmd(MSG.MACRO_WRITE_DATA, [id, off & 0xff, (off >> 8) & 0xff, ...chunk]);
     if (r.status !== 0) return statusText(r.status);
   }
   const c = crc16(data);
-  r = await sendCmd(MSG.SNIP_WRITE_END, [id, c & 0xff, (c >> 8) & 0xff]);
+  r = await sendCmd(MSG.MACRO_WRITE_END, [id, c & 0xff, (c >> 8) & 0xff]);
   return statusText(r.status);
 }

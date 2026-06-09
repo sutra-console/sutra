@@ -835,8 +835,8 @@ export default function App() {
                   <Button variant="ghost" size="icon" className="size-7" disabled={!connected} title="Run on target" onClick={() => { runText(s.text, s.name); focusTerm(); }}>
                     <Play />
                   </Button>
-                  {hasCmd && (
-                    <Button variant="ghost" size="icon" className="size-7" title="Save to Duta (EEPROM)" onClick={() => saveToDevice(s, i)}>
+                  {hasCmd && (caps & CAP.STORE) !== 0 && (
+                    <Button variant="ghost" size="icon" className="size-7" title="Save to Duta" onClick={() => saveToDevice(s, i)}>
                       <Database />
                     </Button>
                   )}
