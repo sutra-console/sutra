@@ -79,8 +79,20 @@ fn data_write(state: tauri::State<AppState>, bytes: Vec<u8>) -> Result<(), Strin
 
 /// Run macro text through the macro player (escapes + `+++DELAY/ENTER/CTRL...+++`).
 #[tauri::command]
-fn run_text(state: tauri::State<AppState>, text: String) {
-    serial::play(&state.shared, &text);
+fn run_text(state: tauri::State<AppState>, text: String, name: Option<String>) {
+    serial::play(&state.shared, name.as_deref().unwrap_or("macro"), &text);
+}
+
+/// In-flight macro runs (for the queue panel).
+#[tauri::command]
+fn macro_runs(state: tauri::State<AppState>) -> Vec<serial::MacroRunInfo> {
+    serial::macro_runs(&state.shared)
+}
+
+/// Request cancellation of a running macro by id.
+#[tauri::command]
+fn cancel_run(state: tauri::State<AppState>, id: u64) {
+    serial::cancel_run(&state.shared, id);
 }
 
 #[tauri::command]
@@ -189,6 +201,8 @@ pub fn run() {
             reconnect_data,
             data_write,
             run_text,
+            macro_runs,
+            cancel_run,
             send_cmd,
             read_console,
             macros_get,

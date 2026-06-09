@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark,
+  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -38,6 +38,9 @@ import {
   macroDelete,
   macrosSet,
   onMacros,
+  macroRuns,
+  cancelRun,
+  onRuns,
   onLink,
   mcpStart,
   mcpStop,
@@ -47,6 +50,7 @@ import {
   type McpStatus,
   type McpToolFlags,
   type MacroRec,
+  type MacroRunInfo,
   type ControlDesc,
 } from "@/lib/ttl";
 
@@ -146,6 +150,7 @@ export default function App() {
   const [deviceName, setDeviceName] = useState("");
   const [caps, setCaps] = useState(0); // device capability bits (buddy only)
   const [macros, setMacros] = useState<MacroRec[]>([]);
+  const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
   const [baud, setBaud] = useState(115200);
   const [parity, setParity] = useState<"none" | "odd" | "even">("none");
@@ -215,13 +220,17 @@ export default function App() {
       }
     }).catch(() => {});
 
+    macroRuns().then(setRuns).catch(() => {});
+
     const un = onMacros(setMacros);
+    const unRuns = onRuns(setRuns);
     const unLink = onLink((online) => {
       setLinkOnline(online);
       setStatus(online ? "target online" : "target offline — link lost, retrying…");
     });
     return () => {
       un.then((f) => f()).catch(() => {});
+      unRuns.then((f) => f()).catch(() => {});
       unLink.then((f) => f()).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -669,6 +678,37 @@ export default function App() {
             </CardContent>
           </Card>
 
+          {/* run queue — in-flight macros (cancellable) */}
+          {runs.length > 0 && (
+            <Card>
+              <CardHeader className="flex-row items-center py-3">
+                <CardTitle>Running</CardTitle>
+                <Badge variant="secondary" className="ml-auto">{runs.length}</Badge>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-1.5">
+                {runs.map((r) => (
+                  <div key={r.id} className="flex items-center gap-2 rounded-md border px-2 py-1.5">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm">{r.name}</div>
+                      <div className="truncate font-mono text-[10px] text-muted-foreground">
+                        {r.status}
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7 text-muted-foreground hover:text-destructive"
+                      title="Cancel run"
+                      onClick={() => cancelRun(r.id)}
+                    >
+                      <X />
+                    </Button>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
           {/* macros */}
           <Card className="flex min-h-0 flex-1 flex-col">
             <CardHeader className="flex-row items-center py-3">
@@ -725,7 +765,7 @@ export default function App() {
                       {s.secret ? "••••••••" : s.text.replace(/\n/g, " ⏎ ")}
                     </div>
                   </div>
-                  <Button variant="ghost" size="icon" className="size-7" disabled={!connected} title="Run on target" onClick={() => { runText(s.text); focusTerm(); }}>
+                  <Button variant="ghost" size="icon" className="size-7" disabled={!connected} title="Run on target" onClick={() => { runText(s.text, s.name); focusTerm(); }}>
                     <Play />
                   </Button>
                   {hasCmd && (

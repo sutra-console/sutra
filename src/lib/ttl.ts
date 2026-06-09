@@ -162,8 +162,22 @@ export async function readInput(index: number): Promise<number> {
 const enc = new TextEncoder();
 /** Send a macro's text straight out the DATA/UART now (raw, no macros). */
 export const runTextNow = (text: string) => dataWrite(Array.from(enc.encode(text)));
-/** Run macro text through the macro player (escapes + `+++DELAY/ENTER/CTRL...+++`). */
-export const runText = (text: string) => invoke<void>("run_text", { text });
+/** Run macro text through the macro player; `name` labels it in the run queue. */
+export const runText = (text: string, name?: string) =>
+  invoke<void>("run_text", { text, name });
+
+// ---- run queue (in-flight macros; cancellable) ----
+export interface MacroRunInfo {
+  id: number;
+  name: string;
+  status: string;
+}
+export const macroRuns = () => invoke<MacroRunInfo[]>("macro_runs");
+export const cancelRun = (id: number) => invoke<void>("cancel_run", { id });
+/** Fires whenever the set of in-flight runs changes (start / status / finish). */
+export async function onRuns(cb: (runs: MacroRunInfo[]) => void): Promise<UnlistenFn> {
+  return listen<MacroRunInfo[]>("ttl://runs", (e) => cb(e.payload));
+}
 
 // ---- DATA serial params ----
 export interface SerialParams {

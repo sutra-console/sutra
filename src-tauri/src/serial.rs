@@ -154,6 +154,7 @@ pub struct Shared {
     data_name: Mutex<Option<String>>,
     cmd_name: Mutex<Option<String>>,
     macros: Mutex<Vec<MacroRec>>,
+    runs: Mutex<Vec<MacroRun>>, // in-flight macro runs (cancellable)
     macros_path: Mutex<Option<std::path::PathBuf>>,
     app: Mutex<Option<AppHandle>>,
     mcp_tools: Mutex<McpToolFlags>,
@@ -169,6 +170,7 @@ impl Default for Shared {
             data_name: Mutex::new(None),
             cmd_name: Mutex::new(None),
             macros: Mutex::new(Vec::new()),
+            runs: Mutex::new(Vec::new()),
             macros_path: Mutex::new(None),
             app: Mutex::new(None),
             mcp_tools: Mutex::new(McpToolFlags::default()),
@@ -612,7 +614,7 @@ pub fn run_macro(shared: &Arc<Shared>, name: &str) -> Result<(), String> {
         .map(|s| s.text.clone());
     match text {
         Some(t) => {
-            play(shared, &t);
+            play(shared, name, &t);
             Ok(())
         }
         None => Err(format!("no macro named '{name}'")),
@@ -841,11 +843,89 @@ fn next_marker_id() -> u64 {
     C.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Block until `needle` appears in console output after `*since`. Returns false on timeout.
-fn wait_for(shared: &Arc<Shared>, needle: &[u8], timeout_ms: u64, since: &mut u64) -> bool {
+// ---- macro run registry (in-flight macros; cancellable) --------------------
+struct MacroRun {
+    id: u64,
+    name: String,
+    status: String,
+    cancel: Arc<AtomicBool>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct MacroRunInfo {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+}
+
+/// Per-run context threaded through the player so steps can report status and
+/// honor cancellation.
+struct MacroCtx {
+    shared: Arc<Shared>,
+    app: Option<AppHandle>,
+    id: u64,
+    cancel: Arc<AtomicBool>,
+}
+
+fn next_run_id() -> u64 {
+    use std::sync::atomic::AtomicU64;
+    static C: AtomicU64 = AtomicU64::new(1);
+    C.fetch_add(1, Ordering::Relaxed)
+}
+
+pub fn macro_runs(shared: &Arc<Shared>) -> Vec<MacroRunInfo> {
+    shared
+        .runs
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| MacroRunInfo { id: r.id, name: r.name.clone(), status: r.status.clone() })
+        .collect()
+}
+
+fn emit_runs(shared: &Arc<Shared>, app: &Option<AppHandle>) {
+    if let Some(app) = app {
+        let _ = app.emit("ttl://runs", macro_runs(shared));
+    }
+}
+
+fn set_run_status(ctx: &MacroCtx, status: &str) {
+    {
+        let mut runs = ctx.shared.runs.lock().unwrap();
+        if let Some(r) = runs.iter_mut().find(|r| r.id == ctx.id) {
+            r.status = status.to_string();
+        }
+    }
+    emit_runs(&ctx.shared, &ctx.app);
+}
+
+/// Request cancellation of a run by id (the player thread stops at the next check).
+pub fn cancel_run(shared: &Arc<Shared>, id: u64) {
+    if let Some(r) = shared.runs.lock().unwrap().iter().find(|r| r.id == id) {
+        r.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Sleep that bails out promptly on cancellation.
+fn cancellable_sleep(ctx: &MacroCtx, ms: u64) {
+    let end = Instant::now() + Duration::from_millis(ms.min(MAX_WAIT_MS));
+    while Instant::now() < end {
+        if ctx.cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Block until `needle` appears in console output after `*since`. Returns false on timeout/cancel.
+fn wait_for(ctx: &MacroCtx, needle: &[u8], timeout_ms: u64, since: &mut u64) -> bool {
+    let shared = &ctx.shared;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(MAX_WAIT_MS));
     let mut acc: Vec<u8> = Vec::new();
     while Instant::now() < deadline {
+        if ctx.cancel.load(Ordering::Relaxed) {
+            return false;
+        }
         let (new, total) = console_since(shared, *since);
         *since = total;
         if !new.is_empty() {
@@ -863,7 +943,8 @@ fn wait_for(shared: &Arc<Shared>, needle: &[u8], timeout_ms: u64, since: &mut u6
 }
 
 /// Run a command and capture its exit code via a split-marker sentinel.
-fn run_command(shared: &Arc<Shared>, cmd: &str, timeout_ms: u64, since: &mut u64) -> Option<i64> {
+fn run_command(ctx: &MacroCtx, cmd: &str, timeout_ms: u64, since: &mut u64) -> Option<i64> {
+    let shared = &ctx.shared;
     let id = next_marker_id();
     let needle = format!("sutra_{id}_:");
     // The "" splits the literal so the echoed command line never matches `needle`.
@@ -874,6 +955,9 @@ fn run_command(shared: &Arc<Shared>, cmd: &str, timeout_ms: u64, since: &mut u64
     let nb = needle.as_bytes();
     let mut acc: Vec<u8> = Vec::new();
     while Instant::now() < deadline {
+        if ctx.cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let (new, total) = console_since(shared, *since);
         *since = total;
         if !new.is_empty() {
@@ -963,7 +1047,7 @@ fn read_input(shared: &Arc<Shared>, idx: u8) -> Option<u16> {
 /// Poll a named input until it satisfies the comparison, or timeout. Returns
 /// false on timeout or an unknown input (caller aborts the macro).
 fn wait_io(
-    shared: &Arc<Shared>,
+    ctx: &MacroCtx,
     name: &str,
     cmp: Cmp,
     threshold: i64,
@@ -971,6 +1055,7 @@ fn wait_io(
     in_names: &mut Vec<String>,
     in_loaded: &mut bool,
 ) -> bool {
+    let shared = &ctx.shared;
     let idx = if let Ok(i) = name.parse::<u8>() {
         Some(i)
     } else {
@@ -987,6 +1072,9 @@ fn wait_io(
     };
     let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(MAX_WAIT_MS));
     while Instant::now() < deadline {
+        if ctx.cancel.load(Ordering::Relaxed) {
+            return false;
+        }
         if let Some(v) = read_input(shared, idx) {
             if cmp_ok(v as i64, cmp, threshold) {
                 return true;
@@ -997,7 +1085,8 @@ fn wait_io(
     false
 }
 
-fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
+fn run_steps(ctx: &MacroCtx, steps: &[Step], depth: u32) {
+    let shared = &ctx.shared;
     let mut stack: Vec<IfFrame> = Vec::new();
     let active = |st: &[IfFrame]| st.last().map_or(true, |f| f.active);
     let mut last_exit: Option<i64> = None;
@@ -1009,6 +1098,9 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
     let mut in_loaded = false;
 
     for step in steps {
+        if ctx.cancel.load(Ordering::Relaxed) {
+            return; // cancelled
+        }
         // control flow is processed regardless of the active state (to track nesting)
         match step {
             Step::If(want_ok) => {
@@ -1038,15 +1130,20 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
             Step::Bytes(b) => {
                 let _ = data_write(shared, b);
             }
-            Step::Delay(ms) => std::thread::sleep(Duration::from_millis((*ms).min(MAX_WAIT_MS))),
+            Step::Delay(ms) => {
+                set_run_status(ctx, &format!("delay {ms}ms"));
+                cancellable_sleep(ctx, *ms);
+            }
             Step::Timeout(ms) => timeout = *ms,
             Step::WaitFor(t) => {
-                if !wait_for(shared, t.as_bytes(), timeout, &mut since) {
-                    break; // timeout aborts the macro
+                set_run_status(ctx, &format!("waiting for: {t}"));
+                if !wait_for(ctx, t.as_bytes(), timeout, &mut since) {
+                    break; // timeout/cancel aborts the macro
                 }
             }
             Step::Run(cmd) => {
-                last_exit = run_command(shared, cmd, timeout, &mut since);
+                set_run_status(ctx, &format!("running: {cmd}"));
+                last_exit = run_command(ctx, cmd, timeout, &mut since);
             }
             Step::WaitOk => {
                 if last_exit != Some(0) {
@@ -1054,10 +1151,11 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
                 }
             }
             Step::Call(name) => {
+                set_run_status(ctx, &format!("call: {name}"));
                 if depth < MAX_CALL_DEPTH {
                     if let Some(text) = macro_text_by_name(shared, name) {
                         let sub = parse_macro(&text);
-                        run_steps(shared, &sub, depth + 1);
+                        run_steps(ctx, &sub, depth + 1);
                     }
                 }
             }
@@ -1077,8 +1175,9 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
                 }
             }
             Step::WaitIo(name, cmp, threshold) => {
-                if !wait_io(shared, name, *cmp, *threshold, timeout, &mut in_names, &mut in_loaded) {
-                    break; // timeout or unknown input aborts the macro
+                set_run_status(ctx, &format!("waiting: {name}"));
+                if !wait_io(ctx, name, *cmp, *threshold, timeout, &mut in_names, &mut in_loaded) {
+                    break; // timeout/cancel/unknown input aborts the macro
                 }
             }
             Step::If(_) | Step::Else | Step::End => {}
@@ -1086,9 +1185,25 @@ fn run_steps(shared: &Arc<Shared>, steps: &[Step], depth: u32) {
     }
 }
 
-/// Execute a macro macro against the DATA port on a background thread.
-pub fn play(shared: &Arc<Shared>, text: &str) {
+/// Execute a macro against the DATA port on a background thread, tracked as a
+/// cancellable run in the registry.
+pub fn play(shared: &Arc<Shared>, name: &str, text: &str) {
     let steps = parse_macro(text);
     let shared = shared.clone();
-    std::thread::spawn(move || run_steps(&shared, &steps, 0));
+    let app = shared.app.lock().unwrap().clone();
+    let id = next_run_id();
+    let cancel = Arc::new(AtomicBool::new(false));
+    shared.runs.lock().unwrap().push(MacroRun {
+        id,
+        name: name.to_string(),
+        status: "running".into(),
+        cancel: cancel.clone(),
+    });
+    emit_runs(&shared, &app);
+    std::thread::spawn(move || {
+        let ctx = MacroCtx { shared: shared.clone(), app: app.clone(), id, cancel };
+        run_steps(&ctx, &steps, 0);
+        shared.runs.lock().unwrap().retain(|r| r.id != id);
+        emit_runs(&shared, &app);
+    });
 }
