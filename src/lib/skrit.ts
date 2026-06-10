@@ -32,8 +32,8 @@ export const MSG = {
 } as const;
 
 export const OUTPUT = { R1: 0, R2: 1, LED: 2 } as const;
-/** Output control types (OUTPUT_DESC type byte). */
-export const CTRL = { RELAY: 0, LED: 1, BUTTON: 2, PWM: 3, RGB: 4 } as const;
+/** Output control types (OUTPUT_DESC type byte) — by behavior, not fixture. */
+export const CTRL = { IO: 0, PWM: 1, RGB: 2 } as const;
 export const RESP_FLAG = 0x80;
 /** SERIAL_SIGNAL line bits (mask/value). */
 export const SIG = { DTR: 0x01, RTS: 0x02, BREAK: 0x04 } as const;
@@ -205,7 +205,7 @@ export async function getInfo(): Promise<DeviceInfo> {
 const dec = new TextDecoder();
 export interface ControlDesc {
   index: number;
-  type: number; // 0 = relay, 1 = led, 2 = button, 3 = pwm
+  type: number; // outputs: 0 = io, 1 = pwm, 2 = rgb · inputs: 0 = digital, 1 = analog
   name: string;
 }
 export async function getDeviceName(): Promise<string> {

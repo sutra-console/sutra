@@ -592,9 +592,7 @@ impl SutraTools {
                 ),
                 Err(_) => (0, "?".into()),
             };
-            let kind = match typ {
-                0 => "relay", 1 => "led", 2 => "button", 3 => "pwm", 4 => "rgb", _ => "?",
-            };
+            let kind = match typ { 0 => "io", 1 => "pwm", 2 => "rgb", _ => "?" };
             let on = if bitmap & (1 << i) != 0 { "on" } else { "off" };
             lines.push(format!("  {i}: {nm} [{kind}] = {on}"));
         }

@@ -93,7 +93,7 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x10` | `OUTPUT_SET` | `index(1)`, `value(1)` | — | sets relay/LED. index: 0=R1,1=R2,2=LED |
 | `0x11` | `OUTPUT_GET` | — | `bitmap(1)` (bit0=R1,bit1=R2,bit2=LED) |
 | `0x12` | `OUTPUT_TOGGLE` | `index(1)` | `bitmap(1)` |
-| `0x13` | `OUTPUT_DESC` | `index(1)` | `index(1)`, `type(1)`, `name…` (type 0=relay, 1=led, 2=button, 3=pwm, 4=rgb) |
+| `0x13` | `OUTPUT_DESC` | `index(1)` | `index(1)`, `type(1)`, `name…` — type is the *behavior*: 0=io (digital on/off), 1=pwm, 2=rgb; what the pin drives (relay, LED, reset…) is the descriptive `name`. |
 | `0x14` | `INPUT_DESC` | `index(1)` | `index(1)`, `type(1)`, `name…` (type 0=digital, 1=analog) |
 | `0x15` | `INPUT_GET` | `index(1)` | `index(1)`, `value(2)` (digital 0/1, analog 0-1023) |
 | `0x16` | `OUTPUT_PULSE` | `index(1)`, `ms(2)` | — | drive output on, restore after `ms` (a momentary button — reset/power lines). |

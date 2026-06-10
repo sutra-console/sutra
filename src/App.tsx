@@ -773,11 +773,11 @@ export default function App() {
             <CardContent className="flex flex-col gap-2">
               {controls.length > 0 ? (
                 <div className="flex flex-col gap-2">
-                  {/* on/off controls (relay/led/button) — compact toggle grid */}
-                  {controls.some((c) => c.type <= CTRL.BUTTON) && (
+                  {/* digital on/off controls (io) — compact toggle grid */}
+                  {controls.some((c) => c.type === CTRL.IO) && (
                     <div className="grid grid-cols-3 gap-2">
                       {controls
-                        .filter((c) => c.type <= CTRL.BUTTON)
+                        .filter((c) => c.type === CTRL.IO)
                         .map((c) => {
                           const on = !!(outBitmap & (1 << c.index));
                           return (
