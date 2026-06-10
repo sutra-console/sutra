@@ -15,6 +15,8 @@ pub mod msg {
     pub const INFO: u8 = 0x02;
     pub const DEVICE_NAME: u8 = 0x03;
     pub const REBOOT: u8 = 0x04;
+    pub const AUTH: u8 = 0x05;
+    pub const AUTH_SET: u8 = 0x06;
     pub const OUTPUT_SET: u8 = 0x10;
     pub const OUTPUT_GET: u8 = 0x11;
     pub const OUTPUT_TOGGLE: u8 = 0x12;
@@ -105,6 +107,14 @@ pub mod status {
     pub const NOT_FOUND: u8 = 0x05;
     pub const BUSY: u8 = 0x06;
     pub const UNSUPPORTED: u8 = 0x07;
+    pub const UNAUTH: u8 = 0x08;
+}
+
+// INFO flags byte (trailing). Network transports gate behind AUTH.
+#[allow(dead_code)]
+pub mod flag {
+    pub const AUTH_REQUIRED: u8 = 0x01;
+    pub const DEFAULT_CRED: u8 = 0x02;
 }
 
 /// CRC-8/ATM (poly 0x07, init 0x00) over the given bytes.

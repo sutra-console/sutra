@@ -171,6 +171,8 @@ pub struct Shared {
     cmd_lock: Mutex<()>,
     // Active BLE link, if connected over Bluetooth instead of serial.
     ble: Mutex<Option<crate::ble::BleLink>>,
+    // Active WebSocket link, if connected over the network.
+    ws: Mutex<Option<crate::ws::WsLink>>,
 }
 
 impl Default for Shared {
@@ -190,6 +192,7 @@ impl Default for Shared {
             mux_rx: Mutex::new(None),
             cmd_lock: Mutex::new(()),
             ble: Mutex::new(None),
+            ws: Mutex::new(None),
         }
     }
 }
@@ -208,6 +211,9 @@ impl Shared {
     // Accessors so the BLE module can share the response matcher + cmd serialization.
     pub(crate) fn ble_slot(&self) -> std::sync::MutexGuard<'_, Option<crate::ble::BleLink>> {
         self.ble.lock().unwrap()
+    }
+    pub(crate) fn ws_slot(&self) -> std::sync::MutexGuard<'_, Option<crate::ws::WsLink>> {
+        self.ws.lock().unwrap()
     }
     pub(crate) fn mux_rx_slot(
         &self,
@@ -632,10 +638,21 @@ pub fn disconnect(shared: &Arc<Shared>) {
         drop(conn.data_writer);
     }
     crate::ble::disconnect(shared);
+    crate::ws::disconnect(shared);
     *shared.mux_rx.lock().unwrap() = None;
 }
 
 pub fn state(shared: &Arc<Shared>) -> ConnState {
+    // Network (WS) link.
+    if shared.ws.lock().unwrap().is_some() {
+        return ConnState {
+            connected: true,
+            data_port: Some("WebSocket".into()),
+            cmd_port: None,
+            has_cmd: true,
+            params: shared.params.lock().unwrap().clone(),
+        };
+    }
     // BLE link: report it as a connected "port" with the CMD channel available.
     if let Some(link) = shared.ble.lock().unwrap().as_ref() {
         return ConnState {
@@ -688,6 +705,9 @@ pub fn mcp_set_params(shared: &Arc<Shared>, params: SerialParams) -> Result<(), 
 }
 
 pub fn data_write(shared: &Arc<Shared>, bytes: &[u8]) -> Result<(), String> {
+    if shared.ws.lock().unwrap().is_some() {
+        return crate::ws::data_write(shared, bytes);
+    }
     if shared.ble.lock().unwrap().is_some() {
         return crate::ble::data_write(shared, bytes);
     }
@@ -706,6 +726,9 @@ pub fn data_write(shared: &Arc<Shared>, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFrame, String> {
+    if shared.ws.lock().unwrap().is_some() {
+        return crate::ws::send_cmd(shared, typ, body);
+    }
     if shared.ble.lock().unwrap().is_some() {
         return crate::ble::send_cmd(shared, typ, body);
     }

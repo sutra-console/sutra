@@ -16,6 +16,10 @@ drives any plain COM port.
 - **Bluetooth LE** — the toolbar's Bluetooth button scans for a Duta and connects
   over BLE (dual NUS console + skrit CMD service); from there the console, controls,
   and macros all work identically to a serial link. *(Scaffold — see duta/zephyr.)*
+- **Network (WebSocket)** — the globe button connects a Duta over `ws://`/`wss://`
+  (the skrit-mux stream over WS binary frames), authenticating with the device
+  password (default `duta`, prompts to change). The `host` reference is a runnable
+  WS server.
 - **Macros** — saved, reorderable command scripts (line-based Bash Bunny /
   DuckyScript) plus an expect engine: `WAITFOR`, `RUN` (with exit-code capture),
   `IF OK…ELSE…END`, `SET` an output, `WAITIO` on an input, `$call` another macro.

@@ -81,6 +81,14 @@ export interface BleDevice {
 export const bleScan = () => invoke<BleDevice[]>("ble_scan");
 /** Connect a Duta over BLE by scanned device id. Returns the device name. */
 export const bleConnect = (id: string) => invoke<string>("ble_connect", { id });
+
+export interface WsConnectResult {
+  name: string;
+  default_cred: boolean;
+}
+/** Connect a Duta over the network (WebSocket), authenticating with `password`. */
+export const wsConnect = (url: string, password: string) =>
+  invoke<WsConnectResult>("ws_connect", { url, password });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });

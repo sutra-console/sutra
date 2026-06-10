@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth,
+  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth, Globe,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,7 @@ import {
   bleScan,
   bleConnect,
   type BleDevice,
+  wsConnect,
   disconnect as serialDisconnect,
   listPorts,
   connState,
@@ -147,6 +148,10 @@ export default function App() {
   const [bleOpen, setBleOpen] = useState(false); // BLE scan dialog
   const [bleScanning, setBleScanning] = useState(false);
   const [bleDevices, setBleDevices] = useState<BleDevice[]>([]);
+  const [wsOpen, setWsOpen] = useState(false); // network (WebSocket) dialog
+  const [wsUrl, setWsUrl] = useState("ws://127.0.0.1:9555/");
+  const [wsPassword, setWsPassword] = useState("duta");
+  const [wsConnecting, setWsConnecting] = useState(false);
   const [hasCmd, setHasCmd] = useState(false);
   const [selectedPort, setSelectedPort] = useState("auto");
   const [profiles, setProfiles] = useState<Profile[]>(loadProfiles);
@@ -369,6 +374,30 @@ export default function App() {
       focusTerm();
     } catch (e) {
       setStatus(`BLE connect failed: ${e}`);
+    }
+  }
+
+  async function handleWsConnect() {
+    setWsConnecting(true);
+    setStatus(`connecting ${wsUrl}…`);
+    try {
+      const res = await wsConnect(wsUrl, wsPassword);
+      setWsOpen(false);
+      setHasCmd(true);
+      setDataPort("WebSocket");
+      setConnected(true);
+      setLinkOnline(true);
+      loadDevice();
+      focusTerm();
+      setStatus(
+        res.default_cred
+          ? `Duta (network) — ${res.name} ⚠ default password, change it`
+          : `Duta (network) — ${res.name}`,
+      );
+    } catch (e) {
+      setStatus(`network connect failed: ${e}`);
+    } finally {
+      setWsConnecting(false);
     }
   }
 
@@ -778,6 +807,11 @@ export default function App() {
               <Bluetooth />
             </Button>
           )}
+          {!connected && (
+            <Button variant="outline" size="sm" title="Connect over the network (WebSocket)" onClick={() => setWsOpen(true)}>
+              <Globe />
+            </Button>
+          )}
           {connected ? (
             <Button variant="destructive" size="sm" onClick={handleDisconnect}>
               <PlugZap /> Disconnect
@@ -1072,6 +1106,41 @@ export default function App() {
           <DialogFooter>
             <Button variant="ghost" size="sm" onClick={handleBleScan} disabled={bleScanning}>
               {bleScanning ? "Scanning…" : "Rescan"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* network (WebSocket) connect modal */}
+      <Dialog open={wsOpen} onOpenChange={setWsOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Globe className="size-4" /> Connect over the network
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 py-1">
+            <Input
+              placeholder="ws://host:port/"
+              value={wsUrl}
+              onChange={(e) => setWsUrl(e.target.value)}
+              spellCheck={false}
+            />
+            <Input
+              type="password"
+              placeholder="password"
+              value={wsPassword}
+              onChange={(e) => setWsPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleWsConnect()}
+            />
+            <p className="text-[10px] text-muted-foreground">
+              The device authenticates with this password (default <code>duta</code>). Use
+              <code>wss://</code> for TLS over an untrusted network.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button size="sm" onClick={handleWsConnect} disabled={wsConnecting || !wsUrl}>
+              {wsConnecting ? "Connecting…" : "Connect"}
             </Button>
           </DialogFooter>
         </DialogContent>

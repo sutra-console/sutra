@@ -2,6 +2,7 @@ mod ble;
 mod mcp;
 mod protocol;
 mod serial;
+mod ws;
 
 use std::sync::{Arc, Mutex};
 
@@ -78,6 +79,17 @@ fn ble_connect(
     id: String,
 ) -> Result<String, String> {
     tauri::async_runtime::block_on(ble::connect(state.shared.clone(), app, id))
+}
+
+/// Connect a Duta over the network (WebSocket), authenticating with `password`.
+#[tauri::command]
+fn ws_connect(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    url: String,
+    password: String,
+) -> Result<ws::WsConnectResult, String> {
+    tauri::async_runtime::block_on(ws::connect(state.shared.clone(), app, url, password))
 }
 
 #[tauri::command]
@@ -265,6 +277,7 @@ pub fn run() {
             connect_muxed,
             ble_scan,
             ble_connect,
+            ws_connect,
             disconnect,
             conn_state,
             set_data_params,

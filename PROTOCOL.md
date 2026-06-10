@@ -76,6 +76,7 @@ Responses carry a 1-byte `STATUS` as `BODY[0]`, then type-specific data:
 | `0x05` | not found (macro id) |
 | `0x06` | busy |
 | `0x07` | unsupported (skrit-mc tier/opcode above `macro_tier`) |
+| `0x08` | unauthenticated (send `AUTH` first — network transports) |
 
 A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 `STATUS` set) so the app never hangs waiting.
@@ -87,9 +88,11 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | TYPE | name | request body | response body (after STATUS) |
 |------|------|--------------|------------------------------|
 | `0x01` | `PING` | — | `"PONG"` |
-| `0x02` | `INFO` | — | `fw_ver(2)`, `caps(1)`, `n_outputs(1)`, `store_kb(1)`, `proto_ver(1)`, `n_inputs(1)`, `macro_tier(1)` |
+| `0x02` | `INFO` | — | `fw_ver(2)`, `caps(1)`, `n_outputs(1)`, `store_kb(1)`, `proto_ver(1)`, `n_inputs(1)`, `macro_tier(1)`, `flags(1)` |
 | `0x03` | `DEVICE_NAME` | — | device name string |
 | `0x04` | `REBOOT` | `mode(1)` | — (replies OK, then reboots). `mode` 0=app reset, 1=bootloader/DFU. Needs `CAP_REBOOT`. |
+| `0x05` | `AUTH` | `password…` | — | authenticate the session on a network transport. OK = authed; `0x08` = wrong password. Until authed the device answers only `PING`/`INFO`/`AUTH`. |
+| `0x06` | `AUTH_SET` | `new_password…` | — | change the password (≤32 bytes); must already be authed. Persists. |
 | `0x10` | `OUTPUT_SET` | `index(1)`, `value(1)` | — | drive output `index` on/off (0/1). Outputs are self-described via `OUTPUT_DESC`. |
 | `0x11` | `OUTPUT_GET` | — | `bitmap(1)` — bit `i` = output `i` is on |
 | `0x12` | `OUTPUT_TOGGLE` | `index(1)` | `bitmap(1)` |
@@ -246,7 +249,7 @@ the cheapest path on an MCU with composite-USB silicon.
 ### skrit-mux — one channel, both roles
 
 Single-channel transports — a single USB-CDC (ESP32-S3, RP2040, nRF52840 over one CDC
-ACM) or a **TCP** socket (WiFi bridge) — carry **both** roles over one byte stream.
+ACM) or a **WebSocket** (network bridge) — carry **both** roles over one byte stream.
 (BLE is dual-channel instead — see below.) Every packet is a COBS frame with a 1-byte
 **channel** tag:
 
@@ -293,6 +296,38 @@ adds no framing of its own. Pair/bond per your security needs.
 > Discovery: the app scans for the **CMD service UUID** (the skrit identifier) and a
 > `Duta`-prefixed name. nRF52840 is the reference (Zephyr + the in-tree BT stack); see
 > [duta/platforms/zephyr](https://github.com/sutra-console/duta).
+
+### WebSocket (network)
+
+A networked device (a WiFi bridge, the `host` reference) carries the *skrit-mux* byte
+stream over a **WebSocket** — `ws://host:port/skrit`, or `wss://` for TLS. The mux frames
+ride **binary** WS messages; message boundaries are irrelevant (reassemble by the `0x00`
+delimiters, as always), so a host just feeds each binary payload to the mux reader. It's
+muxed (`caps.muxed = 1`), like a single USB-CDC.
+
+WebSocket is chosen over a raw TCP socket because it is reachable from a **browser**
+(which cannot open raw sockets), traverses proxies, shares `:443`, and gets TLS +
+standard auth via `wss://`. Auth is a CMD (below), **not** the WS handshake — so it works
+from a browser, where the WebSocket API can't set `Authorization` headers.
+
+## Network auth
+
+A USB or BLE link is gated by physical access / pairing, but a **network** transport is
+reachable by anyone who can route to it — and skrit is effectively a remote shell on the
+target. So a network device requires authentication:
+
+- It advertises `SKRIT_FLAG_AUTH_REQUIRED` in the `INFO` `flags` byte. Until the session
+  authenticates, the device answers **only** `PING`, `INFO`, and `AUTH` (everything else
+  → status `0x08 unauthenticated`) and does **not** bridge the DATA console.
+- The host sends `AUTH <password>`. OK ⇒ the session is authenticated for its lifetime;
+  `0x08` ⇒ wrong password.
+- The device ships with the factory default password **`duta`** and advertises
+  `SKRIT_FLAG_DEFAULT_CRED` while it's unchanged — the app should prompt the user to set a
+  new one. `AUTH_SET <new>` changes it (persisted); the current session stays authed.
+
+`flags` byte: bit0 = `auth-required`, bit1 = `default-credential`. USB/BLE devices leave
+both 0. Run a network bridge over `wss://` so the password and console aren't on the wire
+in the clear; the default-password gate is a usability backstop, not a substitute for TLS.
 
 ## Async events
 
