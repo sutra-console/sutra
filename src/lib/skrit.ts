@@ -232,7 +232,7 @@ export async function getDeviceName(): Promise<string> {
 }
 
 /** What the device's DATA channel carries (so the app can pick a viewer). */
-export const DATA_KIND = { UART: 0, CAN: 1, RS485: 2, SPI: 3, BLE_SNIFF: 4, LOGIC: 5 } as const;
+export const DATA_KIND = { UART: 0, CAN: 1, RS485: 2, SPI: 3, BLE_SNIFF: 4, LOGIC: 5, I2C: 6 } as const;
 export interface DataDesc {
   kind: number;
   name: string;
