@@ -79,6 +79,20 @@ pub struct SetPwmArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetRgbArgs {
+    /// Output index (must be an rgb-type output — see describe_device).
+    pub index: u8,
+    /// Color as "#RRGGBB" / "RRGGBB", or omit and pass r/g/b. Omit everything to read.
+    pub hex: Option<String>,
+    /// Red 0..255 (used if `hex` is absent).
+    pub r: Option<u8>,
+    /// Green 0..255.
+    pub g: Option<u8>,
+    /// Blue 0..255.
+    pub b: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadInputArgs {
     /// Input index (see list_inputs).
     pub index: u8,
@@ -160,7 +174,7 @@ impl SutraTools {
         }
         if !f.outputs {
             for n in [
-                "get_outputs", "set_output", "device_info", "pulse_output", "set_pwm",
+                "get_outputs", "set_output", "device_info", "pulse_output", "set_pwm", "set_rgb",
                 "list_inputs", "read_input", "describe_device",
             ] {
                 router.remove_route(n);
@@ -449,6 +463,42 @@ impl SutraTools {
     }
 
     #[tool(
+        description = "Set an addressable-LED (rgb-type) output's color, as \"#RRGGBB\" via `hex`, or via `r`/`g`/`b` (0..255). Omit all to read the current color. Only rgb-type outputs (see describe_device) accept it."
+    )]
+    async fn set_rgb(
+        &self,
+        Parameters(SetRgbArgs { index, hex, r, g, b }): Parameters<SetRgbArgs>,
+    ) -> String {
+        let rgb = if let Some(h) = hex {
+            match parse_hex_color(&h) {
+                Some(c) => Some(c),
+                None => return format!("error: bad hex color '{h}' (want #RRGGBB)"),
+            }
+        } else if r.is_some() || g.is_some() || b.is_some() {
+            Some((r.unwrap_or(0), g.unwrap_or(0), b.unwrap_or(0)))
+        } else {
+            None // read-back
+        };
+        let body = match rgb {
+            Some((r, g, b)) => vec![index, r, g, b],
+            None => vec![index],
+        };
+        match self.cmd(msg::OUTPUT_RGB, body).await {
+            Ok(r) => match r.status {
+                Some(0) => format!(
+                    "output {index} color = #{:02x}{:02x}{:02x}",
+                    r.body.get(2).copied().unwrap_or(0),
+                    r.body.get(3).copied().unwrap_or(0),
+                    r.body.get(4).copied().unwrap_or(0)
+                ),
+                Some(s) => format!("device returned status 0x{s:02x}"),
+                None => "ok".into(),
+            },
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
         description = "List the device's readable inputs (index, name, digital/analog), with current values."
     )]
     async fn list_inputs(&self) -> String {
@@ -537,7 +587,9 @@ impl SutraTools {
                 ),
                 Err(_) => (0, "?".into()),
             };
-            let kind = match typ { 0 => "relay", 1 => "led", 2 => "button", 3 => "pwm", _ => "?" };
+            let kind = match typ {
+                0 => "relay", 1 => "led", 2 => "button", 3 => "pwm", 4 => "rgb", _ => "?",
+            };
             let on = if bitmap & (1 << i) != 0 { "on" } else { "off" };
             lines.push(format!("  {i}: {nm} [{kind}] = {on}"));
         }
@@ -632,6 +684,18 @@ impl SutraTools {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }
+}
+
+/// Parse "#RRGGBB" or "RRGGBB" into (r, g, b).
+fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some((r, g, b))
 }
 
 /// Render a CMD response: "ok"-style success text, or the STATUS code on failure.

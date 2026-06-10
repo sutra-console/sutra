@@ -18,6 +18,7 @@ export const MSG = {
   SERIAL_SET: 0x18,
   SERIAL_SIGNAL: 0x19,
   OUTPUT_PWM: 0x1a,
+  OUTPUT_RGB: 0x1b,
   MACRO_LIST: 0x20,
   MACRO_META: 0x21,
   MACRO_READ: 0x22,
@@ -31,6 +32,8 @@ export const MSG = {
 } as const;
 
 export const OUTPUT = { R1: 0, R2: 1, LED: 2 } as const;
+/** Output control types (OUTPUT_DESC type byte). */
+export const CTRL = { RELAY: 0, LED: 1, BUTTON: 2, PWM: 3, RGB: 4 } as const;
 export const RESP_FLAG = 0x80;
 /** SERIAL_SIGNAL line bits (mask/value). */
 export const SIG = { DTR: 0x01, RTS: 0x02, BREAK: 0x04 } as const;
@@ -110,6 +113,31 @@ export const outputPwm = (index: number, duty: number) =>
 export async function outputPwmGet(index: number): Promise<number> {
   const b = (await sendCmd(MSG.OUTPUT_PWM, [index])).body; // [status, index, lo, hi]
   return (b[2] ?? 0) | ((b[3] ?? 0) << 8);
+}
+
+export interface Rgb {
+  r: number;
+  g: number;
+  b: number;
+}
+/** Set an addressable-LED output's color (r/g/b each 0–255). */
+export const outputRgb = (index: number, { r, g, b }: Rgb) =>
+  sendCmd(MSG.OUTPUT_RGB, [index, r & 0xff, g & 0xff, b & 0xff]);
+
+/** Read an addressable-LED output's current color. */
+export async function outputRgbGet(index: number): Promise<Rgb> {
+  const b = (await sendCmd(MSG.OUTPUT_RGB, [index])).body; // [status, index, r, g, b]
+  return { r: b[2] ?? 0, g: b[3] ?? 0, b: b[4] ?? 0 };
+}
+
+/** "#rrggbb" <-> {r,g,b} helpers for the color UI. */
+export const rgbToHex = ({ r, g, b }: Rgb) =>
+  "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+export function hexToRgb(hex: string): Rgb | null {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
 }
 
 /** Reconfigure the target DATA UART (baud + optional data bits / parity / stop). */

@@ -18,6 +18,9 @@ import {
 } from "@/components/ui/dialog";
 import { Terminal, type TerminalHandle } from "@/components/Terminal";
 import { MacroHelp } from "@/components/MacroHelp";
+import { ColorField } from "@/components/ColorField";
+import { MacroColorStrip } from "@/components/MacroColorStrip";
+import { Slider } from "@/components/ui/slider";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import {
   autodetect,
@@ -32,6 +35,13 @@ import {
   getDeviceName,
   getControls,
   CAP,
+  CTRL,
+  outputPwm,
+  outputPwmGet,
+  outputRgb,
+  outputRgbGet,
+  rgbToHex,
+  type Rgb,
   runText,
   setDataParams,
   saveMacroToDevice,
@@ -159,6 +169,8 @@ export default function App() {
   const [status, setStatus] = useState("disconnected");
   const [outBitmap, setOutBitmap] = useState(0); // device output states (bit i = control i)
   const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
+  const [pwmVals, setPwmVals] = useState<Record<number, number>>({}); // index -> duty 0..1023
+  const [rgbVals, setRgbVals] = useState<Record<number, Rgb>>({}); // index -> color
   const [deviceName, setDeviceName] = useState("");
   const [caps, setCaps] = useState(0); // device capability bits (Duta only)
   const [macros, setMacros] = useState<MacroRec[]>([]);
@@ -354,8 +366,22 @@ export default function App() {
 
   async function loadDevice() {
     getDeviceName().then(setDeviceName).catch(() => {});
-    getControls().then(setControls).catch(() => {});
     getInfo().then((i) => setCaps(i.caps)).catch(() => {});
+    try {
+      const cs = await getControls();
+      setControls(cs);
+      // Pull current values for the analog (pwm) and color (rgb) controls.
+      const pwm: Record<number, number> = {};
+      const rgb: Record<number, Rgb> = {};
+      for (const c of cs) {
+        if (c.type === CTRL.PWM) pwm[c.index] = await outputPwmGet(c.index).catch(() => 0);
+        else if (c.type === CTRL.RGB) rgb[c.index] = await outputRgbGet(c.index).catch(() => ({ r: 0, g: 0, b: 0 }));
+      }
+      setPwmVals(pwm);
+      setRgbVals(rgb);
+    } catch {
+      /* device may not self-describe */
+    }
     refreshOutputs();
   }
 
@@ -363,6 +389,8 @@ export default function App() {
     setDeviceName("");
     setControls([]);
     setOutBitmap(0);
+    setPwmVals({});
+    setRgbVals({});
     setCaps(0);
   }
 
@@ -374,6 +402,29 @@ export default function App() {
       setStatus(`cmd failed: ${e}`);
     }
     focusTerm();
+  }
+
+  // PWM duty change (analog output). Optimistic local update + fire to device.
+  async function setPwm(index: number, duty: number) {
+    setPwmVals((p) => ({ ...p, [index]: duty }));
+    setOutBitmap((bm) => (duty > 0 ? bm | (1 << index) : bm & ~(1 << index)));
+    try {
+      await outputPwm(index, duty);
+    } catch (e) {
+      setStatus(`cmd failed: ${e}`);
+    }
+  }
+
+  // RGB color change (addressable LED).
+  async function setRgb(index: number, color: Rgb) {
+    setRgbVals((p) => ({ ...p, [index]: color }));
+    const lit = !!(color.r || color.g || color.b);
+    setOutBitmap((bm) => (lit ? bm | (1 << index) : bm & ~(1 << index)));
+    try {
+      await outputRgb(index, color);
+    } catch (e) {
+      setStatus(`cmd failed: ${e}`);
+    }
   }
 
   function openAdd() {
@@ -714,23 +765,79 @@ export default function App() {
             </CardHeader>
             <CardContent className="flex flex-col gap-2">
               {controls.length > 0 ? (
-                <div className="grid grid-cols-3 gap-2">
-                  {controls.map((c) => {
-                    const on = !!(outBitmap & (1 << c.index));
-                    return (
-                      <Button
-                        key={c.index}
-                        variant={on ? "default" : "outline"}
-                        size="sm"
-                        disabled={!connected || !hasCmd}
-                        onClick={() => toggle(c.index)}
-                        className="flex h-auto flex-col py-2"
-                      >
-                        <span className={on ? "" : "text-muted-foreground"}>{c.name}</span>
-                        <span className="text-[10px]">{on ? "ON" : "OFF"}</span>
-                      </Button>
-                    );
-                  })}
+                <div className="flex flex-col gap-2">
+                  {/* on/off controls (relay/led/button) — compact toggle grid */}
+                  {controls.some((c) => c.type <= CTRL.BUTTON) && (
+                    <div className="grid grid-cols-3 gap-2">
+                      {controls
+                        .filter((c) => c.type <= CTRL.BUTTON)
+                        .map((c) => {
+                          const on = !!(outBitmap & (1 << c.index));
+                          return (
+                            <Button
+                              key={c.index}
+                              variant={on ? "default" : "outline"}
+                              size="sm"
+                              disabled={!connected || !hasCmd}
+                              onClick={() => toggle(c.index)}
+                              className="flex h-auto flex-col py-2"
+                            >
+                              <span className={on ? "" : "text-muted-foreground"}>{c.name}</span>
+                              <span className="text-[10px]">{on ? "ON" : "OFF"}</span>
+                            </Button>
+                          );
+                        })}
+                    </div>
+                  )}
+
+                  {/* analog (pwm) + color (rgb) controls — one labeled row each */}
+                  {controls
+                    .filter((c) => c.type === CTRL.PWM || c.type === CTRL.RGB)
+                    .map((c) => (
+                      <div key={c.index} className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium">{c.name}</span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {c.type === CTRL.PWM
+                              ? `${Math.round(((pwmVals[c.index] ?? 0) / 1023) * 100)}%`
+                              : "RGB"}
+                          </span>
+                        </div>
+                        {c.type === CTRL.PWM ? (
+                          <Slider
+                            min={0}
+                            max={1023}
+                            value={[pwmVals[c.index] ?? 0]}
+                            disabled={!connected || !hasCmd}
+                            onValueChange={([v]) => setPwm(c.index, v)}
+                          />
+                        ) : (
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button
+                                type="button"
+                                disabled={!connected || !hasCmd}
+                                className="flex items-center gap-2 rounded border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
+                              >
+                                <span
+                                  className="size-4 rounded-sm border"
+                                  style={{ backgroundColor: rgbToHex(rgbVals[c.index] ?? { r: 0, g: 0, b: 0 }) }}
+                                />
+                                <span className="font-mono">
+                                  {rgbToHex(rgbVals[c.index] ?? { r: 0, g: 0, b: 0 })}
+                                </span>
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-64" align="start">
+                              <ColorField
+                                value={rgbVals[c.index] ?? { r: 0, g: 0, b: 0 }}
+                                onChange={(rgb) => setRgb(c.index, rgb)}
+                              />
+                            </PopoverContent>
+                          </Popover>
+                        )}
+                      </div>
+                    ))}
                 </div>
               ) : (
                 <p className="text-[10px] text-muted-foreground">
@@ -938,6 +1045,7 @@ export default function App() {
                 onChange={(e) => setDraftText(e.target.value)}
                 className="h-44 resize-none font-mono text-xs"
               />
+              <MacroColorStrip text={draftText} onChange={setDraftText} />
               {!showHelp && (
                 <p className="text-[10px] leading-tight text-muted-foreground">
                   One command per line. <code>STRING</code> <code>ENTER</code> <code>DELAY ms</code>{" "}
