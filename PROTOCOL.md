@@ -267,6 +267,30 @@ DATA payloads should stay ≤ 240 B so COBS overhead is a single byte; larger co
 bursts are split across frames (order is preserved). There is no CRC on the DATA
 channel — it mirrors the lossless, unframed nature of the raw console port.
 
+### BLE — Nordic UART Service
+
+Over Bluetooth LE, the *skrit-mux* byte stream rides a **Nordic UART Service (NUS)**
+GATT pipe — the de-facto "serial over BLE" service, so generic BLE-serial terminals
+work for debugging too. The device advertises NUS as a peripheral; the host (central)
+connects and the same mux frames flow in both directions:
+
+| Role | UUID | Properties | Direction |
+|------|------|-----------|-----------|
+| **Service** | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` | — | — |
+| **RX** | `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` | Write / Write-NR | host → device |
+| **TX** | `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` | Notify | device → host |
+
+The host writes mux frames to **RX**; the device sends them back as **TX**
+notifications (subscribe to the CCC first). A frame larger than the negotiated ATT
+MTU (− 3 bytes of header) is split across notifications and reassembled by the
+`0x00` delimiters, exactly as on any other byte stream — BLE adds no new framing.
+A BLE device sets the **`muxed`** capability bit. Pair/bond per your security needs;
+the transport itself is link-agnostic.
+
+> Discovery: the app scans for the NUS **service UUID** and a `Duta`-prefixed name.
+> nRF52840 is the reference (Zephyr + the in-tree BT stack); see
+> [duta/platforms/zephyr](https://github.com/sutra-console/duta).
+
 ## Async events
 
 A device MAY push **unsolicited** frames in the `0x50..0x5F` range — these have the
