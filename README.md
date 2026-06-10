@@ -26,10 +26,17 @@ drives any plain COM port.
   A **run queue** shows in-flight macros (e.g. blocked on `WAITFOR`) and lets you
   cancel them. Macros flagged secret are never readable by the LLM and are
   redacted from console reads.
-- **Device-driven controls** — the UI renders the relays/LED/inputs the device
-  *self-describes*, by name.
+- **Device-driven controls** — the UI renders what the device *self-describes*, typed
+  by behavior: a toggle for digital IO, a 0–1023 slider + frequency/resolution badge
+  for PWM, a per-pixel color picker for addressable RGB, live input readouts — all by
+  name, with no per-board UI.
+- **Configure device (runtime provisioning)** — on firmware that advertises the
+  `provision` flag, re-pin the device's IO from the app: a per-pin role/name picker
+  constrained to what each pin supports (strapping/dual-use pins warned, fixed pins
+  locked), persisted on-device, applied on reboot. No reflashing.
 - **MCP server** — per-tool toggles; lets an LLM read the console, run/author
-  macros (run-by-name only), drive outputs, and manage the connection.
+  macros (run-by-name only), drive outputs (incl. PWM config + RGB), provision IO,
+  and manage the connection.
 
 ## Run
 

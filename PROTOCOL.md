@@ -2,8 +2,8 @@
 
 The device exposes the two roles below. How they map onto the wire depends on the
 **transport** (see *Transports*): a dual-CDC device gives them two USB interfaces; a
-single-channel device (single USB-CDC, TCP, BLE) carries both over one stream via
-*skrit-mux*.
+single-channel device (single USB-CDC, WebSocket) carries both over one stream via
+*skrit-mux*; BLE carries them as two GATT services.
 
 | Role | Job | Framing |
 |------|-----|---------|

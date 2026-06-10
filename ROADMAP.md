@@ -45,9 +45,10 @@ A device advertises the highest tier its VM runs in `INFO.macro_tier` (`0` = no 
     keeps USB + the host console alive; tee RX to console while matching
   - behind a build flag (trades against OLED on flash-tight boards); measure flash
   - target: **Tier 2** on the CH552
-- [ ] **INFO `macro_tier` byte** (duta) — advertise the VM tier; append to INFO body
-- [ ] **Scratch push-and-run** — write bytecode to reserved id `0xFF`, `MACRO_RUN(0xFF)`;
-      works with zero persistence (RAM-bound)
+- [x] **INFO `macro_tier` byte** (duta) — advertised by every shared-core port (ESP32 /
+      Pico / nRF / host report tier 2); the CH552 still needs it once its VM lands
+- [x] **Scratch push-and-run** — write bytecode to reserved id `0xFF`, `MACRO_RUN(0xFF)`;
+      works with zero persistence (RAM-bound) on every shared-core port
 - [ ] **Flip Save-to-Duta gate** — gate on `macro.tier <= device.macroTier` once the
       firmware reports it (kept on the old raw path until then to avoid a regression)
 - [ ] **Persisted programs** — store bytecode via `MACRO_WRITE_*`; VM streams opcodes

@@ -40,7 +40,7 @@ pub struct WriteArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetOutputArgs {
-    /// Output index: 0 = Relay 1, 1 = Relay 2, 2 = Aux LED.
+    /// Output index (describe_device lists each output's index, name, and type).
     pub index: u8,
     /// true to turn on, false to turn off.
     pub on: bool,
@@ -64,7 +64,7 @@ pub struct CreateMacroArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PulseOutputArgs {
-    /// Output index: 0 = Relay 1, 1 = Relay 2, 2 = Aux LED.
+    /// Output index (describe_device lists each output's index, name, and type).
     pub index: u8,
     /// Pulse width in milliseconds (the output flips, then restores).
     pub ms: u16,
@@ -280,7 +280,7 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "Get relay/LED output states as a bitmap (bit0=Relay1, bit1=Relay2, bit2=Aux LED)."
+        description = "Get output on/off states as a bitmap (bit i = output i; describe_device lists names)."
     )]
     async fn get_outputs(&self) -> String {
         match self.cmd(msg::OUTPUT_GET, vec![]).await {
@@ -289,7 +289,7 @@ impl SutraTools {
         }
     }
 
-    #[tool(description = "Set an output. index: 0=Relay1, 1=Relay2, 2=Aux LED. on: true/false.")]
+    #[tool(description = "Set an output on/off by index. describe_device lists each output's index, name, and type.")]
     async fn set_output(
         &self,
         Parameters(SetOutputArgs { index, on }): Parameters<SetOutputArgs>,
@@ -461,7 +461,7 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "Momentarily pulse an output (flip then restore after `ms`). Ideal for a reset/power button wired to a relay. index: 0=Relay1, 1=Relay2, 2=Aux LED."
+        description = "Momentarily pulse an output (flip then restore after `ms`). Ideal for a reset/power button wired to a relay. describe_device lists output indexes."
     )]
     async fn pulse_output(
         &self,

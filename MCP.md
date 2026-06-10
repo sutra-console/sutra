@@ -15,8 +15,8 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `wait_for` | `text`, `timeout_ms?` | block until `text` appears on the console (or time out) |
 | `device_info` | — | firmware version, caps, output count |
 | `describe_device` | — | full self-describe: name, fw, caps, every output + input |
-| `get_outputs` | — | relay/LED bitmap (bit0=R1, bit1=R2, bit2=AuxLED) |
-| `set_output` | `index`, `on` | 0=Relay1, 1=Relay2, 2=Aux LED |
+| `get_outputs` | — | output on/off bitmap (bit *i* = output *i*; see `describe_device` for names) |
+| `set_output` | `index`, `on` | drive an output by index (`describe_device` lists what each one is) |
 | `pulse_output` | `index`, `ms` | momentary flip-then-restore (a reset/power button) |
 | `set_pwm` | `index`, `duty?` | set a pwm-type output's duty 0–1023 (omit `duty` to read it back) |
 | `set_pwm_config` | `index`, `frequency?`, `resolution?` | get/set a PWM output's frequency (Hz) + resolution (bits) — e.g. 50 Hz servo |
@@ -29,9 +29,9 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `set_baud` | `baud`, `data_bits?`, `parity?`, `stop_bits?` | reconfigure the **target** DATA UART (over CMD) |
 | `serial_signal` | `dtr?`, `rts?`, `break?` | drive DTR/RTS/BREAK — enter an ESP/AVR bootloader |
 | `reboot_device` | `bootloader?` | reset the Duta, optionally into DFU/download mode |
-| `list_snippets` | — | snippet **names only** (never contents) |
-| `run_snippet` | `name` | runs a stored snippet by name (sends its text); returns `applied`, not the content |
-| `create_snippet` | `name`, `text`, `secret?` | author/overwrite a reusable snippet |
+| `list_macros` | — | macro **names only** (never contents) |
+| `run_macro` | `name` | runs a stored macro by name (sends its text); returns `applied`, not the content |
+| `create_macro` | `name`, `text`, `secret?` | author/overwrite a reusable macro |
 | `list_serial_ports` | — | enumerate serial ports (Duta tagged) |
 | `connect_duta` | — | auto-detect + connect a Duta — **dual-CDC or single-port muxed** |
 | `connect_port` | `port`, `baud?`, `parity?`, `stop_bits?` | connect any serial port as a console |
@@ -59,29 +59,29 @@ board's pin map, persists, and takes effect after `reboot_device`. See [PROTOCOL
 Each group is individually switchable in the app's **Settings**. A disabled
 group is **removed from the router** — it doesn't appear in `tools/list` and any
 call is rejected, so the model can't even see it. Groups:
-`console_read`, `console_write`, `outputs`, `snippets_run`, `snippets_create`,
-`connection`. All on by default. Toggling restarts a running server so the change
-takes effect on the client's next list.
+`console_read`, `console_write`, `outputs` (incl. the provisioning tools),
+`macros_run`, `macros_create`, `connection`. All on by default. Toggling restarts
+a running server so the change takes effect on the client's next list.
 
-### Snippets & secrets (by design)
+### Macros & secrets (by design)
 
-Snippets are a **backend-owned store** shared between the app UI and the MCP
-server (persisted to `snippets.json` in the app data dir). The LLM can **list
-names**, **run by name**, and **create** snippets — but **can never read a
-snippet's text**. So you can keep a `prod-login` snippet holding a password: the
-model applies it (`run_snippet "prod-login"`) without ever seeing the secret.
-Snippets the LLM creates appear live in the app.
+Macros are a **backend-owned store** shared between the app UI and the MCP
+server (persisted to `macros.json` in the app data dir). The LLM can **list
+names**, **run by name**, and **create** macros — but **can never read a
+macro's text**. So you can keep a `prod-login` macro holding a password: the
+model applies it (`run_macro "prod-login"`) without ever seeing the secret.
+Macros the LLM creates appear live in the app.
 
-> Echo redaction: if the target **echoes** what a secret snippet typed (some
+> Echo redaction: if the target **echoes** what a secret macro typed (some
 > consoles echo passwords), `read_console` would otherwise leak it. So the typed
-> literals of every `secret` snippet (bare lines + `STRING` args, ≥3 chars) are
+> literals of every `secret` macro (bare lines + `STRING` args, ≥3 chars) are
 > replaced with `<REDACTED>` in `read_console` output. The human terminal is
 > unaffected. Caveat: a transformed echo (e.g. masked `****`) won't match, and a
 > very short secret over-redacts — over-redaction is the safe failure mode.
 
-### Snippet macros (Bash Bunny / DuckyScript style)
+### Macro language (Bash Bunny / DuckyScript style)
 
-Snippet text is a line-based payload — **one command per line**. A line with no
+Macro text is a line-based payload — **one command per line**. A line with no
 command keyword is **typed verbatim + Enter**.
 
 ```
@@ -118,7 +118,7 @@ CTRL c
 | `TIMEOUT <ms>` | wait timeout for `WAITFOR`/`RUN` (default 10000) |
 | `SET <name\|index> <0\|1>` | drive an output by name (e.g. `SET Relay1 0`) — needs a CMD link |
 | `WAITIO <name> <op> <value>` | wait until an input passes (`WAITIO LDR > 124`); ops `> < >= <= == !=` |
-| `$Name` | run another snippet inline (e.g. `$Login`); nesting capped at depth 8 |
+| `$Name` | run another macro inline (e.g. `$Login`); nesting capped at depth 8 |
 
 `RUN` captures `$?` by appending a split-marker `echo` (`echo "sut""ra_N_:$?"`) so
 the echoed command can't false-match — it needs a **POSIX shell** on the target.
@@ -127,7 +127,7 @@ the echoed command can't false-match — it needs a **POSIX shell** on the targe
 WAITFOR login:
 admin
 WAITFOR Password:
-hunter2                 # bare line = typed + Enter (use a secret snippet for real creds)
+hunter2                 # bare line = typed + Enter (use a secret macro for real creds)
 RUN systemctl is-active myapp
 IF FAIL
   RUN systemctl restart myapp
