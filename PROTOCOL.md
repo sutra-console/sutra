@@ -246,8 +246,9 @@ the cheapest path on an MCU with composite-USB silicon.
 ### skrit-mux — one channel, both roles
 
 Single-channel transports — a single USB-CDC (ESP32-S3, RP2040, nRF52840 over one CDC
-ACM), a **TCP** socket (WiFi bridge), or **BLE** (a NUS GATT pipe) — carry **both**
-roles over one byte stream. Every packet is a COBS frame with a 1-byte **channel** tag:
+ACM) or a **TCP** socket (WiFi bridge) — carry **both** roles over one byte stream.
+(BLE is dual-channel instead — see below.) Every packet is a COBS frame with a 1-byte
+**channel** tag:
 
 ```
 0x00 , COBS( CHANNEL , payload... ) , 0x00
@@ -267,28 +268,30 @@ DATA payloads should stay ≤ 240 B so COBS overhead is a single byte; larger co
 bursts are split across frames (order is preserved). There is no CRC on the DATA
 channel — it mirrors the lossless, unframed nature of the raw console port.
 
-### BLE — Nordic UART Service
+### BLE — NUS console + a CMD service
 
-Over Bluetooth LE, the *skrit-mux* byte stream rides a **Nordic UART Service (NUS)**
-GATT pipe — the de-facto "serial over BLE" service, so generic BLE-serial terminals
-work for debugging too. The device advertises NUS as a peripheral; the host (central)
-connects and the same mux frames flow in both directions:
+BLE is **dual-channel**, like dual-CDC — GATT gives each role its own pipe, so there's
+no need to mux. The two roles map to two GATT services, and **`caps.muxed` is 0**:
 
-| Role | UUID | Properties | Direction |
-|------|------|-----------|-----------|
-| **Service** | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` | — | — |
-| **RX** | `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` | Write / Write-NR | host → device |
-| **TX** | `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` | Notify | device → host |
+- **DATA** = a **Nordic UART Service (NUS)** — the de-facto "serial over BLE". It carries
+  the **raw** target console, so any generic BLE-UART terminal (nRF Connect, etc.) reads
+  it directly, no skrit knowledge needed.
+- **CMD** = a **skrit CMD service** carrying the framed CMD protocol (`TYPE SEQ LEN BODY
+  CRC8`, `0x00`-delimited) — byte-identical to the dual-CDC CMD port.
 
-The host writes mux frames to **RX**; the device sends them back as **TX**
-notifications (subscribe to the CCC first). A frame larger than the negotiated ATT
-MTU (− 3 bytes of header) is split across notifications and reassembled by the
-`0x00` delimiters, exactly as on any other byte stream — BLE adds no new framing.
-A BLE device sets the **`muxed`** capability bit. Pair/bond per your security needs;
-the transport itself is link-agnostic.
+| Service | UUID base | RX (host→device, write) | TX (device→host, notify) |
+|---------|-----------|-------------------------|--------------------------|
+| **DATA** (NUS) | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` | `…0002` raw console in | `…0003` raw console out |
+| **CMD** (skrit) | `6E410001-B5A3-F393-E0A9-E50E24DCCA9E` | `…0002` CMD frames in | `…0003` CMD responses/events out |
 
-> Discovery: the app scans for the NUS **service UUID** and a `Duta`-prefixed name.
-> nRF52840 is the reference (Zephyr + the in-tree BT stack); see
+(The CMD service reuses the Nordic vendor base with service word `6E41xxxx` to mark it as
+a sibling of NUS.) The host subscribes to both TX characteristics (CCC), writes console
+keystrokes to DATA-RX and CMD frames to CMD-RX. A frame larger than the negotiated ATT
+MTU (− 3) is split across notifications and reassembled by the `0x00` delimiters — BLE
+adds no framing of its own. Pair/bond per your security needs.
+
+> Discovery: the app scans for the **CMD service UUID** (the skrit identifier) and a
+> `Duta`-prefixed name. nRF52840 is the reference (Zephyr + the in-tree BT stack); see
 > [duta/platforms/zephyr](https://github.com/sutra-console/duta).
 
 ## Async events
