@@ -35,6 +35,6 @@ bun run tauri dev
 
 The app mirrors the skrit contract in
 [`src-tauri/src/protocol.rs`](src-tauri/src/protocol.rs) and
-[`src/lib/ttl.ts`](src/lib/ttl.ts); the spec is vendored in [PROTOCOL.md](PROTOCOL.md)
+[`src/lib/skrit.ts`](src/lib/skrit.ts); the spec is vendored in [PROTOCOL.md](PROTOCOL.md)
 (canonical home: the [skrit](https://github.com/sutra-console/skrit) repo). MCP
 usage is in [MCP.md](MCP.md).

@@ -15,13 +15,13 @@ use rmcp::{
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::msg;
+use crate::protocol::{cap, msg, parity, reboot, sig};
 use crate::serial::{self, Shared};
 
 #[derive(Clone)]
-pub struct TtlTools {
+pub struct SutraTools {
     shared: Arc<Shared>,
-    tool_router: ToolRouter<TtlTools>,
+    tool_router: ToolRouter<SutraTools>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -63,6 +63,65 @@ pub struct CreateMacroArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PulseOutputArgs {
+    /// Output index: 0 = Relay 1, 1 = Relay 2, 2 = Aux LED.
+    pub index: u8,
+    /// Pulse width in milliseconds (the output flips, then restores).
+    pub ms: u16,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetPwmArgs {
+    /// Output index (must be a pwm-type output — see describe_device).
+    pub index: u8,
+    /// Duty cycle 0..1023 (0 = off, 1023 = fully on). Omit to just read it back.
+    pub duty: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadInputArgs {
+    /// Input index (see list_inputs).
+    pub index: u8,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetBaudArgs {
+    /// New baud rate for the target DATA UART (e.g. 115200).
+    pub baud: u32,
+    /// Data bits: 7 or 8 (default 8).
+    pub data_bits: Option<u8>,
+    /// Parity: "none", "odd", or "even" (default none).
+    pub parity: Option<String>,
+    /// Stop bits: 1 or 2 (default 1).
+    pub stop_bits: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SerialSignalArgs {
+    /// Drive DTR high (true) or low (false); omit to leave unchanged.
+    pub dtr: Option<bool>,
+    /// Drive RTS high (true) or low (false); omit to leave unchanged.
+    pub rts: Option<bool>,
+    /// Assert a line BREAK on the DATA UART.
+    #[serde(rename = "break")]
+    pub r#break: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RebootArgs {
+    /// true = reboot into the bootloader/DFU for firmware update; false = app reset.
+    pub bootloader: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WaitForArgs {
+    /// Substring to wait for in the target console output.
+    pub text: String,
+    /// Timeout in milliseconds (default 10000).
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConnectPortArgs {
     /// Serial port name, e.g. "COM23" or "/dev/ttyUSB0".
     pub port: String,
@@ -85,20 +144,25 @@ pub struct SetSerialArgs {
 }
 
 #[tool_router]
-impl TtlTools {
+impl SutraTools {
     pub fn new(shared: Arc<Shared>) -> Self {
         // Hide tool groups the user disabled in Settings (disabled routes vanish
         // from list_all and are rejected by call).
         let mut router = Self::tool_router();
         let f = serial::get_mcp_tools(&shared);
         if !f.console_read {
-            router.remove_route("read_console");
+            for n in ["read_console", "wait_for"] {
+                router.remove_route(n);
+            }
         }
         if !f.console_write {
             router.remove_route("write_console");
         }
         if !f.outputs {
-            for n in ["get_outputs", "set_output", "device_info"] {
+            for n in [
+                "get_outputs", "set_output", "device_info", "pulse_output", "set_pwm",
+                "list_inputs", "read_input", "describe_device",
+            ] {
                 router.remove_route(n);
             }
         }
@@ -112,8 +176,8 @@ impl TtlTools {
         }
         if !f.connection {
             for n in [
-                "list_serial_ports", "connect_buddy", "connect_port", "disconnect_port",
-                "set_serial", "connection_status",
+                "list_serial_ports", "connect_duta", "connect_port", "disconnect_port",
+                "set_serial", "connection_status", "set_baud", "serial_signal", "reboot_device",
             ] {
                 router.remove_route(n);
             }
@@ -250,16 +314,13 @@ impl TtlTools {
             .join("\n")
     }
 
-    #[tool(description = "Auto-detect and connect to a Duta (opens both DATA and CMD ports).")]
-    async fn connect_buddy(&self) -> String {
+    #[tool(
+        description = "Auto-detect and connect to a Duta. Handles both a dual-CDC Duta (two ports) and a single-port muxed Duta (ESP32 / Pico / nRF52840)."
+    )]
+    async fn connect_duta(&self) -> String {
         let shared = self.shared.clone();
-        match tokio::task::spawn_blocking(move || {
-            let (data, cmd) = serial::autodetect()?;
-            serial::mcp_connect(&shared, &data, Some(&cmd))
-        })
-        .await
-        {
-            Ok(Ok(())) => "connected".into(),
+        match tokio::task::spawn_blocking(move || serial::mcp_connect_auto(&shared)).await {
+            Ok(Ok(desc)) => desc,
             Ok(Err(e)) => format!("error: {e}"),
             Err(e) => format!("error: {e}"),
         }
@@ -338,7 +399,7 @@ impl TtlTools {
             return "not connected".into();
         }
         format!(
-            "connected: DATA={} CMD={} buddy={} baud={} parity={} stop={}",
+            "connected: DATA={} CMD={} duta={} baud={} parity={} stop={}",
             s.data_port.unwrap_or_default(),
             s.cmd_port.unwrap_or_default(),
             s.has_cmd,
@@ -347,9 +408,242 @@ impl TtlTools {
             s.params.stop_bits
         )
     }
+
+    #[tool(
+        description = "Momentarily pulse an output (flip then restore after `ms`). Ideal for a reset/power button wired to a relay. index: 0=Relay1, 1=Relay2, 2=Aux LED."
+    )]
+    async fn pulse_output(
+        &self,
+        Parameters(PulseOutputArgs { index, ms }): Parameters<PulseOutputArgs>,
+    ) -> String {
+        let body = vec![index, (ms & 0xFF) as u8, (ms >> 8) as u8];
+        match self.cmd(msg::OUTPUT_PULSE, body).await {
+            Ok(r) => status_text(&r, "pulsed"),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Set a PWM output's duty cycle (0..1023 — dim an LED, drive a fan/servo-style output). Omit `duty` to read the current value. Only pwm-type outputs (see describe_device) accept it; needs the device's pwm capability."
+    )]
+    async fn set_pwm(
+        &self,
+        Parameters(SetPwmArgs { index, duty }): Parameters<SetPwmArgs>,
+    ) -> String {
+        let body = match duty {
+            Some(d) => vec![index, (d & 0xFF) as u8, (d >> 8) as u8],
+            None => vec![index],
+        };
+        match self.cmd(msg::OUTPUT_PWM, body).await {
+            Ok(r) => match r.status {
+                Some(0) => {
+                    let cur = (r.body.get(2).copied().unwrap_or(0) as u16)
+                        | ((r.body.get(3).copied().unwrap_or(0) as u16) << 8);
+                    format!("output {index} duty = {cur}/1023")
+                }
+                Some(s) => format!("device returned status 0x{s:02x}"),
+                None => "ok".into(),
+            },
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "List the device's readable inputs (index, name, digital/analog), with current values."
+    )]
+    async fn list_inputs(&self) -> String {
+        let info = match self.cmd(msg::INFO, vec![]).await {
+            Ok(r) => r,
+            Err(e) => return format!("error: {e}"),
+        };
+        let n_inputs = info.body.get(7).copied().unwrap_or(0);
+        if n_inputs == 0 {
+            return "(device reports no inputs)".into();
+        }
+        let mut out = Vec::new();
+        for i in 0..n_inputs {
+            let name = match self.cmd(msg::INPUT_DESC, vec![i]).await {
+                Ok(r) => String::from_utf8_lossy(r.body.get(3..).unwrap_or(&[])).into_owned(),
+                Err(_) => "?".into(),
+            };
+            let val = match self.cmd(msg::INPUT_GET, vec![i]).await {
+                Ok(r) => (r.body.get(2).copied().unwrap_or(0) as u16)
+                    | ((r.body.get(3).copied().unwrap_or(0) as u16) << 8),
+                Err(_) => 0,
+            };
+            out.push(format!("{i}: {name} = {val}"));
+        }
+        out.join("\n")
+    }
+
+    #[tool(description = "Read a single input value by index (digital 0/1, analog 0-1023).")]
+    async fn read_input(
+        &self,
+        Parameters(ReadInputArgs { index }): Parameters<ReadInputArgs>,
+    ) -> String {
+        match self.cmd(msg::INPUT_GET, vec![index]).await {
+            Ok(r) => {
+                let v = (r.body.get(2).copied().unwrap_or(0) as u16)
+                    | ((r.body.get(3).copied().unwrap_or(0) as u16) << 8);
+                format!("input {index} = {v}")
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "A full self-describe of the connected device: name, firmware, capabilities, every output (name/type/state) and input."
+    )]
+    async fn describe_device(&self) -> String {
+        let info = match self.cmd(msg::INFO, vec![]).await {
+            Ok(r) => r,
+            Err(e) => return format!("error: {e}"),
+        };
+        let b = &info.body;
+        let fw = format!("{}.{}", b.get(2).copied().unwrap_or(0), b.get(1).copied().unwrap_or(0));
+        let caps = b.get(3).copied().unwrap_or(0);
+        let n_out = b.get(4).copied().unwrap_or(0);
+        let n_in = b.get(7).copied().unwrap_or(0);
+        let tier = b.get(8).copied().unwrap_or(0);
+        let name = match self.cmd(msg::DEVICE_NAME, vec![]).await {
+            Ok(r) => String::from_utf8_lossy(r.body.get(1..).unwrap_or(&[])).into_owned(),
+            Err(_) => "Duta".into(),
+        };
+        let mut capv = Vec::new();
+        for (bit, label) in [
+            (cap::STORE, "store"), (cap::OLED, "oled"), (cap::SPI, "spi"),
+            (cap::PARITY, "parity"), (cap::MUX, "mux"), (cap::SERIAL, "serial"),
+            (cap::REBOOT, "reboot"), (cap::PWM, "pwm"),
+        ] {
+            if caps & bit != 0 {
+                capv.push(label);
+            }
+        }
+        let bitmap = match self.cmd(msg::OUTPUT_GET, vec![]).await {
+            Ok(r) => r.body.get(1).copied().unwrap_or(0),
+            Err(_) => 0,
+        };
+        let mut lines = vec![
+            format!("name: {name}"),
+            format!("firmware: v{fw}  proto: {}  macro_tier: {tier}", b.get(6).copied().unwrap_or(0)),
+            format!("caps: {}", if capv.is_empty() { "(none)".into() } else { capv.join(", ") }),
+            format!("outputs ({n_out}):"),
+        ];
+        for i in 0..n_out {
+            let (typ, nm) = match self.cmd(msg::OUTPUT_DESC, vec![i]).await {
+                Ok(r) => (
+                    r.body.get(2).copied().unwrap_or(0),
+                    String::from_utf8_lossy(r.body.get(3..).unwrap_or(&[])).into_owned(),
+                ),
+                Err(_) => (0, "?".into()),
+            };
+            let kind = match typ { 0 => "relay", 1 => "led", 2 => "button", 3 => "pwm", _ => "?" };
+            let on = if bitmap & (1 << i) != 0 { "on" } else { "off" };
+            lines.push(format!("  {i}: {nm} [{kind}] = {on}"));
+        }
+        if n_in > 0 {
+            lines.push(format!("inputs ({n_in}): use list_inputs"));
+        }
+        lines.join("\n")
+    }
+
+    #[tool(
+        description = "Set the target DATA-UART parameters (baud, optional data bits / parity / stop bits). Works even on a muxed link where USB line-coding isn't available."
+    )]
+    async fn set_baud(
+        &self,
+        Parameters(SetBaudArgs { baud, data_bits, parity: par, stop_bits }): Parameters<SetBaudArgs>,
+    ) -> String {
+        let parc = match par.as_deref() {
+            Some("odd") => parity::ODD,
+            Some("even") => parity::EVEN,
+            _ => parity::NONE,
+        };
+        let body = vec![
+            (baud & 0xFF) as u8, ((baud >> 8) & 0xFF) as u8,
+            ((baud >> 16) & 0xFF) as u8, ((baud >> 24) & 0xFF) as u8,
+            data_bits.unwrap_or(8), parc, stop_bits.unwrap_or(1),
+        ];
+        match self.cmd(msg::SERIAL_SET, body).await {
+            Ok(r) => status_text(&r, &format!("DATA UART set to {baud} baud")),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Drive the DATA-UART modem/break lines: DTR, RTS, and/or BREAK. Sequence DTR+RTS to enter an ESP32 / AVR target's bootloader. Omitted fields are left unchanged."
+    )]
+    async fn serial_signal(
+        &self,
+        Parameters(SerialSignalArgs { dtr, rts, r#break: brk }): Parameters<SerialSignalArgs>,
+    ) -> String {
+        let mut mask = 0u8;
+        let mut value = 0u8;
+        if let Some(d) = dtr {
+            mask |= sig::DTR;
+            if d { value |= sig::DTR; }
+        }
+        if let Some(r) = rts {
+            mask |= sig::RTS;
+            if r { value |= sig::RTS; }
+        }
+        if brk.unwrap_or(false) {
+            mask |= sig::BREAK;
+            value |= sig::BREAK;
+        }
+        match self.cmd(msg::SERIAL_SIGNAL, vec![mask, value]).await {
+            Ok(r) => status_text(&r, "signaled"),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Reboot the Duta device. bootloader=true drops it into its firmware-update bootloader/DFU (e.g. ESP download mode, RP2 UF2, nRF DFU); false = normal app reset."
+    )]
+    async fn reboot_device(
+        &self,
+        Parameters(RebootArgs { bootloader }): Parameters<RebootArgs>,
+    ) -> String {
+        let mode = if bootloader.unwrap_or(false) { reboot::BOOTLOADER } else { reboot::APP };
+        match self.cmd(msg::REBOOT, vec![mode]).await {
+            Ok(r) => status_text(&r, "rebooting"),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Block until `text` appears in the target console output, or until `timeout_ms` (default 10000) elapses. Returns the matched tail, or a timeout note."
+    )]
+    async fn wait_for(
+        &self,
+        Parameters(WaitForArgs { text, timeout_ms }): Parameters<WaitForArgs>,
+    ) -> String {
+        let deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_millis(timeout_ms.unwrap_or(10_000) as u64);
+        loop {
+            let tail = serial::read_console(&self.shared, 8000);
+            if let Some(pos) = tail.find(&text) {
+                let end = (pos + text.len() + 80).min(tail.len());
+                return format!("matched: …{}", &tail[pos.saturating_sub(40)..end]);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return format!("timeout: '{text}' did not appear");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
 }
 
-impl TtlTools {
+/// Render a CMD response: "ok"-style success text, or the STATUS code on failure.
+fn status_text(r: &serial::RespFrame, ok: &str) -> String {
+    match r.status {
+        Some(0) => ok.to_string(),
+        Some(s) => format!("device returned status 0x{s:02x}"),
+        None => ok.to_string(),
+    }
+}
+
+impl SutraTools {
     async fn cmd(&self, typ: u8, body: Vec<u8>) -> Result<serial::RespFrame, String> {
         let shared = self.shared.clone();
         tokio::task::spawn_blocking(move || serial::send_cmd(&shared, typ, body))
@@ -359,14 +653,19 @@ impl TtlTools {
 }
 
 #[tool_handler]
-impl ServerHandler for TtlTools {
+impl ServerHandler for SutraTools {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             instructions: Some(
-                "Sutra bridges a target device's serial console. Use read_console to see recent \
-                 output and write_console to type commands/keystrokes. set_output toggles the \
-                 relays and aux LED."
+                "Sutra bridges a target device's serial console. connect_duta auto-connects a \
+                 Duta (dual-CDC or single-port muxed). Use read_console to see recent output, \
+                 write_console to type commands, and wait_for to block until expected output \
+                 appears. describe_device lists the device's controls; set_output / pulse_output \
+                 drive relays and the aux LED (pulse_output is a momentary reset/power button). \
+                 set_baud changes the DATA-UART speed, serial_signal drives DTR/RTS/BREAK to enter \
+                 a target's bootloader, and reboot_device resets the Duta (optionally into DFU). \
+                 Run stored macros by name to apply secrets without seeing them."
                     .into(),
             ),
             ..Default::default()
@@ -386,7 +685,7 @@ pub fn start(shared: Arc<Shared>, port: u16) -> Result<CancellationToken, String
     let ct = CancellationToken::new();
     let serve_ct = ct.clone();
     let service = StreamableHttpService::new(
-        move || Ok(TtlTools::new(shared.clone())),
+        move || Ok(SutraTools::new(shared.clone())),
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );

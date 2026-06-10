@@ -6,12 +6,18 @@ export const MSG = {
   PING: 0x01,
   INFO: 0x02,
   DEVICE_NAME: 0x03,
+  REBOOT: 0x04,
   OUTPUT_SET: 0x10,
   OUTPUT_GET: 0x11,
   OUTPUT_TOGGLE: 0x12,
   OUTPUT_DESC: 0x13,
   INPUT_DESC: 0x14,
   INPUT_GET: 0x15,
+  OUTPUT_PULSE: 0x16,
+  SERIAL_GET: 0x17,
+  SERIAL_SET: 0x18,
+  SERIAL_SIGNAL: 0x19,
+  OUTPUT_PWM: 0x1a,
   MACRO_LIST: 0x20,
   MACRO_META: 0x21,
   MACRO_READ: 0x22,
@@ -20,10 +26,18 @@ export const MSG = {
   MACRO_WRITE_END: 0x25,
   MACRO_DELETE: 0x26,
   MACRO_RUN: 0x27,
+  EVENT_LOG: 0x50,
+  EVENT_INPUT: 0x51,
 } as const;
 
 export const OUTPUT = { R1: 0, R2: 1, LED: 2 } as const;
 export const RESP_FLAG = 0x80;
+/** SERIAL_SIGNAL line bits (mask/value). */
+export const SIG = { DTR: 0x01, RTS: 0x02, BREAK: 0x04 } as const;
+/** SERIAL_GET/SET parity byte. */
+export const PARITY = { NONE: 0, ODD: 1, EVEN: 2 } as const;
+/** REBOOT modes. */
+export const REBOOT = { APP: 0, BOOTLOADER: 1 } as const;
 
 export interface PortDesc {
   name: string;
@@ -52,6 +66,8 @@ export const autodetect = () => invoke<DetectResult>("autodetect");
 /** Connect a DATA port. Pass cmdPort for a Duta, or null/omit for any generic serial port. */
 export const connect = (dataPort: string, cmdPort?: string | null) =>
   invoke<void>("connect", { dataPort, cmdPort: cmdPort ?? null });
+/** Connect a single-port muxed Duta (ESP32 / Pico / nRF52840) — DATA + CMD over one port. */
+export const connectMuxed = (port: string) => invoke<void>("connect_muxed", { port });
 export const disconnect = () => invoke<void>("disconnect");
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
@@ -59,13 +75,13 @@ export const sendCmd = (typ: number, body: number[] = []) =>
 
 /** Subscribe to raw DATA-port bytes (target console). */
 export async function onData(cb: (bytes: Uint8Array) => void): Promise<UnlistenFn> {
-  return listen<number[]>("ttl://data", (e) => cb(Uint8Array.from(e.payload)));
+  return listen<number[]>("sutra://data", (e) => cb(Uint8Array.from(e.payload)));
 }
 
 /** Target link state: fires false when the DATA port drops (unplug / device
  *  reset) and true when it auto-recovers. The connection stays open throughout. */
 export async function onLink(cb: (online: boolean) => void): Promise<UnlistenFn> {
-  return listen<boolean>("ttl://link", (e) => cb(e.payload));
+  return listen<boolean>("sutra://link", (e) => cb(e.payload));
 }
 
 // ---- high-level helpers ----
@@ -82,8 +98,52 @@ export async function outputGet(): Promise<{ r1: boolean; r2: boolean; led: bool
 
 export const deviceRunMacro = (id: number) => sendCmd(MSG.MACRO_RUN, [id]);
 
+/** Momentary pulse: flip an output for `ms`, then restore (reset/power button). */
+export const outputPulse = (index: number, ms: number) =>
+  sendCmd(MSG.OUTPUT_PULSE, [index, ms & 0xff, (ms >> 8) & 0xff]);
+
+/** Set a PWM output's duty (0–1023). Needs CAP.PWM and a pwm-type output. */
+export const outputPwm = (index: number, duty: number) =>
+  sendCmd(MSG.OUTPUT_PWM, [index, duty & 0xff, (duty >> 8) & 0xff]);
+
+/** Read a PWM output's current duty (0–1023). */
+export async function outputPwmGet(index: number): Promise<number> {
+  const b = (await sendCmd(MSG.OUTPUT_PWM, [index])).body; // [status, index, lo, hi]
+  return (b[2] ?? 0) | ((b[3] ?? 0) << 8);
+}
+
+/** Reconfigure the target DATA UART (baud + optional data bits / parity / stop). */
+export const serialSet = (baud: number, dataBits = 8, parity = PARITY.NONE, stopBits = 1) =>
+  sendCmd(MSG.SERIAL_SET, [
+    baud & 0xff, (baud >> 8) & 0xff, (baud >> 16) & 0xff, (baud >> 24) & 0xff,
+    dataBits, parity, stopBits,
+  ]);
+
+/** Drive DATA modem/break lines. mask/value are OR-combinations of SIG.*. */
+export const serialSignal = (mask: number, value: number) =>
+  sendCmd(MSG.SERIAL_SIGNAL, [mask & 0xff, value & 0xff]);
+
+/** Reboot the device — REBOOT.APP (reset) or REBOOT.BOOTLOADER (DFU). */
+export const reboot = (mode: number = REBOOT.APP) => sendCmd(MSG.REBOOT, [mode]);
+
+/** Subscribe to async device events (EVENT_LOG / EVENT_INPUT). */
+export async function onEvent(
+  cb: (typ: number, body: number[]) => void,
+): Promise<UnlistenFn> {
+  return listen<[number, number[]]>("sutra://event", (e) => cb(e.payload[0], e.payload[1]));
+}
+
 // device capability bits (INFO body[3])
-export const CAP = { STORE: 0x01, OLED: 0x02, SPI: 0x04, PARITY: 0x08 } as const;
+export const CAP = {
+  STORE: 0x01,
+  OLED: 0x02,
+  SPI: 0x04,
+  PARITY: 0x08,
+  MUX: 0x10,
+  SERIAL: 0x20,
+  REBOOT: 0x40,
+  PWM: 0x80,
+} as const;
 
 export interface DeviceInfo {
   fwVer: number;
@@ -111,7 +171,7 @@ export async function getInfo(): Promise<DeviceInfo> {
 const dec = new TextDecoder();
 export interface ControlDesc {
   index: number;
-  type: number; // 0 = relay, 1 = led
+  type: number; // 0 = relay, 1 = led, 2 = button, 3 = pwm
   name: string;
 }
 export async function getDeviceName(): Promise<string> {
@@ -178,7 +238,7 @@ export const macroRuns = () => invoke<MacroRunInfo[]>("macro_runs");
 export const cancelRun = (id: number) => invoke<void>("cancel_run", { id });
 /** Fires whenever the set of in-flight runs changes (start / status / finish). */
 export async function onRuns(cb: (runs: MacroRunInfo[]) => void): Promise<UnlistenFn> {
-  return listen<MacroRunInfo[]>("ttl://runs", (e) => cb(e.payload));
+  return listen<MacroRunInfo[]>("sutra://runs", (e) => cb(e.payload));
 }
 
 // ---- DATA serial params ----
@@ -251,7 +311,7 @@ export const macrosSet = (macros: MacroRec[]) =>
   invoke<void>("macros_set", { macros });
 /** Fires when the store changes (incl. macros the LLM creates via MCP). */
 export async function onMacros(cb: (list: MacroRec[]) => void): Promise<UnlistenFn> {
-  return listen<MacroRec[]>("ttl://macros", (e) => cb(e.payload));
+  return listen<MacroRec[]>("sutra://macros", (e) => cb(e.payload));
 }
 
 // ---- macro -> device EEPROM (Save to buddi) ----

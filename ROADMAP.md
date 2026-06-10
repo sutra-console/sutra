@@ -56,9 +56,8 @@ A device advertises the highest tier its VM runs in `INFO.macro_tier` (`0` = no 
 ### Later / v2
 - [ ] **Branching opcodes** `IF`/`ELSE`/`ENDIF` (reserved `0x20`–`0x22`) — forward-scan
       jumps in the VM; lifts on-device conditionals past linear expect
-- [ ] **Tier-1 / Tier-2 VMs on bigger MCUs** — ESP32 / nRF52 (Zephyr) / RP2040
-- [ ] **`ttlb_` → `skrit_` rename** of the CRC/COBS helpers in `protocol.h` (touches all
-      firmware callers — its own focused sweep)
+- [x] **Tier-1 / Tier-2 VMs on bigger MCUs** — ESP32 / nRF52 (Zephyr) / RP2040 — done
+      via the shared core (`duta/platforms/common/skrit_device.h`), Tier 2 on all three
 
 ## Invariants
 - The device never sees `STRING`/`WAITFOR` text — only resolved opcodes.

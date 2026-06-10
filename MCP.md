@@ -12,18 +12,36 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 |------|------|------|
 | `read_console` | `max_bytes?` | returns recent target-console output (DATA port) |
 | `write_console` | `text`, `newline?` | sends text/keystrokes to the target (DATA port) |
+| `wait_for` | `text`, `timeout_ms?` | block until `text` appears on the console (or time out) |
 | `device_info` | — | firmware version, caps, output count |
+| `describe_device` | — | full self-describe: name, fw, caps, every output + input |
 | `get_outputs` | — | relay/LED bitmap (bit0=R1, bit1=R2, bit2=AuxLED) |
 | `set_output` | `index`, `on` | 0=Relay1, 1=Relay2, 2=Aux LED |
+| `pulse_output` | `index`, `ms` | momentary flip-then-restore (a reset/power button) |
+| `set_pwm` | `index`, `duty?` | set a pwm-type output's duty 0–1023 (omit `duty` to read it back) |
+| `list_inputs` | — | inputs with current values (digital/analog) |
+| `read_input` | `index` | read one input value |
+| `set_baud` | `baud`, `data_bits?`, `parity?`, `stop_bits?` | reconfigure the **target** DATA UART (over CMD) |
+| `serial_signal` | `dtr?`, `rts?`, `break?` | drive DTR/RTS/BREAK — enter an ESP/AVR bootloader |
+| `reboot_device` | `bootloader?` | reset the Duta, optionally into DFU/download mode |
 | `list_snippets` | — | snippet **names only** (never contents) |
 | `run_snippet` | `name` | runs a stored snippet by name (sends its text); returns `applied`, not the content |
 | `create_snippet` | `name`, `text`, `secret?` | author/overwrite a reusable snippet |
 | `list_serial_ports` | — | enumerate serial ports (Duta tagged) |
-| `connect_buddy` | — | auto-detect + connect a Duta (DATA+CMD) |
+| `connect_duta` | — | auto-detect + connect a Duta — **dual-CDC or single-port muxed** |
 | `connect_port` | `port`, `baud?`, `parity?`, `stop_bits?` | connect any serial port as a console |
 | `disconnect_port` | — | disconnect |
-| `set_serial` | `baud`, `parity?`, `stop_bits?` | change DATA serial params |
-| `connection_status` | — | current port/baud/buddy status |
+| `set_serial` | `baud`, `parity?`, `stop_bits?` | change the host-side DATA serial params |
+| `connection_status` | — | current port/baud/Duta status |
+
+> **Muxed devices.** ESP32-S3, RP2040/RP2350 (Pico), and nRF52840 Dutas carry the
+> console and the control channel over a *single* USB port via [skrit-mux](PROTOCOL.md).
+> `connect_duta` detects and connects them automatically — the tools above behave
+> identically whether the Duta is dual-CDC or muxed.
+
+`set_baud` / `serial_signal` / `reboot_device` / `set_pwm` need a Duta with the matching
+capability (`serial`, `reboot`, `pwm`) — `describe_device` lists what the connected
+board supports.
 
 ### Tool toggles (Settings ▸ MCP tools)
 
@@ -91,7 +109,7 @@ CTRL c
 | `WAITIO <name> <op> <value>` | wait until an input passes (`WAITIO LDR > 124`); ops `> < >= <= == !=` |
 | `$Name` | run another snippet inline (e.g. `$Login`); nesting capped at depth 8 |
 
-`RUN` captures `$?` by appending a split-marker `echo` (`echo "ttlb""uddy_N:$?"`) so
+`RUN` captures `$?` by appending a split-marker `echo` (`echo "sut""ra_N_:$?"`) so
 the echoed command can't false-match — it needs a **POSIX shell** on the target.
 
 ```

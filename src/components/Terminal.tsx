@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { init, Terminal as Ghostty, FitAddon } from "ghostty-web";
-import { onData, dataWrite, readConsole } from "@/lib/ttl";
+import { onData, dataWrite, readConsole } from "@/lib/skrit";
 
 // WASM init is shared across all Terminal instances; run it once.
 let initialized: Promise<void> | null = null;

@@ -47,6 +47,17 @@ fn connect(
     serial::connect(&state.shared, app, &data_port, cmd_port.as_deref())
 }
 
+/// Connect a single-port muxed Duta (ESP32 / Pico / nRF52840): DATA + CMD share
+/// one stream via skrit-mux.
+#[tauri::command]
+fn connect_muxed(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    port: String,
+) -> Result<(), String> {
+    serial::connect_muxed(&state.shared, app, &port)
+}
+
 #[tauri::command]
 fn disconnect(state: tauri::State<AppState>) {
     serial::disconnect(&state.shared);
@@ -234,6 +245,7 @@ pub fn run() {
             list_ports,
             autodetect,
             connect,
+            connect_muxed,
             disconnect,
             conn_state,
             set_data_params,

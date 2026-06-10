@@ -21,8 +21,9 @@ import { MacroHelp } from "@/components/MacroHelp";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import {
   autodetect,
-  connect as ttlConnect,
-  disconnect as ttlDisconnect,
+  connect as serialConnect,
+  connectMuxed,
+  disconnect as serialDisconnect,
   listPorts,
   connState,
   outputToggle,
@@ -56,7 +57,7 @@ import {
   type MacroRunInfo,
   type ControlDesc,
   TIER_INFO,
-} from "@/lib/ttl";
+} from "@/lib/skrit";
 
 const BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1500000];
 
@@ -159,7 +160,7 @@ export default function App() {
   const [outBitmap, setOutBitmap] = useState(0); // device output states (bit i = control i)
   const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
   const [deviceName, setDeviceName] = useState("");
-  const [caps, setCaps] = useState(0); // device capability bits (buddy only)
+  const [caps, setCaps] = useState(0); // device capability bits (Duta only)
   const [macros, setMacros] = useState<MacroRec[]>([]);
   const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
@@ -207,7 +208,7 @@ export default function App() {
 
   function commitReorder() {
     if (dragName && overName && dragName !== overName) {
-      setMacros(orderedMacros); // optimistic; backend confirms via ttl://macros
+      setMacros(orderedMacros); // optimistic; backend confirms via sutra://macros
       macrosSet(orderedMacros).catch(() => {});
     }
     setDragName(null);
@@ -291,14 +292,25 @@ export default function App() {
     try {
       await setDataParams({ baud, data_bits: 8, parity, stop_bits: stopBits });
       if (selectedPort === "auto") {
-        const { data, cmd } = await autodetect();
-        await ttlConnect(data, cmd);
-        setHasCmd(true);
-        setDataPort(data);
-        setStatus(`Duta — DATA ${data} · CMD ${cmd}`);
+        try {
+          // Two Duta ports → dual-CDC.
+          const { data, cmd } = await autodetect();
+          await serialConnect(data, cmd);
+          setHasCmd(true);
+          setDataPort(data);
+          setStatus(`Duta — DATA ${data} · CMD ${cmd}`);
+        } catch (dualErr) {
+          // One Duta port → a single-port muxed board (ESP32 / Pico / nRF52840).
+          const muxPort = dutaPorts[0]?.name;
+          if (!muxPort) throw dualErr;
+          await connectMuxed(muxPort);
+          setHasCmd(true);
+          setDataPort(muxPort);
+          setStatus(`Duta (muxed) — ${muxPort}`);
+        }
         loadDevice();
       } else {
-        await ttlConnect(selectedPort, null);
+        await serialConnect(selectedPort, null);
         setHasCmd(false);
         setDataPort(selectedPort);
         clearDevice();
@@ -315,7 +327,7 @@ export default function App() {
   }
 
   async function handleDisconnect() {
-    await ttlDisconnect().catch(() => {});
+    await serialDisconnect().catch(() => {});
     setConnected(false);
     setLinkOnline(true);
     setDataPort(null);
@@ -460,7 +472,7 @@ export default function App() {
     }
   }
 
-  const ttlPorts = ports.filter((p) => p.is_duta);
+  const dutaPorts = ports.filter((p) => p.is_duta);
   // On a Duta the firmware UART is 8N1 (1 stop, no parity) unless built with
   // PARITY_SUPPORT. On a generic adapter parity/stop are real hardware settings.
   const parityLocked = connected && hasCmd && !(caps & CAP.PARITY);
@@ -594,7 +606,7 @@ export default function App() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="auto">
-                {ttlPorts.length >= 2 ? "Duta (auto)" : "Duta (none)"}
+                {dutaPorts.length >= 2 ? "Duta (auto)" : "Duta (none)"}
               </SelectItem>
               {ports.map((p) => (
                 <SelectItem key={p.name} value={p.name}>
@@ -665,7 +677,7 @@ export default function App() {
               <PlugZap /> Disconnect
             </Button>
           ) : (
-            <Button size="sm" onClick={handleConnect} disabled={selectedPort === "auto" && ttlPorts.length < 2}>
+            <Button size="sm" onClick={handleConnect} disabled={selectedPort === "auto" && dutaPorts.length < 1}>
               <Plug /> Connect
             </Button>
           )}

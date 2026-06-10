@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serialport::{DataBits, Parity, SerialPort, SerialPortType, StopBits};
 use tauri::{AppHandle, Emitter};
 
-use crate::protocol::{msg, Frame, FrameReader};
+use crate::protocol::{is_event, msg, mux_wrap, Frame, FrameReader, MuxReader};
 
 pub const DUTA_VID: u16 = 0x1209;
 pub const DUTA_PID: u16 = 0xC550;
@@ -117,9 +117,10 @@ impl Default for McpToolFlags {
 }
 
 struct Connection {
-    cmd: Option<Box<dyn SerialPort>>, // None for a generic (non-Duta) port
-    data_writer: Box<dyn SerialPort>,
+    cmd: Option<Box<dyn SerialPort>>, // None for a generic port or a muxed Duta
+    data_writer: Box<dyn SerialPort>, // also the CMD writer on a muxed link
     stop: Arc<AtomicBool>,
+    muxed: bool, // single port carries DATA + CMD via skrit-mux
 }
 
 /// Rolling console buffer with a monotonic total, so a macro can scan only the
@@ -164,6 +165,10 @@ pub struct Shared {
     macros_path: Mutex<Option<std::path::PathBuf>>,
     app: Mutex<Option<AppHandle>>,
     mcp_tools: Mutex<McpToolFlags>,
+    // skrit-mux: the reader thread delivers CMD responses here; send_cmd consumes
+    // them. cmd_lock serializes a muxed request/response round-trip.
+    mux_rx: Mutex<Option<std::sync::mpsc::Receiver<Frame>>>,
+    cmd_lock: Mutex<()>,
 }
 
 impl Default for Shared {
@@ -180,6 +185,8 @@ impl Default for Shared {
             macros_path: Mutex::new(None),
             app: Mutex::new(None),
             mcp_tools: Mutex::new(McpToolFlags::default()),
+            mux_rx: Mutex::new(None),
+            cmd_lock: Mutex::new(()),
         }
     }
 }
@@ -252,7 +259,7 @@ fn read_response(port: &mut Box<dyn SerialPort>, timeout_ms: u64) -> Result<Fram
         match port.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
-                for r in reader.push(&buf[..n]) {
+                if let Some(r) = reader.push(&buf[..n]).into_iter().next() {
                     return r.map_err(|e| format!("frame error: {e:?}"));
                 }
             }
@@ -312,10 +319,10 @@ fn spawn_data_reader(
                 Ok(n) => {
                     if !online {
                         online = true;
-                        let _ = app.emit("ttl://link", true); // target came back
+                        let _ = app.emit("sutra://link", true); // target came back
                     }
                     shared.push_console(&buf[..n]);
-                    let _ = app.emit("ttl://data", buf[..n].to_vec());
+                    let _ = app.emit("sutra://data", buf[..n].to_vec());
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(_) => {
@@ -324,7 +331,7 @@ fn spawn_data_reader(
                     // so it comes back online on its own.
                     if online {
                         online = false;
-                        let _ = app.emit("ttl://link", false);
+                        let _ = app.emit("sutra://link", false);
                     }
                     std::thread::sleep(Duration::from_millis(750));
                     let name = match shared.data_name.lock().unwrap().clone() {
@@ -383,10 +390,196 @@ pub fn connect(
     let stop = Arc::new(AtomicBool::new(false));
     spawn_data_reader(app, reader, stop.clone(), shared.clone());
 
+    *shared.mux_rx.lock().unwrap() = None;
     *shared.data_name.lock().unwrap() = Some(data_name.to_string());
     *shared.cmd_name.lock().unwrap() = cmd_name.map(|s| s.to_string());
-    *shared.conn.lock().unwrap() = Some(Connection { cmd, data_writer: data, stop });
+    *shared.conn.lock().unwrap() = Some(Connection { cmd, data_writer: data, stop, muxed: false });
     Ok(())
+}
+
+// ---- skrit-mux: one port carrying DATA + CMD -------------------------------
+
+/// Read a single muxed port until a CMD-channel response frame arrives or the
+/// deadline passes (used to probe whether a port is a muxed Duta).
+fn read_mux_response(port: &mut Box<dyn SerialPort>, timeout_ms: u64) -> Option<Frame> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut reader = MuxReader::new();
+    let mut buf = [0u8; 128];
+    while Instant::now() < deadline {
+        match port.read(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                for (ch, payload) in reader.push(&buf[..n]) {
+                    if ch == crate::protocol::mux::CMD {
+                        if let Ok(f) = Frame::from_raw(&payload) {
+                            if f.is_response() {
+                                return Some(f);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// True if `name` answers a skrit-mux PING with a PONG — i.e. it's a single-port
+/// (ESP32 / Pico / nRF) Duta rather than a dual-CDC one or a plain console.
+pub fn probe_is_mux(name: &str) -> bool {
+    let params = SerialParams::default();
+    let mut port = match open_data(name, &params) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let _ = port.write_data_terminal_ready(true);
+    let wire = match Frame::new(msg::PING, 0xA6, vec![]).to_mux_wire() {
+        Ok(w) => w,
+        Err(_) => return false,
+    };
+    if port.write_all(&wire).is_err() {
+        return false;
+    }
+    let _ = port.flush();
+    matches!(read_mux_response(&mut port, 400),
+             Some(f) if f.typ == (msg::PING | crate::protocol::RESP_FLAG))
+}
+
+fn spawn_mux_reader(
+    app: AppHandle,
+    mut port: Box<dyn SerialPort>,
+    tx: std::sync::mpsc::Sender<Frame>,
+    stop: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+) {
+    std::thread::spawn(move || {
+        let mut reader = MuxReader::new();
+        let mut buf = [0u8; 256];
+        let mut online = true;
+        while !stop.load(Ordering::Relaxed) {
+            match port.read(&mut buf) {
+                Ok(0) => {}
+                Ok(n) => {
+                    if !online {
+                        online = true;
+                        let _ = app.emit("sutra://link", true);
+                    }
+                    for (ch, payload) in reader.push(&buf[..n]) {
+                        if ch == crate::protocol::mux::DATA {
+                            shared.push_console(&payload);
+                            let _ = app.emit("sutra://data", payload);
+                        } else if let Ok(f) = Frame::from_raw(&payload) {
+                            if is_event(f.typ) {
+                                let _ = app.emit("sutra://event", (f.typ, f.body));
+                            } else {
+                                let _ = tx.send(f); // a CMD response for send_cmd
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(_) => {
+                    if online {
+                        online = false;
+                        let _ = app.emit("sutra://link", false);
+                    }
+                    std::thread::sleep(Duration::from_millis(750));
+                    let name = match shared.data_name.lock().unwrap().clone() {
+                        Some(n) => n,
+                        None => break,
+                    };
+                    let params = shared.params.lock().unwrap().clone();
+                    if let Ok(mut fresh) = open_data(&name, &params) {
+                        let _ = fresh.write_data_terminal_ready(true);
+                        if let Ok(rd) = fresh.try_clone() {
+                            let mut guard = shared.conn.lock().unwrap();
+                            match guard.as_mut() {
+                                Some(c) if Arc::ptr_eq(&c.stop, &stop) => {
+                                    c.data_writer = fresh;
+                                    drop(guard);
+                                    port = rd;
+                                    reader = MuxReader::new();
+                                }
+                                _ => return,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Connect a single muxed Duta port (ESP32 / Pico / nRF52840): DATA + CMD share
+/// one stream via skrit-mux. The reader demuxes; `send_cmd` works as on dual.
+pub fn connect_muxed(shared: &Arc<Shared>, app: AppHandle, name: &str) -> Result<(), String> {
+    disconnect(shared);
+    let params = shared.params.lock().unwrap().clone();
+    let mut port = open_data(name, &params)?;
+    let _ = port.write_data_terminal_ready(true);
+    let _ = port.write_request_to_send(true);
+
+    let reader = port.try_clone().map_err(|e| format!("clone port: {e}"))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel();
+    spawn_mux_reader(app, reader, tx, stop.clone(), shared.clone());
+
+    *shared.mux_rx.lock().unwrap() = Some(rx);
+    *shared.data_name.lock().unwrap() = Some(name.to_string());
+    *shared.cmd_name.lock().unwrap() = Some(name.to_string());
+    *shared.conn.lock().unwrap() =
+        Some(Connection { cmd: None, data_writer: port, stop, muxed: true });
+    Ok(())
+}
+
+/// What `autodetect_any` found: a dual-CDC Duta (two ports) or a muxed one (one).
+pub enum Detected {
+    Dual { data: String, cmd: String },
+    Mux(String),
+}
+
+/// Find a connected Duta, dual-CDC or muxed. Two Duta ports → dual; one that
+/// answers a mux PING → muxed.
+pub fn autodetect_any() -> Result<Detected, String> {
+    let ports: Vec<String> =
+        list_ports().into_iter().filter(|p| p.is_duta).map(|p| p.name).collect();
+    match ports.len() {
+        0 => Err("no Duta found".into()),
+        1 => {
+            if probe_is_mux(&ports[0]) {
+                Ok(Detected::Mux(ports[0].clone()))
+            } else {
+                Err("one Duta port, but it didn't answer skrit-mux".into())
+            }
+        }
+        _ => {
+            for cand in &ports {
+                if probe_is_cmd(cand) {
+                    let data = ports.iter().find(|n| *n != cand).cloned().unwrap();
+                    return Ok(Detected::Dual { data, cmd: cand.clone() });
+                }
+            }
+            Ok(Detected::Dual { data: ports[0].clone(), cmd: ports[1].clone() })
+        }
+    }
+}
+
+/// MCP/auto connect: detect a Duta (dual or muxed) and connect it. Returns a
+/// short human description of what it connected.
+pub fn mcp_connect_auto(shared: &Arc<Shared>) -> Result<String, String> {
+    let app = shared.app.lock().unwrap().clone().ok_or("app handle not ready")?;
+    match autodetect_any()? {
+        Detected::Dual { data, cmd } => {
+            connect(shared, app, &data, Some(&cmd))?;
+            Ok(format!("connected dual-CDC Duta (DATA={data}, CMD={cmd})"))
+        }
+        Detected::Mux(port) => {
+            connect_muxed(shared, app, &port)?;
+            Ok(format!("connected muxed Duta on {port}"))
+        }
+    }
 }
 
 /// Re-open just the DATA port with the current serial params (keeps CMD).
@@ -422,10 +615,13 @@ pub fn disconnect(shared: &Arc<Shared>) {
         drop(conn.cmd);
         drop(conn.data_writer);
     }
+    *shared.mux_rx.lock().unwrap() = None;
 }
 
 pub fn state(shared: &Arc<Shared>) -> ConnState {
-    let has_cmd = shared.conn.lock().unwrap().as_ref().map_or(false, |c| c.cmd.is_some());
+    // A muxed link has the CMD channel too (INFO/relays available over the mux).
+    let has_cmd =
+        shared.conn.lock().unwrap().as_ref().is_some_and(|c| c.cmd.is_some() || c.muxed);
     ConnState {
         connected: shared.conn.lock().unwrap().is_some(),
         data_port: shared.data_name.lock().unwrap().clone(),
@@ -467,13 +663,24 @@ pub fn mcp_set_params(shared: &Arc<Shared>, params: SerialParams) -> Result<(), 
 pub fn data_write(shared: &Arc<Shared>, bytes: &[u8]) -> Result<(), String> {
     let mut guard = shared.conn.lock().unwrap();
     let conn = guard.as_mut().ok_or("not connected")?;
-    conn.data_writer.write_all(bytes).map_err(|e| format!("data write: {e}"))?;
+    // On a muxed link the console rides the DATA channel; otherwise it's the raw port.
+    if conn.muxed {
+        conn.data_writer
+            .write_all(&mux_wrap(crate::protocol::mux::DATA, bytes))
+            .map_err(|e| format!("data write: {e}"))?;
+    } else {
+        conn.data_writer.write_all(bytes).map_err(|e| format!("data write: {e}"))?;
+    }
     conn.data_writer.flush().ok();
     Ok(())
 }
 
 pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFrame, String> {
     let seq = shared.next_seq();
+    let muxed = shared.conn.lock().unwrap().as_ref().is_some_and(|c| c.muxed);
+    if muxed {
+        return send_cmd_mux(shared, typ, seq, body);
+    }
     let wire = Frame::new(typ, seq, body).to_wire().map_err(|e| format!("encode: {e:?}"))?;
     let mut guard = shared.conn.lock().unwrap();
     let conn = guard.as_mut().ok_or("not connected")?;
@@ -485,6 +692,37 @@ pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFram
     cmd.flush().ok();
     let resp = read_response(cmd, 1000)?;
     Ok(resp.into())
+}
+
+/// Send a CMD on a muxed link: write the wrapped frame, then wait for the
+/// reader thread to deliver the matching-seq response. `cmd_lock` serializes the
+/// whole round-trip so concurrent callers don't steal each other's replies.
+fn send_cmd_mux(shared: &Arc<Shared>, typ: u8, seq: u8, body: Vec<u8>) -> Result<RespFrame, String> {
+    let _lock = shared.cmd_lock.lock().unwrap();
+    let wire = Frame::new(typ, seq, body).to_mux_wire().map_err(|e| format!("encode: {e:?}"))?;
+    // Hold the receiver for the whole round-trip; drain any stale frame BEFORE we
+    // write, so a fast reader can't have its real response discarded afterwards.
+    let rx_guard = shared.mux_rx.lock().unwrap();
+    let rx = rx_guard.as_ref().ok_or("not connected")?;
+    while rx.try_recv().is_ok() {}
+    {
+        let mut guard = shared.conn.lock().unwrap();
+        let conn = guard.as_mut().ok_or("not connected")?;
+        conn.data_writer.write_all(&wire).map_err(|e| format!("cmd write: {e}"))?;
+        conn.data_writer.flush().ok();
+    }
+    let deadline = Instant::now() + Duration::from_millis(1000);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("timeout waiting for CMD response".into());
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(f) if f.seq == seq && f.is_response() => return Ok(f.into()),
+            Ok(_) => continue, // a response to some other request; keep waiting
+            Err(_) => return Err("timeout waiting for CMD response".into()),
+        }
+    }
 }
 
 /// Last `max` bytes of the DATA console as lossy UTF-8.
@@ -525,7 +763,7 @@ fn persist(shared: &Arc<Shared>) {
     }
     // notify the UI so LLM-created/changed macros appear live (with fresh tiers)
     if let Some(app) = shared.app.lock().unwrap().clone() {
-        let _ = app.emit("ttl://macros", &tiered(&list));
+        let _ = app.emit("sutra://macros", &tiered(&list));
     }
 }
 
@@ -569,7 +807,7 @@ pub fn secret_literals(shared: &Arc<Shared>) -> Vec<String> {
             }
         }
     }
-    out.sort_by(|a, b| b.len().cmp(&a.len())); // redact longest matches first
+    out.sort_by_key(|s| std::cmp::Reverse(s.len())); // redact longest matches first
     out.dedup();
     out
 }
@@ -956,7 +1194,7 @@ pub fn macro_runs(shared: &Arc<Shared>) -> Vec<MacroRunInfo> {
 
 fn emit_runs(shared: &Arc<Shared>, app: &Option<AppHandle>) {
     if let Some(app) = app {
-        let _ = app.emit("ttl://runs", macro_runs(shared));
+        let _ = app.emit("sutra://runs", macro_runs(shared));
     }
 }
 
@@ -1159,7 +1397,7 @@ fn wait_io(
 fn run_steps(ctx: &MacroCtx, steps: &[Step], depth: u32) {
     let shared = &ctx.shared;
     let mut stack: Vec<IfFrame> = Vec::new();
-    let active = |st: &[IfFrame]| st.last().map_or(true, |f| f.active);
+    let active = |st: &[IfFrame]| st.last().is_none_or(|f| f.active);
     let mut last_exit: Option<i64> = None;
     let mut timeout: u64 = 10_000;
     let mut since: u64 = console_seq(shared);
