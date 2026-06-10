@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Terminal, type TerminalHandle } from "@/components/Terminal";
 import { MacroHelp } from "@/components/MacroHelp";
-import { ColorField } from "@/components/ColorField";
+import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { Slider } from "@/components/ui/slider";
 import { save, open } from "@tauri-apps/plugin-dialog";
@@ -40,7 +40,6 @@ import {
   outputPwmGet,
   outputRgb,
   outputRgbGet,
-  rgbToHex,
   type Rgb,
   runText,
   setDataParams,
@@ -170,7 +169,7 @@ export default function App() {
   const [outBitmap, setOutBitmap] = useState(0); // device output states (bit i = control i)
   const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
   const [pwmVals, setPwmVals] = useState<Record<number, number>>({}); // index -> duty 0..1023
-  const [rgbVals, setRgbVals] = useState<Record<number, Rgb>>({}); // index -> color
+  const [rgbVals, setRgbVals] = useState<Record<number, Rgb[]>>({}); // index -> per-pixel colors
   const [deviceName, setDeviceName] = useState("");
   const [caps, setCaps] = useState(0); // device capability bits (Duta only)
   const [macros, setMacros] = useState<MacroRec[]>([]);
@@ -372,10 +371,15 @@ export default function App() {
       setControls(cs);
       // Pull current values for the analog (pwm) and color (rgb) controls.
       const pwm: Record<number, number> = {};
-      const rgb: Record<number, Rgb> = {};
+      const rgb: Record<number, Rgb[]> = {};
       for (const c of cs) {
-        if (c.type === CTRL.PWM) pwm[c.index] = await outputPwmGet(c.index).catch(() => 0);
-        else if (c.type === CTRL.RGB) rgb[c.index] = await outputRgbGet(c.index).catch(() => ({ r: 0, g: 0, b: 0 }));
+        if (c.type === CTRL.PWM) {
+          pwm[c.index] = await outputPwmGet(c.index).catch(() => 0);
+        } else if (c.type === CTRL.RGB) {
+          const v = await outputRgbGet(c.index).catch(() => ({ count: 1, r: 0, g: 0, b: 0 }));
+          // The read reports pixel 0; seed every pixel with it until each is set.
+          rgb[c.index] = Array.from({ length: Math.max(1, v.count) }, () => ({ r: v.r, g: v.g, b: v.b }));
+        }
       }
       setPwmVals(pwm);
       setRgbVals(rgb);
@@ -415,13 +419,16 @@ export default function App() {
     }
   }
 
-  // RGB color change (addressable LED).
-  async function setRgb(index: number, color: Rgb) {
-    setRgbVals((p) => ({ ...p, [index]: color }));
-    const lit = !!(color.r || color.g || color.b);
+  // RGB color change (addressable LED). pixel = undefined fills the whole strip.
+  async function setRgb(index: number, color: Rgb, pixel?: number) {
+    const next = (rgbVals[index] ?? [{ r: 0, g: 0, b: 0 }]).slice();
+    if (pixel === undefined) next.fill(color);
+    else next[pixel] = color;
+    setRgbVals((p) => ({ ...p, [index]: next }));
+    const lit = next.some((c) => c.r || c.g || c.b);
     setOutBitmap((bm) => (lit ? bm | (1 << index) : bm & ~(1 << index)));
     try {
-      await outputRgb(index, color);
+      await outputRgb(index, color, pixel);
     } catch (e) {
       setStatus(`cmd failed: ${e}`);
     }
@@ -812,29 +819,11 @@ export default function App() {
                             onValueChange={([v]) => setPwm(c.index, v)}
                           />
                         ) : (
-                          <Popover>
-                            <PopoverTrigger asChild>
-                              <button
-                                type="button"
-                                disabled={!connected || !hasCmd}
-                                className="flex items-center gap-2 rounded border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
-                              >
-                                <span
-                                  className="size-4 rounded-sm border"
-                                  style={{ backgroundColor: rgbToHex(rgbVals[c.index] ?? { r: 0, g: 0, b: 0 }) }}
-                                />
-                                <span className="font-mono">
-                                  {rgbToHex(rgbVals[c.index] ?? { r: 0, g: 0, b: 0 })}
-                                </span>
-                              </button>
-                            </PopoverTrigger>
-                            <PopoverContent className="w-64" align="start">
-                              <ColorField
-                                value={rgbVals[c.index] ?? { r: 0, g: 0, b: 0 }}
-                                onChange={(rgb) => setRgb(c.index, rgb)}
-                              />
-                            </PopoverContent>
-                          </Popover>
+                          <RgbControl
+                            pixels={rgbVals[c.index] ?? [{ r: 0, g: 0, b: 0 }]}
+                            disabled={!connected || !hasCmd}
+                            onChange={(pixel, rgb) => setRgb(c.index, rgb, pixel)}
+                          />
                         )}
                       </div>
                     ))}

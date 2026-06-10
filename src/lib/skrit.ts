@@ -120,14 +120,20 @@ export interface Rgb {
   g: number;
   b: number;
 }
-/** Set an addressable-LED output's color (r/g/b each 0–255). */
-export const outputRgb = (index: number, { r, g, b }: Rgb) =>
-  sendCmd(MSG.OUTPUT_RGB, [index, r & 0xff, g & 0xff, b & 0xff]);
+/** Set an addressable-LED output's color. Omit `pixel` to fill the whole strip,
+ *  or pass a pixel index to set just that LED. */
+export const outputRgb = (index: number, { r, g, b }: Rgb, pixel?: number) =>
+  sendCmd(
+    MSG.OUTPUT_RGB,
+    pixel === undefined
+      ? [index, r & 0xff, g & 0xff, b & 0xff]
+      : [index, pixel & 0xff, r & 0xff, g & 0xff, b & 0xff],
+  );
 
-/** Read an addressable-LED output's current color. */
-export async function outputRgbGet(index: number): Promise<Rgb> {
-  const b = (await sendCmd(MSG.OUTPUT_RGB, [index])).body; // [status, index, r, g, b]
-  return { r: b[2] ?? 0, g: b[3] ?? 0, b: b[4] ?? 0 };
+/** Read an RGB output: its pixel `count` and pixel 0's color. */
+export async function outputRgbGet(index: number): Promise<{ count: number } & Rgb> {
+  const b = (await sendCmd(MSG.OUTPUT_RGB, [index])).body; // [status, index, count, r, g, b]
+  return { count: b[2] ?? 1, r: b[3] ?? 0, g: b[4] ?? 0, b: b[5] ?? 0 };
 }
 
 /** "#rrggbb" <-> {r,g,b} helpers for the color UI. */

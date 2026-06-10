@@ -101,7 +101,7 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x18` | `SERIAL_SET` | `baud(4)`, `data_bits(1)`, `parity(1)`, `stop_bits(1)` | — | reconfigure DATA UART (works even on a muxed link where USB line-coding isn't available). Needs `CAP_SERIAL`. |
 | `0x19` | `SERIAL_SIGNAL` | `mask(1)`, `value(1)` | — | drive DATA modem/break lines. bit0=DTR, bit1=RTS, bit2=BREAK. Lets a host sequence ESP32 / AVR bootloader entry. Needs `CAP_SERIAL`. |
 | `0x1A` | `OUTPUT_PWM` | `index(1)`[, `duty(2)`] | `index(1)`, `duty(2)` | with `duty` (0–1023) = set the output's PWM duty; without = read it back. Needs `CAP_PWM`; non-PWM outputs answer `0x03`. A PWM output still honors `OUTPUT_SET` (0 = duty 0, 1 = full). |
-| `0x1B` | `OUTPUT_RGB` | `index(1)`[, `r(1)`, `g(1)`, `b(1)`] | `index(1)`, `r(1)`, `g(1)`, `b(1)` | with rgb = set an addressable-LED color; without = read it back. Only `OUTPUT_DESC` type 4 (rgb) outputs accept it; others answer `0x03`. Still honors `OUTPUT_SET` (0 = off, 1 = white). |
+| `0x1B` | `OUTPUT_RGB` | `index(1)`[, [`pixel(1)`,] `r(1)`, `g(1)`, `b(1)`] | `index(1)`, `count(1)`, `r(1)`, `g(1)`, `b(1)` | addressable-LED color. Body **1** = read; **4** = set all pixels; **5** = set one `pixel`. Response carries the strip's pixel `count` and pixel 0's color. Only `OUTPUT_DESC` type 4 (rgb); others answer `0x03`. Still honors `OUTPUT_SET` (0 = off, 1 = white). |
 | `0x20` | `MACRO_LIST` | `start(1)` | `count(1)`, then repeated `{id(1), name_len(1), name…}` until frame full; more via next `start`. |
 | `0x21` | `MACRO_META` | `id(1)` | `id(1)`, `len(2)`, `name_len(1)`, `name…` |
 | `0x22` | `MACRO_READ` | `id(1)`, `off(2)`, `n(1)` | `bytes…` (n ≤ 64) |
@@ -168,7 +168,7 @@ mc_ver   = 0x01
 | `0x02` | `DELAY`  | `ms(2)` | 1 | pause |
 | `0x03` | `SETOUT` | `index(1)`, `val(1)` | 1 | drive output `index` (0/1) |
 | `0x04` | `SETPWM` | `index(1)`, `duty(2)` | 1 | set output `index` PWM duty (0–1023); no-op on a non-PWM output |
-| `0x05` | `SETRGB` | `index(1)`, `r(1)`, `g(1)`, `b(1)` | 1 | set output `index` RGB color; no-op on a non-RGB output |
+| `0x05` | `SETRGB` | `index(1)`, `r(1)`, `g(1)`, `b(1)` | 1 | fill output `index`'s RGB strip with a color; no-op on a non-RGB output |
 | `0x10` | `EXPECT` | `timeout(2)`, `n(1)`, `bytes[n]` | 2 | match `bytes` on incoming DATA; sets outcome (match=OK, timeout=FAIL) |
 | `0x11` | `WAITIO` | `index(1)`, `cmp(1)`, `val(2)`, `timeout(2)` | 2 | poll input `index` until `value cmp val`; sets outcome (met=OK, timeout=FAIL) |
 | `0x12` | `WAITOK` | — | 2 | if last outcome is FAIL, halt the run with `STATUS` failed |

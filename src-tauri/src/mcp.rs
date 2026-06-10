@@ -90,6 +90,8 @@ pub struct SetRgbArgs {
     pub g: Option<u8>,
     /// Blue 0..255.
     pub b: Option<u8>,
+    /// Pixel index on the strip. Omit to fill all pixels.
+    pub pixel: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -463,11 +465,11 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "Set an addressable-LED (rgb-type) output's color, as \"#RRGGBB\" via `hex`, or via `r`/`g`/`b` (0..255). Omit all to read the current color. Only rgb-type outputs (see describe_device) accept it."
+        description = "Set an addressable-LED (rgb-type) output's color, as \"#RRGGBB\" via `hex`, or via `r`/`g`/`b` (0..255). Pass `pixel` to set one LED on a strip, or omit it to fill all. Omit color entirely to read the strip's pixel count + pixel 0's color. Only rgb-type outputs (see describe_device) accept it."
     )]
     async fn set_rgb(
         &self,
-        Parameters(SetRgbArgs { index, hex, r, g, b }): Parameters<SetRgbArgs>,
+        Parameters(SetRgbArgs { index, hex, r, g, b, pixel }): Parameters<SetRgbArgs>,
     ) -> String {
         let rgb = if let Some(h) = hex {
             match parse_hex_color(&h) {
@@ -479,17 +481,20 @@ impl SutraTools {
         } else {
             None // read-back
         };
-        let body = match rgb {
-            Some((r, g, b)) => vec![index, r, g, b],
-            None => vec![index],
+        let body = match (rgb, pixel) {
+            (Some((r, g, b)), Some(px)) => vec![index, px, r, g, b], // one pixel
+            (Some((r, g, b)), None) => vec![index, r, g, b],         // fill all
+            (None, _) => vec![index],                                // read
         };
         match self.cmd(msg::OUTPUT_RGB, body).await {
             Ok(r) => match r.status {
+                // resp: status, index, count, r, g, b
                 Some(0) => format!(
-                    "output {index} color = #{:02x}{:02x}{:02x}",
-                    r.body.get(2).copied().unwrap_or(0),
+                    "output {index} ({} px) pixel0 = #{:02x}{:02x}{:02x}",
+                    r.body.get(2).copied().unwrap_or(1),
                     r.body.get(3).copied().unwrap_or(0),
-                    r.body.get(4).copied().unwrap_or(0)
+                    r.body.get(4).copied().unwrap_or(0),
+                    r.body.get(5).copied().unwrap_or(0)
                 ),
                 Some(s) => format!("device returned status 0x{s:02x}"),
                 None => "ok".into(),
