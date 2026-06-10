@@ -20,6 +20,7 @@ export const MSG = {
   SERIAL_SIGNAL: 0x19,
   OUTPUT_PWM: 0x1a,
   OUTPUT_RGB: 0x1b,
+  PWM_CONFIG: 0x1c,
   MACRO_LIST: 0x20,
   MACRO_META: 0x21,
   MACRO_READ: 0x22,
@@ -131,6 +132,26 @@ export const outputPwm = (index: number, duty: number) =>
 export async function outputPwmGet(index: number): Promise<number> {
   const b = (await sendCmd(MSG.OUTPUT_PWM, [index])).body; // [status, index, lo, hi]
   return (b[2] ?? 0) | ((b[3] ?? 0) << 8);
+}
+
+export interface PwmConfig {
+  freq: number; // Hz
+  res: number; // bits
+}
+const parsePwmConfig = (b: number[]): PwmConfig => ({
+  // body: [status, index, freq(4 LE), res]
+  freq: ((b[2] ?? 0) | ((b[3] ?? 0) << 8) | ((b[4] ?? 0) << 16) | ((b[5] ?? 0) << 24)) >>> 0,
+  res: b[6] ?? 0,
+});
+/** Read a PWM output's frequency (Hz) + resolution (bits). Reports defaults even
+ *  on a device that can't change them. */
+export async function pwmConfigGet(index: number): Promise<PwmConfig> {
+  return parsePwmConfig((await sendCmd(MSG.PWM_CONFIG, [index])).body);
+}
+/** Set a PWM output's frequency/resolution (0 = leave unchanged). Returns actuals. */
+export async function pwmConfigSet(index: number, freq: number, res: number): Promise<PwmConfig> {
+  const body = [index, freq & 0xff, (freq >> 8) & 0xff, (freq >> 16) & 0xff, (freq >>> 24) & 0xff, res & 0xff];
+  return parsePwmConfig((await sendCmd(MSG.PWM_CONFIG, body)).body);
 }
 
 export interface Rgb {

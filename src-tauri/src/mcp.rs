@@ -79,6 +79,16 @@ pub struct SetPwmArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetPwmConfigArgs {
+    /// PWM output index.
+    pub index: u8,
+    /// New frequency in Hz (e.g. 50 for a servo, 25000 for a fan). Omit to leave.
+    pub frequency: Option<u32>,
+    /// New resolution in bits (e.g. 10). Omit to leave. Wire duty stays 0..1023.
+    pub resolution: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetRgbArgs {
     /// Output index (must be an rgb-type output — see describe_device).
     pub index: u8,
@@ -176,8 +186,8 @@ impl SutraTools {
         }
         if !f.outputs {
             for n in [
-                "get_outputs", "set_output", "device_info", "pulse_output", "set_pwm", "set_rgb",
-                "list_inputs", "read_input", "describe_device",
+                "get_outputs", "set_output", "device_info", "pulse_output", "set_pwm",
+                "set_pwm_config", "set_rgb", "list_inputs", "read_input", "describe_device",
             ] {
                 router.remove_route(n);
             }
@@ -456,6 +466,37 @@ impl SutraTools {
                     let cur = (r.body.get(2).copied().unwrap_or(0) as u16)
                         | ((r.body.get(3).copied().unwrap_or(0) as u16) << 8);
                     format!("output {index} duty = {cur}/1023")
+                }
+                Some(s) => format!("device returned status 0x{s:02x}"),
+                None => "ok".into(),
+            },
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Read or set a PWM output's frequency (Hz) + resolution (bits) — e.g. 50 Hz for a servo, 25 kHz for a fan. Omit both to just read the current config. The wire duty stays 0..1023 (set_pwm) regardless of resolution; the device rescales. The response reports the actual values (a device that can't change one reports its default)."
+    )]
+    async fn set_pwm_config(
+        &self,
+        Parameters(SetPwmConfigArgs { index, frequency, resolution }): Parameters<SetPwmConfigArgs>,
+    ) -> String {
+        let body = if frequency.is_some() || resolution.is_some() {
+            let f = frequency.unwrap_or(0);
+            vec![index, (f & 0xFF) as u8, ((f >> 8) & 0xFF) as u8, ((f >> 16) & 0xFF) as u8,
+                 ((f >> 24) & 0xFF) as u8, resolution.unwrap_or(0)]
+        } else {
+            vec![index]
+        };
+        match self.cmd(msg::PWM_CONFIG, body).await {
+            Ok(r) => match r.status {
+                Some(0) => {
+                    let b = &r.body;
+                    let freq = (b.get(2).copied().unwrap_or(0) as u32)
+                        | ((b.get(3).copied().unwrap_or(0) as u32) << 8)
+                        | ((b.get(4).copied().unwrap_or(0) as u32) << 16)
+                        | ((b.get(5).copied().unwrap_or(0) as u32) << 24);
+                    format!("output {index}: {freq} Hz, {}-bit", b.get(6).copied().unwrap_or(0))
                 }
                 Some(s) => format!("device returned status 0x{s:02x}"),
                 None => "ok".into(),

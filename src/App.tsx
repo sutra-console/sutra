@@ -20,6 +20,7 @@ import { Terminal, type TerminalHandle } from "@/components/Terminal";
 import { MacroHelp } from "@/components/MacroHelp";
 import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
+import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { Slider } from "@/components/ui/slider";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import {
@@ -45,6 +46,9 @@ import {
   CTRL,
   outputPwm,
   outputPwmGet,
+  pwmConfigGet,
+  pwmConfigSet,
+  type PwmConfig,
   outputRgb,
   outputRgbGet,
   type Rgb,
@@ -183,6 +187,7 @@ export default function App() {
   const [outBitmap, setOutBitmap] = useState(0); // device output states (bit i = control i)
   const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
   const [pwmVals, setPwmVals] = useState<Record<number, number>>({}); // index -> duty 0..1023
+  const [pwmCfg, setPwmCfg] = useState<Record<number, PwmConfig>>({}); // index -> {freq, res}
   const [rgbVals, setRgbVals] = useState<Record<number, Rgb[]>>({}); // index -> per-pixel colors
   const [dataDesc, setDataDesc] = useState<DataDesc | null>(null); // what the DATA channel carries
   const [deviceName, setDeviceName] = useState("");
@@ -440,10 +445,12 @@ export default function App() {
       setControls(cs);
       // Pull current values for the analog (pwm) and color (rgb) controls.
       const pwm: Record<number, number> = {};
+      const cfg: Record<number, PwmConfig> = {};
       const rgb: Record<number, Rgb[]> = {};
       for (const c of cs) {
         if (c.type === CTRL.PWM) {
           pwm[c.index] = await outputPwmGet(c.index).catch(() => 0);
+          cfg[c.index] = await pwmConfigGet(c.index).catch(() => ({ freq: 0, res: 0 }));
         } else if (c.type === CTRL.RGB) {
           const v = await outputRgbGet(c.index).catch(() => ({ count: 1, r: 0, g: 0, b: 0 }));
           // The read reports pixel 0; seed every pixel with it until each is set.
@@ -451,6 +458,7 @@ export default function App() {
         }
       }
       setPwmVals(pwm);
+      setPwmCfg(cfg);
       setRgbVals(rgb);
     } catch {
       /* device may not self-describe */
@@ -463,6 +471,7 @@ export default function App() {
     setControls([]);
     setOutBitmap(0);
     setPwmVals({});
+    setPwmCfg({});
     setRgbVals({});
     setDataDesc(null);
     setCaps(0);
@@ -476,6 +485,16 @@ export default function App() {
       setStatus(`cmd failed: ${e}`);
     }
     focusTerm();
+  }
+
+  // PWM frequency/resolution change — device returns the actual applied values.
+  async function setPwmConfig(index: number, freq: number, res: number) {
+    try {
+      const actual = await pwmConfigSet(index, freq, res);
+      setPwmCfg((p) => ({ ...p, [index]: actual }));
+    } catch (e) {
+      setStatus(`cmd failed: ${e}`);
+    }
   }
 
   // PWM duty change (analog output). Optimistic local update + fire to device.
@@ -899,11 +918,20 @@ export default function App() {
                       <div key={c.index} className="flex flex-col gap-1">
                         <div className="flex items-center justify-between">
                           <span className="text-xs font-medium">{c.name}</span>
-                          <span className="text-[10px] text-muted-foreground">
-                            {c.type === CTRL.PWM
-                              ? `${Math.round(((pwmVals[c.index] ?? 0) / 1023) * 100)}%`
-                              : "RGB"}
-                          </span>
+                          {c.type === CTRL.PWM ? (
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] text-muted-foreground">
+                                {Math.round(((pwmVals[c.index] ?? 0) / 1023) * 100)}%
+                              </span>
+                              <PwmConfigBadge
+                                cfg={pwmCfg[c.index] ?? { freq: 0, res: 0 }}
+                                disabled={!connected || !hasCmd}
+                                onSet={(f, r) => setPwmConfig(c.index, f, r)}
+                              />
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-muted-foreground">RGB</span>
+                          )}
                         </div>
                         {c.type === CTRL.PWM ? (
                           <Slider

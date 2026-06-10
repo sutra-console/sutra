@@ -19,6 +19,7 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `set_output` | `index`, `on` | 0=Relay1, 1=Relay2, 2=Aux LED |
 | `pulse_output` | `index`, `ms` | momentary flip-then-restore (a reset/power button) |
 | `set_pwm` | `index`, `duty?` | set a pwm-type output's duty 0–1023 (omit `duty` to read it back) |
+| `set_pwm_config` | `index`, `frequency?`, `resolution?` | get/set a PWM output's frequency (Hz) + resolution (bits) — e.g. 50 Hz servo |
 | `set_rgb` | `index`, `hex?` / `r`,`g`,`b?` | set an rgb-type (addressable-LED) output's color (omit all to read it back) |
 | `list_inputs` | — | inputs with current values (digital/analog) |
 | `read_input` | `index` | read one input value |

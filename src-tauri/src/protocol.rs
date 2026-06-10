@@ -30,6 +30,7 @@ pub mod msg {
     pub const SERIAL_SIGNAL: u8 = 0x19;
     pub const OUTPUT_PWM: u8 = 0x1A;
     pub const OUTPUT_RGB: u8 = 0x1B;
+    pub const PWM_CONFIG: u8 = 0x1C;
     pub const MACRO_LIST: u8 = 0x20;
     pub const MACRO_META: u8 = 0x21;
     pub const MACRO_READ: u8 = 0x22;
