@@ -82,7 +82,8 @@ Macros the LLM creates appear live in the app.
 ### Macro language (Bash Bunny / DuckyScript style)
 
 Macro text is a line-based payload — **one command per line**. A line with no
-command keyword is **typed verbatim + Enter**.
+command keyword is **typed verbatim + Enter**. (Canonical reference, incl. the
+tier model: [MACROS.md](MACROS.md).)
 
 ```
 REM log in and look around

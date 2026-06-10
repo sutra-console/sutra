@@ -25,7 +25,7 @@ drives any plain COM port.
   `IF OK…ELSE…END`, `SET` an output, `WAITIO` on an input, `$call` another macro.
   A **run queue** shows in-flight macros (e.g. blocked on `WAITFOR`) and lets you
   cancel them. Macros flagged secret are never readable by the LLM and are
-  redacted from console reads.
+  redacted from console reads. Full language + tier reference: **[MACROS.md](MACROS.md)**.
 - **Device-driven controls** — the UI renders what the device *self-describes*, typed
   by behavior: a toggle for digital IO, a 0–1023 slider + frequency/resolution badge
   for PWM, a per-pixel color picker for addressable RGB, live input readouts — all by
