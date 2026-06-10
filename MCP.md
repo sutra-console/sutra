@@ -21,6 +21,9 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `set_pwm` | `index`, `duty?` | set a pwm-type output's duty 0–1023 (omit `duty` to read it back) |
 | `set_pwm_config` | `index`, `frequency?`, `resolution?` | get/set a PWM output's frequency (Hz) + resolution (bits) — e.g. 50 Hz servo |
 | `set_rgb` | `index`, `hex?` / `r`,`g`,`b?` | set an rgb-type (addressable-LED) output's color (omit all to read it back) |
+| `describe_pins` | — | the provisioning menu — GPIOs that can take an IO role, with supported roles + cautions (provision-capable devices) |
+| `get_io_config` | — | the current IO table (role + pin + name per output) |
+| `set_io_config` | `outputs?` / `reset?` | re-provision the IO table at runtime (or revert to default); persists, applies after `reboot_device` |
 | `list_inputs` | — | inputs with current values (digital/analog) |
 | `read_input` | `index` | read one input value |
 | `set_baud` | `baud`, `data_bits?`, `parity?`, `stop_bits?` | reconfigure the **target** DATA UART (over CMD) |
@@ -44,6 +47,12 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 `set_baud` / `serial_signal` / `reboot_device` / `set_pwm` need a Duta with the matching
 capability (`serial`, `reboot`, `pwm`) — `describe_device` lists what the connected
 board supports.
+
+`describe_pins` / `get_io_config` / `set_io_config` are **runtime provisioning** — they let
+you re-assign a board's IO (which pin is a relay/PWM, its name) without reflashing, on devices
+that advertise the `provision` flag (ESP32). `set_io_config` validates each pin against the
+board's pin map, persists, and takes effect after `reboot_device`. See [PROTOCOL.md](PROTOCOL.md)
+"Provisioning".
 
 ### Tool toggles (Settings ▸ MCP tools)
 

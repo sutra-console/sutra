@@ -21,6 +21,9 @@ export const MSG = {
   OUTPUT_PWM: 0x1a,
   OUTPUT_RGB: 0x1b,
   PWM_CONFIG: 0x1c,
+  PIN_CAPS: 0x1d,
+  CONFIG_GET: 0x1e,
+  CONFIG_SET: 0x1f,
   MACRO_LIST: 0x20,
   MACRO_META: 0x21,
   MACRO_READ: 0x22,
@@ -36,6 +39,8 @@ export const MSG = {
 export const OUTPUT = { R1: 0, R2: 1, LED: 2 } as const;
 /** Output control types (OUTPUT_DESC type byte) — by behavior, not fixture. */
 export const CTRL = { IO: 0, PWM: 1, RGB: 2 } as const;
+/** duta_io row flag: output is active-low (driven LOW = on). */
+export const DUTA_ACTIVE_LOW = 0x01;
 export const RESP_FLAG = 0x80;
 /** SERIAL_SIGNAL line bits (mask/value). */
 export const SIG = { DTR: 0x01, RTS: 0x02, BREAK: 0x04 } as const;
@@ -217,6 +222,8 @@ export const CAP = {
   REBOOT: 0x40,
   PWM: 0x80,
 } as const;
+// INFO flags byte (body[9])
+export const FLAG = { AUTH_REQUIRED: 0x01, DEFAULT_CRED: 0x02, PROVISION: 0x04 } as const;
 
 export interface DeviceInfo {
   fwVer: number;
@@ -226,9 +233,10 @@ export interface DeviceInfo {
   protoVer: number;
   nInputs: number;
   macroTier: number; // highest skrit-mc tier the device VM runs (0 = no VM)
+  flags: number; // FLAG.* (auth-required / default-cred / provision)
 }
 export async function getInfo(): Promise<DeviceInfo> {
-  const b = (await sendCmd(MSG.INFO)).body; // [status, fwlo, fwhi, caps, nout, eekb, ver, nin?, tier?]
+  const b = (await sendCmd(MSG.INFO)).body; // [status, fwlo, fwhi, caps, nout, eekb, ver, nin?, tier?, flags?]
   return {
     fwVer: ((b[2] ?? 0) << 8) | (b[1] ?? 0),
     caps: b[3] ?? 0,
@@ -237,7 +245,88 @@ export async function getInfo(): Promise<DeviceInfo> {
     protoVer: b[6] ?? 0,
     nInputs: b[7] ?? 0,
     macroTier: b[8] ?? 0,
+    flags: b[9] ?? 0,
   };
+}
+
+// ---- runtime provisioning (PIN_CAPS / CONFIG_GET / CONFIG_SET) ----
+/** Pin-capability bits (PIN_CAPS `caps` byte) + provisioning sentinels. */
+export const PINCAP = {
+  DIGITAL: 0x01, ADC: 0x02, PWM: 0x04, DAC: 0x08, I2C: 0x10, SPI: 0x20, TOUCH: 0x40,
+  WARN: 1, NO_BUS: 0xff, CONFIG_RESET: 0xff,
+} as const;
+
+/** One offerable pin from the provisioning menu (mcu ∩ board). */
+export interface PinCap {
+  pin: number;
+  caps: number; // PINCAP.* bitfield — which roles are valid
+  warn: boolean; // offer, but show `note`
+  bus: number; // I²C/SPI bus index, or PINCAP.NO_BUS
+  note: string; // warning reason when `warn` (strapping / dual-use label)
+}
+/** The provisioning menu: every pin that can be assigned an IO role. */
+export async function pinCaps(): Promise<PinCap[]> {
+  const first = await sendCmd(MSG.PIN_CAPS, [0]);
+  if (first.status !== 0) return []; // not a provisioning device
+  const total = first.body[2] ?? 0;
+  const out: PinCap[] = [];
+  for (let i = 0; i < total; i++) {
+    const b = (await sendCmd(MSG.PIN_CAPS, [i])).body; // [st,idx,total,pinlo,pinhi,caps,warn,bus,name...]
+    out.push({
+      pin: (b[3] ?? 0) | ((b[4] ?? 0) << 8),
+      caps: b[5] ?? 0,
+      warn: (b[6] ?? 0) === PINCAP.WARN,
+      bus: b[7] ?? PINCAP.NO_BUS,
+      note: dec.decode(Uint8Array.from(b.slice(8))),
+    });
+  }
+  return out;
+}
+
+/** One row of the device's IO table (an output: role + pin + name). */
+export interface IoRow {
+  type: number; // CTRL.IO / PWM / RGB
+  pin: number;
+  flags: number; // bit0 = active-low
+  arg: number; // RGB pixel count
+  name: string;
+}
+/** Read the device's current IO table (the editable Configure-device view). */
+export async function getIoConfig(): Promise<IoRow[]> {
+  const first = await sendCmd(MSG.CONFIG_GET, [0]);
+  if (first.status !== 0) return [];
+  const n = first.body[2] ?? 0;
+  const rows: IoRow[] = [];
+  for (let i = 0; i < n; i++) {
+    const b = (await sendCmd(MSG.CONFIG_GET, [i])).body; // [st,idx,n,type,pinlo,pinhi,flags,arglo,arghi,name...]
+    rows.push({
+      type: b[3] ?? 0,
+      pin: (b[4] ?? 0) | ((b[5] ?? 0) << 8),
+      flags: b[6] ?? 0,
+      arg: (b[7] ?? 0) | ((b[8] ?? 0) << 8),
+      name: dec.decode(Uint8Array.from(b.slice(9))),
+    });
+  }
+  return rows;
+}
+/** Provision a new IO table. Validated per-row by the device; persists; applies
+ *  after reboot. Resolves to a bad-row index on rejection, or null on success. */
+export async function setIoConfig(rows: IoRow[]): Promise<number | null> {
+  const body = [rows.length & 0xff];
+  for (const r of rows) {
+    const nm = Array.from(enc.encode(r.name)).slice(0, 31);
+    body.push(r.type & 0xff, r.pin & 0xff, (r.pin >> 8) & 0xff, r.flags & 0xff,
+      r.arg & 0xff, (r.arg >> 8) & 0xff, nm.length, ...nm);
+  }
+  const resp = await sendCmd(MSG.CONFIG_SET, body);
+  if (resp.status === 0) return null;
+  if (resp.status === 0x03) return resp.body[1] ?? 0; // BADARGS -> bad row index
+  throw new Error(`device returned status 0x${(resp.status ?? 0).toString(16)}`);
+}
+/** Revert the device to its compiled-default IO table (applies after reboot). */
+export async function resetIoConfig(): Promise<void> {
+  const resp = await sendCmd(MSG.CONFIG_SET, [PINCAP.CONFIG_RESET]);
+  if (resp.status !== 0) throw new Error(`reset failed (status 0x${(resp.status ?? 0).toString(16)})`);
 }
 
 // ---- self-describe ----

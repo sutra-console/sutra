@@ -21,6 +21,7 @@ import { MacroHelp } from "@/components/MacroHelp";
 import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
+import { ConfigureDevice } from "@/components/ConfigureDevice";
 import { Slider } from "@/components/ui/slider";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import {
@@ -43,6 +44,7 @@ import {
   DATA_KIND,
   type DataDesc,
   CAP,
+  FLAG,
   CTRL,
   outputPwm,
   outputPwmGet,
@@ -192,6 +194,8 @@ export default function App() {
   const [dataDesc, setDataDesc] = useState<DataDesc | null>(null); // what the DATA channel carries
   const [deviceName, setDeviceName] = useState("");
   const [caps, setCaps] = useState(0); // device capability bits (Duta only)
+  const [provision, setProvision] = useState(false); // device accepts runtime IO provisioning
+  const [configOpen, setConfigOpen] = useState(false);
   const [macros, setMacros] = useState<MacroRec[]>([]);
   const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
@@ -438,7 +442,12 @@ export default function App() {
 
   async function loadDevice() {
     getDeviceName().then(setDeviceName).catch(() => {});
-    getInfo().then((i) => setCaps(i.caps)).catch(() => {});
+    getInfo()
+      .then((i) => {
+        setCaps(i.caps);
+        setProvision((i.flags & FLAG.PROVISION) !== 0);
+      })
+      .catch(() => {});
     getDataDesc().then(setDataDesc).catch(() => setDataDesc(null)); // UART if unsupported
     try {
       const cs = await getControls();
@@ -878,11 +887,24 @@ export default function App() {
           <Card>
             <CardHeader className="flex-row items-center py-3">
               <CardTitle>Controls</CardTitle>
-              {deviceName && (
-                <Badge variant="secondary" className="ml-auto max-w-[10rem] truncate">
-                  {deviceName}
-                </Badge>
-              )}
+              <div className="ml-auto flex items-center gap-2">
+                {provision && connected && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1.5"
+                    onClick={() => setConfigOpen(true)}
+                    title="Provision the device's IO at runtime"
+                  >
+                    <Cog className="size-3.5" /> Configure
+                  </Button>
+                )}
+                {deviceName && (
+                  <Badge variant="secondary" className="max-w-[10rem] truncate">
+                    {deviceName}
+                  </Badge>
+                )}
+              </div>
             </CardHeader>
             <CardContent className="flex flex-col gap-2">
               {controls.length > 0 ? (
@@ -1115,6 +1137,15 @@ export default function App() {
           </Card>
         </div>
       </div>
+
+      {/* Configure-device (runtime IO provisioning) modal */}
+      <ConfigureDevice
+        open={configOpen}
+        onOpenChange={(o) => {
+          setConfigOpen(o);
+          if (!o) loadDevice(); // refresh controls after a reboot/edit
+        }}
+      />
 
       {/* BLE scan / connect modal */}
       <Dialog open={bleOpen} onOpenChange={setBleOpen}>

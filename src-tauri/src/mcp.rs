@@ -15,7 +15,7 @@ use rmcp::{
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{cap, msg, parity, reboot, sig};
+use crate::protocol::{cap, msg, parity, pincap, reboot, sig};
 use crate::serial::{self, Shared};
 
 #[derive(Clone)]
@@ -169,6 +169,30 @@ pub struct SetSerialArgs {
     pub stop_bits: Option<u8>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct IoRowArg {
+    /// Output role: "io" (digital on/off), "pwm", or "rgb".
+    pub role: String,
+    /// GPIO number (must be offerable — see describe_pins).
+    pub pin: u16,
+    /// Descriptive name for the output (e.g. "Power relay", "Fan").
+    #[serde(default)]
+    pub name: String,
+    /// True if the output is active-low (driven LOW = on).
+    #[serde(default)]
+    pub active_low: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetIoConfigArgs {
+    /// The new IO table (replaces the current one). Omit when `reset` is true.
+    #[serde(default)]
+    pub outputs: Option<Vec<IoRowArg>>,
+    /// Revert to the board's compiled-default IO table.
+    #[serde(default)]
+    pub reset: Option<bool>,
+}
+
 #[tool_router]
 impl SutraTools {
     pub fn new(shared: Arc<Shared>) -> Self {
@@ -188,6 +212,7 @@ impl SutraTools {
             for n in [
                 "get_outputs", "set_output", "device_info", "pulse_output", "set_pwm",
                 "set_pwm_config", "set_rgb", "list_inputs", "read_input", "describe_device",
+                "describe_pins", "get_io_config", "set_io_config",
             ] {
                 router.remove_route(n);
             }
@@ -641,6 +666,136 @@ impl SutraTools {
             lines.push(format!("inputs ({n_in}): use list_inputs"));
         }
         lines.join("\n")
+    }
+
+    #[tool(
+        description = "List the device's provisioning menu — the GPIO pins that can be assigned an IO role, each with the roles it supports (io/pwm) and any caution (strapping pin, or shares onboard hardware). Only on devices with the `provision` capability (see device_info). Flow: describe_pins -> get_io_config -> set_io_config -> reboot_device."
+    )]
+    async fn describe_pins(&self) -> String {
+        let first = match self.cmd(msg::PIN_CAPS, vec![0]).await {
+            Ok(r) => r,
+            Err(e) => return format!("error: {e}"),
+        };
+        if first.status != Some(0) {
+            return "(device does not support runtime provisioning)".into();
+        }
+        let total = first.body.get(2).copied().unwrap_or(0);
+        if total == 0 {
+            return "(no provisionable pins)".into();
+        }
+        let mut lines = vec![format!("provisionable pins ({total}):")];
+        for i in 0..total {
+            let r = match self.cmd(msg::PIN_CAPS, vec![i]).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let b = &r.body; // status,index,total,pinlo,pinhi,caps,warn,bus,name
+            let pin = (b.get(3).copied().unwrap_or(0) as u16)
+                | ((b.get(4).copied().unwrap_or(0) as u16) << 8);
+            let caps = b.get(5).copied().unwrap_or(0);
+            let warn = b.get(6).copied().unwrap_or(0);
+            let name = String::from_utf8_lossy(b.get(8..).unwrap_or(&[])).into_owned();
+            let mut roles = Vec::new();
+            if caps & pincap::DIGITAL != 0 {
+                roles.push("io");
+            }
+            if caps & pincap::PWM != 0 {
+                roles.push("pwm");
+            }
+            let warn_s = if warn == pincap::WARN && !name.is_empty() {
+                format!("  ⚠ {name}")
+            } else if warn == pincap::WARN {
+                "  ⚠ caution".into()
+            } else {
+                String::new()
+            };
+            lines.push(format!("  GPIO{pin}: [{}]{warn_s}", roles.join(",")));
+        }
+        lines.join("\n")
+    }
+
+    #[tool(
+        description = "Read the device's current IO table — each output's role (io/pwm/rgb), GPIO pin, and name. The editable view behind the Configure-device flow. Provisioning devices only."
+    )]
+    async fn get_io_config(&self) -> String {
+        let first = match self.cmd(msg::CONFIG_GET, vec![0]).await {
+            Ok(r) => r,
+            Err(e) => return format!("error: {e}"),
+        };
+        if first.status != Some(0) {
+            return "(device does not support runtime provisioning)".into();
+        }
+        let n = first.body.get(2).copied().unwrap_or(0);
+        let mut lines = vec![format!("IO table ({n} rows):")];
+        for i in 0..n {
+            let r = match self.cmd(msg::CONFIG_GET, vec![i]).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let b = &r.body; // status,index,n,type,pinlo,pinhi,flags,arglo,arghi,name
+            let typ = b.get(3).copied().unwrap_or(0);
+            let pin = (b.get(4).copied().unwrap_or(0) as u16)
+                | ((b.get(5).copied().unwrap_or(0) as u16) << 8);
+            let name = String::from_utf8_lossy(b.get(9..).unwrap_or(&[])).into_owned();
+            let kind = match typ {
+                0 => "io",
+                1 => "pwm",
+                2 => "rgb",
+                _ => "?",
+            };
+            lines.push(format!("  {i}: {name} [{kind}] GPIO{pin}"));
+        }
+        lines.join("\n")
+    }
+
+    #[tool(
+        description = "Provision the device's IO table at runtime — assign roles to pins without reflashing. Pass `outputs` (a list of {role, pin, name}) to set a new table, or `reset: true` to revert to the compiled default. Each pin must be offerable (see describe_pins). The change persists and takes effect after reboot_device. Provisioning devices only — this rewrites what the board's outputs ARE, so double-check pins first."
+    )]
+    async fn set_io_config(
+        &self,
+        Parameters(SetIoConfigArgs { outputs, reset }): Parameters<SetIoConfigArgs>,
+    ) -> String {
+        let body = if reset.unwrap_or(false) {
+            vec![pincap::CONFIG_RESET]
+        } else if let Some(rows) = outputs {
+            if rows.len() > 255 {
+                return "error: too many rows".into();
+            }
+            let mut body = vec![rows.len() as u8];
+            for row in &rows {
+                let typ = match row.role.as_str() {
+                    "io" => 0u8,
+                    "pwm" => 1,
+                    "rgb" => 2,
+                    other => return format!("error: bad role '{other}' (want io/pwm/rgb)"),
+                };
+                let flags = if row.active_low.unwrap_or(false) { 1u8 } else { 0 };
+                let nm = row.name.as_bytes();
+                body.push(typ);
+                body.push((row.pin & 0xFF) as u8);
+                body.push((row.pin >> 8) as u8);
+                body.push(flags);
+                body.push(0); // arg lo (rgb pixel count; 0 = default)
+                body.push(0); // arg hi
+                body.push(nm.len() as u8);
+                body.extend_from_slice(nm);
+            }
+            body
+        } else {
+            return "error: pass either `reset: true` or an `outputs` list".into();
+        };
+        match self.cmd(msg::CONFIG_SET, body).await {
+            Ok(r) => match r.status {
+                Some(0) => "IO table updated — call reboot_device to apply".into(),
+                Some(3) => format!(
+                    "device rejected row {} (pin not offerable, or role not supported there)",
+                    r.body.get(1).copied().unwrap_or(0)
+                ),
+                Some(s) => format!("device returned status 0x{s:02x}"),
+                None => "ok".into(),
+            },
+            Err(e) => format!("error: {e}"),
+        }
     }
 
     #[tool(

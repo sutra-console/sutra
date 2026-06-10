@@ -111,6 +111,9 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x1A` | `OUTPUT_PWM` | `index(1)`[, `duty(2)`] | `index(1)`, `duty(2)` | with `duty` (0–1023) = set the output's PWM duty; without = read it back. Needs `CAP_PWM`; non-PWM outputs answer `0x03`. A PWM output still honors `OUTPUT_SET` (0 = duty 0, 1 = full). |
 | `0x1B` | `OUTPUT_RGB` | `index(1)`[, [`pixel(1)`,] `r(1)`, `g(1)`, `b(1)`] | `index(1)`, `count(1)`, `r(1)`, `g(1)`, `b(1)` | addressable-LED color. Body **1** = read; **4** = set all pixels; **5** = set one `pixel`. Response carries the strip's pixel `count` and pixel 0's color. Only `OUTPUT_DESC` type 2 (rgb); others answer `0x03`. Still honors `OUTPUT_SET` (0 = off, 1 = white). |
 | `0x1C` | `PWM_CONFIG` | `index(1)`[, `freq(4)`, `res(1)`] | `index(1)`, `freq(4)`, `res(1)` | get/set a PWM output's **frequency** (Hz) and **resolution** (bits). Body **1** = read; **6** = set (a `0` field is left unchanged). The response always echoes the *actual* values — a device that can't change one just reports its default, so the app always learns the real config. The wire **duty stays normalized 0–1023** (`OUTPUT_PWM`) regardless of `res`; the device rescales to its hardware resolution. |
+| `0x1D` | `PIN_CAPS` | `index(1)` | `index(1)`, `total(1)`[, `pin(2)`, `caps(1)`, `warn(1)`, `bus(1)`, `name…`] | the provisioning **menu** — the offerable pins (mcu ∩ board). Iterate `index` 0…`total`-1; the pin tuple is present iff `index < total`. `caps` is the pin-capability bitfield (below); `warn` 0=clean, 1=offer-but-show-`name` (a strapping caution or dual-use reason); `bus` is the I²C/SPI bus index or `0xFF`. Needs `FLAG_PROVISION`. See *Provisioning*. |
+| `0x1E` | `CONFIG_GET` | `index(1)` | `index(1)`, `n(1)`[, `type(1)`, `pin(2)`, `flags(1)`, `arg(2)`, `name…`] | the **current** IO table, one row per `index` (0…`n`-1) — the read counterpart of `CONFIG_SET` (same row encoding). Lets the app show current pin→role assignments. |
+| `0x1F` | `CONFIG_SET` | `n(1)`, `n`×`{type(1), pin(2), flags(1), arg(2), namelen(1), name}` | `status`[, `bad_index(1)]` | replace the IO output table. Each row is validated against `PIN_CAPS` (pin offerable, `type` within the pin's `caps`); on a bad row, replies `0x03` + the offending `bad_index`. `n` = `0xFF` reverts to the **compiled default**. The new table is persisted and takes effect on the next `REBOOT`. Needs `FLAG_PROVISION`. |
 | `0x20` | `MACRO_LIST` | `start(1)` | `count(1)`, then repeated `{id(1), name_len(1), name…}` until frame full; more via next `start`. |
 | `0x21` | `MACRO_META` | `id(1)` | `id(1)`, `len(2)`, `name_len(1)`, `name…` |
 | `0x22` | `MACRO_READ` | `id(1)`, `off(2)`, `n(1)` | `bytes…` (n ≤ 64) |
@@ -331,9 +334,38 @@ target. So a network device requires authentication:
   `SKRIT_FLAG_DEFAULT_CRED` while it's unchanged — the app should prompt the user to set a
   new one. `AUTH_SET <new>` changes it (persisted); the current session stays authed.
 
-`flags` byte: bit0 = `auth-required`, bit1 = `default-credential`. USB/BLE devices leave
-both 0. Run a network bridge over `wss://` so the password and console aren't on the wire
-in the clear; the default-password gate is a usability backstop, not a substitute for TLS.
+`flags` byte: bit0 = `auth-required`, bit1 = `default-credential`, bit2 = `provision`
+(accepts runtime IO provisioning — see below). USB/BLE devices leave the auth bits 0. Run a
+network bridge over `wss://` so the password and console aren't on the wire in the clear;
+the default-password gate is a usability backstop, not a substitute for TLS.
+
+## Provisioning
+
+A board's IO is a compiled-default table (`OUTPUT_DESC` self-describes it), but a device may
+let the IO be **re-provisioned at runtime** instead of recompiled — wire a relay onto a spare
+pin, point a PWM at a different one, and push the new map from the app. Capability-gated: a
+device that supports it sets `SKRIT_FLAG_PROVISION` in the `INFO` `flags` byte. Fixed boards
+(e.g. CH552) simply don't, and the app hides the *Configure device* screen for them.
+
+The menu is **layered**, and each layer only narrows freedom:
+
+- **mcu** — the silicon truth: every pin, its intrinsic `caps`, and an immutable hazard
+  status (free / caution / forbidden). Written once per chip.
+- **board** — the physical overlay: which pins are broken out, and which are committed to
+  onboard hardware (fixed = hidden; dual-use = offered with a warning).
+
+The device resolves `mcu ∩ board` and exposes only the **offerable** pins via `PIN_CAPS`, so
+the app's picker constrains each pin to valid roles with **zero hardcoded chip knowledge**. A
+pin is offerable iff it's broken out and not fixed; forbidden/fixed pins are never enumerated.
+
+Flow: `PIN_CAPS` (read the menu) → `CONFIG_GET` (read the current table) → present a per-pin
+picker (role + descriptive name, constrained to `caps`) → `CONFIG_SET` (write the new table)
+→ `REBOOT` to apply. The device validates every row against the menu before persisting and
+rejects an invalid pin/role with `0x03` + the offending `bad_index`. `CONFIG_SET n=0xFF`
+reverts to the compiled default (the soft factory-reset; a held-button boot is the hard one).
+
+`caps` bitfield (`PIN_CAPS`): bit0=digital, bit1=adc, bit2=pwm, bit3=dac, bit4=i2c, bit5=spi,
+bit6=touch. The firmware mirrors these (and the per-mcu pin tables) in `duta_pincap.h`.
 
 ## Async events
 

@@ -31,6 +31,9 @@ pub mod msg {
     pub const OUTPUT_PWM: u8 = 0x1A;
     pub const OUTPUT_RGB: u8 = 0x1B;
     pub const PWM_CONFIG: u8 = 0x1C;
+    pub const PIN_CAPS: u8 = 0x1D;
+    pub const CONFIG_GET: u8 = 0x1E;
+    pub const CONFIG_SET: u8 = 0x1F;
     pub const MACRO_LIST: u8 = 0x20;
     pub const MACRO_META: u8 = 0x21;
     pub const MACRO_READ: u8 = 0x22;
@@ -117,6 +120,22 @@ pub mod status {
 pub mod flag {
     pub const AUTH_REQUIRED: u8 = 0x01;
     pub const DEFAULT_CRED: u8 = 0x02;
+    pub const PROVISION: u8 = 0x04; // accepts runtime IO provisioning (PIN_CAPS/CONFIG_*)
+}
+
+// Pin-capability bits (PIN_CAPS `caps` byte) + provisioning sentinels.
+#[allow(dead_code)]
+pub mod pincap {
+    pub const DIGITAL: u8 = 0x01;
+    pub const ADC: u8 = 0x02;
+    pub const PWM: u8 = 0x04;
+    pub const DAC: u8 = 0x08;
+    pub const I2C: u8 = 0x10;
+    pub const SPI: u8 = 0x20;
+    pub const TOUCH: u8 = 0x40;
+    pub const WARN: u8 = 1; // PIN_CAPS `warn` byte: offer but show the reason name
+    pub const NO_BUS: u8 = 0xFF; // PIN_CAPS `bus`: not a bus pin / matrix-routable
+    pub const CONFIG_RESET: u8 = 0xFF; // CONFIG_SET `n`: revert to the compiled default
 }
 
 /// CRC-8/ATM (poly 0x07, init 0x00) over the given bytes.
