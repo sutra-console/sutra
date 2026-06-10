@@ -1,4 +1,4 @@
-// Front-end mirror of the skrit CMD protocol — see protocol/PROTOCOL.md
+// Front-end mirror of the skrit CMD protocol. See protocol/PROTOCOL.md
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -37,7 +37,7 @@ export const MSG = {
 } as const;
 
 export const OUTPUT = { R1: 0, R2: 1, LED: 2 } as const;
-/** Output control types (OUTPUT_DESC type byte) — by behavior, not fixture. */
+/** Output control types (OUTPUT_DESC type byte), by behavior, not fixture. */
 export const CTRL = { IO: 0, PWM: 1, RGB: 2 } as const;
 /** duta_io row flag: output is active-low (driven LOW = on). */
 export const DUTA_ACTIVE_LOW = 0x01;
@@ -76,7 +76,7 @@ export const autodetect = () => invoke<DetectResult>("autodetect");
 /** Connect a DATA port. Pass cmdPort for a Duta, or null/omit for any generic serial port. */
 export const connect = (dataPort: string, cmdPort?: string | null) =>
   invoke<void>("connect", { dataPort, cmdPort: cmdPort ?? null });
-/** Connect a single-port muxed Duta (ESP32 / Pico / nRF52840) — DATA + CMD over one port. */
+/** Connect a single-port muxed Duta (ESP32 / Pico / nRF52840): DATA + CMD over one port. */
 export const connectMuxed = (port: string) => invoke<void>("connect_muxed", { port });
 export const disconnect = () => invoke<void>("disconnect");
 
@@ -129,11 +129,11 @@ export const deviceRunMacro = (id: number) => sendCmd(MSG.MACRO_RUN, [id]);
 export const outputPulse = (index: number, ms: number) =>
   sendCmd(MSG.OUTPUT_PULSE, [index, ms & 0xff, (ms >> 8) & 0xff]);
 
-/** Set a PWM output's duty (0–1023). Needs CAP.PWM and a pwm-type output. */
+/** Set a PWM output's duty (0-1023). Needs CAP.PWM and a pwm-type output. */
 export const outputPwm = (index: number, duty: number) =>
   sendCmd(MSG.OUTPUT_PWM, [index, duty & 0xff, (duty >> 8) & 0xff]);
 
-/** Read a PWM output's current duty (0–1023). */
+/** Read a PWM output's current duty (0-1023). */
 export async function outputPwmGet(index: number): Promise<number> {
   const b = (await sendCmd(MSG.OUTPUT_PWM, [index])).body; // [status, index, lo, hi]
   return (b[2] ?? 0) | ((b[3] ?? 0) << 8);
@@ -201,7 +201,7 @@ export const serialSet = (baud: number, dataBits = 8, parity = PARITY.NONE, stop
 export const serialSignal = (mask: number, value: number) =>
   sendCmd(MSG.SERIAL_SIGNAL, [mask & 0xff, value & 0xff]);
 
-/** Reboot the device — REBOOT.APP (reset) or REBOOT.BOOTLOADER (DFU). */
+/** Reboot the device: REBOOT.APP (reset) or REBOOT.BOOTLOADER (DFU). */
 export const reboot = (mode: number = REBOOT.APP) => sendCmd(MSG.REBOOT, [mode]);
 
 /** Subscribe to async device events (EVENT_LOG / EVENT_INPUT). */
@@ -259,7 +259,7 @@ export const PINCAP = {
 /** One offerable pin from the provisioning menu (mcu ∩ board). */
 export interface PinCap {
   pin: number;
-  caps: number; // PINCAP.* bitfield — which roles are valid
+  caps: number; // PINCAP.* bitfield: which roles are valid
   warn: boolean; // offer, but show `note`
   bus: number; // I²C/SPI bus index, or PINCAP.NO_BUS
   note: string; // warning reason when `warn` (strapping / dual-use label)
@@ -371,7 +371,7 @@ export async function getControls(): Promise<ControlDesc[]> {
 /** Output states as a bitmap (bit i = control index i). */
 export const outputsBitmap = async () => (await sendCmd(MSG.OUTPUT_GET)).body[1] ?? 0;
 
-// inputs (digital/analog) — mirror of the output self-describe
+// inputs (digital/analog): mirror of the output self-describe
 export async function getInputDesc(index: number): Promise<ControlDesc> {
   const b = (await sendCmd(MSG.INPUT_DESC, [index])).body; // [status, index, type, name...]
   return { index: b[1] ?? index, type: b[2] ?? 0, name: dec.decode(Uint8Array.from(b.slice(3))) };

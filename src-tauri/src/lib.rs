@@ -211,7 +211,7 @@ fn mcp_start(state: tauri::State<AppState>, port: u16) -> Result<McpStatus, Stri
         ct.cancel(); // tell the old server to release the socket
     }
     // Graceful shutdown of the old server is async, so the port may take a moment
-    // to free — retry the bind briefly before giving up.
+    // to free. Retry the bind briefly before giving up.
     let mut last = String::new();
     for _ in 0..15 {
         match mcp::start(state.shared.clone(), port) {
@@ -228,7 +228,7 @@ fn mcp_start(state: tauri::State<AppState>, port: u16) -> Result<McpStatus, Stri
             }
         }
     }
-    Err(format!("could not bind 127.0.0.1:{port} — {last}"))
+    Err(format!("could not bind 127.0.0.1:{port}: {last}"))
 }
 
 #[tauri::command]

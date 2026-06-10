@@ -1,4 +1,4 @@
-//! BLE central — connect a Duta over Bluetooth LE (btleplug).
+//! BLE central: connect a Duta over Bluetooth LE (btleplug).
 //!
 //! Mirrors the firmware's **dual-channel** BLE model: a Nordic UART Service
 //! carries the raw DATA console, and a sibling skrit CMD service carries the
@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::protocol::{is_event, Frame, FrameReader, RESP_FLAG};
 use crate::serial::{RespFrame, Shared};
 
-// Dual BLE: two skrit GATT services — DATA (NUS-compatible UUID) + CMD (6E41 base).
+// Dual BLE: two skrit GATT services: DATA (NUS-compatible UUID) + CMD (6E41 base).
 const DATA_RX: Uuid = Uuid::from_u128(0x6e400002_b5a3_f393_e0a9_e50e24dcca9e); // write
 const DATA_TX: Uuid = Uuid::from_u128(0x6e400003_b5a3_f393_e0a9_e50e24dcca9e); // notify
 const CMD_SVC: Uuid = Uuid::from_u128(0x6e410001_b5a3_f393_e0a9_e50e24dcca9e);
@@ -38,7 +38,7 @@ pub struct BleDevice {
     pub name: String,
 }
 
-/// Live BLE connection — the peripheral plus the two write characteristics.
+/// Live BLE connection: the peripheral plus the two write characteristics.
 /// CMD responses ride `Shared::mux_rx` (set up at connect time).
 pub struct BleLink {
     pub peripheral: Peripheral,
@@ -147,7 +147,7 @@ pub async fn connect(shared: Arc<Shared>, app: AppHandle, id: String) -> Result<
                 }
             }
         }
-        // The notification stream ended — the peripheral disconnected.
+        // The notification stream ended: the peripheral disconnected.
         let _ = a2.emit("sutra://link", false);
     });
 

@@ -1,4 +1,4 @@
-//! Embedded MCP server — lets an LLM read the target's serial console and drive
+//! Embedded MCP server: lets an LLM read the target's serial console and drive
 //! it. Streamable-HTTP transport on localhost; point an MCP client at the URL.
 
 use std::sync::Arc;
@@ -72,7 +72,7 @@ pub struct PulseOutputArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetPwmArgs {
-    /// Output index (must be a pwm-type output — see describe_device).
+    /// Output index (must be a pwm-type output: see describe_device).
     pub index: u8,
     /// Duty cycle 0..1023 (0 = off, 1023 = fully on). Omit to just read it back.
     pub duty: Option<u16>,
@@ -90,7 +90,7 @@ pub struct SetPwmConfigArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetRgbArgs {
-    /// Output index (must be an rgb-type output — see describe_device).
+    /// Output index (must be an rgb-type output: see describe_device).
     pub index: u8,
     /// Color as "#RRGGBB" / "RRGGBB", or omit and pass r/g/b. Omit everything to read.
     pub hex: Option<String>,
@@ -173,7 +173,7 @@ pub struct SetSerialArgs {
 pub struct IoRowArg {
     /// Output role: "io" (digital on/off), "pwm", or "rgb".
     pub role: String,
-    /// GPIO number (must be offerable — see describe_pins).
+    /// GPIO number (must be offerable: see describe_pins).
     pub pin: u16,
     /// Descriptive name for the output (e.g. "Power relay", "Fan").
     #[serde(default)]
@@ -301,7 +301,7 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "List available macro NAMES. Macro contents are never returned — secrets stay hidden."
+        description = "List available macro NAMES. Macro contents are never returned, so secrets stay hidden."
     )]
     async fn list_macros(&self) -> String {
         let metas = serial::macro_metas(&self.shared);
@@ -316,7 +316,7 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "Run a stored macro by name — sends its text to the target console. Use this to apply secrets (passwords/keys) WITHOUT seeing them. Returns 'applied', not the content."
+        description = "Run a stored macro by name; sends its text to the target console. Use this to apply secrets (passwords/keys) WITHOUT seeing them. Returns 'applied', not the content."
     )]
     async fn run_macro(
         &self,
@@ -475,7 +475,7 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "Set a PWM output's duty cycle (0..1023 — dim an LED, drive a fan/servo-style output). Omit `duty` to read the current value. Only pwm-type outputs (see describe_device) accept it; needs the device's pwm capability."
+        description = "Set a PWM output's duty cycle (0..1023, to dim an LED or drive a fan/servo-style output). Omit `duty` to read the current value. Only pwm-type outputs (see describe_device) accept it; needs the device's pwm capability."
     )]
     async fn set_pwm(
         &self,
@@ -500,7 +500,7 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "Read or set a PWM output's frequency (Hz) + resolution (bits) — e.g. 50 Hz for a servo, 25 kHz for a fan. Omit both to just read the current config. The wire duty stays 0..1023 (set_pwm) regardless of resolution; the device rescales. The response reports the actual values (a device that can't change one reports its default)."
+        description = "Read or set a PWM output's frequency (Hz) + resolution (bits), e.g. 50 Hz for a servo, 25 kHz for a fan. Omit both to just read the current config. The wire duty stays 0..1023 (set_pwm) regardless of resolution; the device rescales. The response reports the actual values (a device that can't change one reports its default)."
     )]
     async fn set_pwm_config(
         &self,
@@ -669,7 +669,7 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "List the device's provisioning menu — the GPIO pins that can be assigned an IO role, each with the roles it supports (io/pwm) and any caution (strapping pin, or shares onboard hardware). Only on devices with the `provision` capability (see device_info). Flow: describe_pins -> get_io_config -> set_io_config -> reboot_device."
+        description = "List the device's provisioning menu: the GPIO pins that can be assigned an IO role, each with the roles it supports (io/pwm) and any caution (strapping pin, or shares onboard hardware). Only on devices with the `provision` capability (see device_info). Flow: describe_pins -> get_io_config -> set_io_config -> reboot_device."
     )]
     async fn describe_pins(&self) -> String {
         let first = match self.cmd(msg::PIN_CAPS, vec![0]).await {
@@ -715,7 +715,7 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "Read the device's current IO table — each output's role (io/pwm/rgb), GPIO pin, and name. The editable view behind the Configure-device flow. Provisioning devices only."
+        description = "Read the device's current IO table: each output's role (io/pwm/rgb), GPIO pin, and name. The editable view behind the Configure-device flow. Provisioning devices only."
     )]
     async fn get_io_config(&self) -> String {
         let first = match self.cmd(msg::CONFIG_GET, vec![0]).await {
@@ -749,7 +749,7 @@ impl SutraTools {
     }
 
     #[tool(
-        description = "Provision the device's IO table at runtime — assign roles to pins without reflashing. Pass `outputs` (a list of {role, pin, name}) to set a new table, or `reset: true` to revert to the compiled default. Each pin must be offerable (see describe_pins). The change persists and takes effect after reboot_device. Provisioning devices only — this rewrites what the board's outputs ARE, so double-check pins first."
+        description = "Provision the device's IO table at runtime: assign roles to pins without reflashing. Pass `outputs` (a list of {role, pin, name}) to set a new table, or `reset: true` to revert to the compiled default. Each pin must be offerable (see describe_pins). The change persists and takes effect after reboot_device. Provisioning devices only. This rewrites what the board's outputs ARE, so double-check pins first."
     )]
     async fn set_io_config(
         &self,
@@ -786,7 +786,7 @@ impl SutraTools {
         };
         match self.cmd(msg::CONFIG_SET, body).await {
             Ok(r) => match r.status {
-                Some(0) => "IO table updated — call reboot_device to apply".into(),
+                Some(0) => "IO table updated. Call reboot_device to apply".into(),
                 Some(3) => format!(
                     "device rejected row {} (pin not offerable, or role not supported there)",
                     r.body.get(1).copied().unwrap_or(0)

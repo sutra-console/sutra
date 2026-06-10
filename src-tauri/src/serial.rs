@@ -366,7 +366,7 @@ fn spawn_data_reader(
                         if let Ok(rd) = fresh.try_clone() {
                             let mut guard = shared.conn.lock().unwrap();
                             match guard.as_mut() {
-                                // still our connection — swap in the fresh handles
+                                // still our connection: swap in the fresh handles
                                 Some(c) if Arc::ptr_eq(&c.stop, &stop) => {
                                     c.data_writer = fresh;
                                     drop(guard);
@@ -384,7 +384,7 @@ fn spawn_data_reader(
 }
 
 /// Connect a DATA port. `cmd_name` is the Duta CMD interface, or None for a
-/// generic serial port (console only — no relay/LED/INFO).
+/// generic serial port (console only, no relay/LED/INFO).
 pub fn connect(
     shared: &Arc<Shared>,
     app: AppHandle,
@@ -448,7 +448,7 @@ fn read_mux_response(port: &mut Box<dyn SerialPort>, timeout_ms: u64) -> Option<
     None
 }
 
-/// True if `name` answers a skrit-mux PING with a PONG — i.e. it's a single-port
+/// True if `name` answers a skrit-mux PING with a PONG, i.e. it's a single-port
 /// (ESP32 / Pico / nRF) Duta rather than a dual-CDC one or a plain console.
 pub fn probe_is_mux(name: &str) -> bool {
     let params = SerialParams::default();
@@ -692,7 +692,7 @@ pub fn set_mcp_tools(shared: &Arc<Shared>, flags: McpToolFlags) {
     *shared.mcp_tools.lock().unwrap() = flags;
 }
 
-/// connect/set_params variants the MCP server can call — they pull the AppHandle
+/// connect/set_params variants the MCP server can call: they pull the AppHandle
 /// stashed in Shared (set during app setup) so the reader thread can be spawned.
 pub fn mcp_connect(shared: &Arc<Shared>, data_name: &str, cmd_name: Option<&str>) -> Result<(), String> {
     let app = shared.app.lock().unwrap().clone().ok_or("app handle not ready")?;
@@ -743,7 +743,7 @@ pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFram
     let cmd = conn
         .cmd
         .as_mut()
-        .ok_or("no command port — connect a Duta for relay/LED/INFO")?;
+        .ok_or("no command port: connect a Duta for relay/LED/INFO")?;
     cmd.write_all(&wire).map_err(|e| format!("cmd write: {e}"))?;
     cmd.flush().ok();
     let resp = read_response(cmd, 1000)?;
@@ -823,13 +823,13 @@ fn persist(shared: &Arc<Shared>) {
     }
 }
 
-/// Full macro list (for the app UI — includes text + derived `tier`).
+/// Full macro list (for the app UI: includes text + derived `tier`).
 pub fn macros_all(shared: &Arc<Shared>) -> Vec<MacroRec> {
     tiered(&shared.macros.lock().unwrap())
 }
 
 /// Literal strings typed by SECRET macros (bare lines + STRING args, escapes
-/// applied) — the bytes that could echo back. Used to redact MCP console reads.
+/// applied): the bytes that could echo back. Used to redact MCP console reads.
 pub fn secret_literals(shared: &Arc<Shared>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let snips = shared.macros.lock().unwrap();
@@ -868,7 +868,7 @@ pub fn secret_literals(shared: &Arc<Shared>) -> Vec<String> {
     out
 }
 
-/// Name-only list (for the LLM — never includes text).
+/// Name-only list (for the LLM, never includes text).
 pub fn macro_metas(shared: &Arc<Shared>) -> Vec<MacroMeta> {
     shared
         .macros
@@ -970,9 +970,9 @@ enum Step {
     If(bool), // true = IF OK, false = IF FAIL
     Else,
     End,
-    Call(String),         // $Name — run another macro inline
-    SetOut(String, bool), // SET <name|index> <0|1> — drive an output over CMD
-    WaitIo(String, Cmp, i64), // WAITIO <name> <op> <value> — wait on an input
+    Call(String),         // $Name: run another macro inline
+    SetOut(String, bool), // SET <name|index> <0|1>: drive an output over CMD
+    WaitIo(String, Cmp, i64), // WAITIO <name> <op> <value>: wait on an input
 }
 
 #[derive(Clone, Copy)]
@@ -1072,7 +1072,7 @@ fn parse_command(kw: &str, rest: &str) -> Option<Vec<Step>> {
 }
 
 /// skrit-mc tier of one step. Control-flow ops (`WaitOk`/`If`/`Else`/`End`) are
-/// transparent — they ride whatever read set the outcome — so they cost tier 1;
+/// transparent (they ride whatever read set the outcome), so they cost tier 1;
 /// the read op (`WaitFor`/`WaitIo` = 2) or `Run` (= 3) is what dominates.
 fn step_tier(step: &Step) -> u8 {
     match step {
@@ -1125,7 +1125,7 @@ fn parse_macro(s: &str) -> Vec<Step> {
     for raw in s.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         let trimmed = line.trim_start();
-        // $Name — call another macro inline
+        // $Name: call another macro inline
         if let Some(name) = trimmed.strip_prefix('$') {
             let st = vec![Step::Call(name.trim().to_string())];
             prev = st.clone();
@@ -1433,7 +1433,7 @@ fn wait_io(
     };
     let idx = match idx {
         Some(i) => i,
-        None => return false, // unknown input — can't satisfy
+        None => return false, // unknown input: can't satisfy
     };
     let deadline = Instant::now() + Duration::from_millis(timeout_ms.min(MAX_WAIT_MS));
     while Instant::now() < deadline {

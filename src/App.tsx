@@ -496,7 +496,7 @@ export default function App() {
     focusTerm();
   }
 
-  // PWM frequency/resolution change — device returns the actual applied values.
+  // PWM frequency/resolution change: device returns the actual applied values.
   async function setPwmConfig(index: number, freq: number, res: number) {
     try {
       const actual = await pwmConfigSet(index, freq, res);
@@ -883,7 +883,7 @@ export default function App() {
         </Card>
 
         <div className="flex w-80 shrink-0 flex-col gap-3 overflow-y-auto">
-          {/* controls — self-described by the device */}
+          {/* controls: self-described by the device */}
           <Card>
             <CardHeader className="flex-row items-center py-3">
               <CardTitle>Controls</CardTitle>
@@ -909,7 +909,7 @@ export default function App() {
             <CardContent className="flex flex-col gap-2">
               {controls.length > 0 ? (
                 <div className="flex flex-col gap-2">
-                  {/* digital on/off controls (io) — compact toggle grid */}
+                  {/* digital on/off controls (io): compact toggle grid */}
                   {controls.some((c) => c.type === CTRL.IO) && (
                     <div className="grid grid-cols-3 gap-2">
                       {controls
@@ -933,7 +933,7 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* analog (pwm) + color (rgb) controls — one labeled row each */}
+                  {/* analog (pwm) + color (rgb) controls: one labeled row each */}
                   {controls
                     .filter((c) => c.type === CTRL.PWM || c.type === CTRL.RGB)
                     .map((c) => (
@@ -983,7 +983,7 @@ export default function App() {
             </CardContent>
           </Card>
 
-          {/* run queue — in-flight macros (cancellable) */}
+          {/* run queue: in-flight macros (cancellable) */}
           {runs.length > 0 && (
             <Card>
               <CardHeader className="flex-row items-center py-3">

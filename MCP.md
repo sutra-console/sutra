@@ -1,7 +1,7 @@
 # Sutra MCP server
 
 The desktop app embeds an **MCP server** so an LLM can read the target device's
-serial console and drive it. It's **off by default** — enable it in the app's
+serial console and drive it. It's **off by default**: enable it in the app's
 **MCP server** card (sidebar), pick a port (default **8551**), click **Start**.
 
 Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only).
@@ -13,42 +13,42 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `read_console` | `max_bytes?` | returns recent target-console output (DATA port) |
 | `write_console` | `text`, `newline?` | sends text/keystrokes to the target (DATA port) |
 | `wait_for` | `text`, `timeout_ms?` | block until `text` appears on the console (or time out) |
-| `device_info` | — | firmware version, caps, output count |
-| `describe_device` | — | full self-describe: name, fw, caps, every output + input |
-| `get_outputs` | — | output on/off bitmap (bit *i* = output *i*; see `describe_device` for names) |
+| `device_info` | none | firmware version, caps, output count |
+| `describe_device` | none | full self-describe: name, fw, caps, every output + input |
+| `get_outputs` | none | output on/off bitmap (bit *i* = output *i*; see `describe_device` for names) |
 | `set_output` | `index`, `on` | drive an output by index (`describe_device` lists what each one is) |
 | `pulse_output` | `index`, `ms` | momentary flip-then-restore (a reset/power button) |
-| `set_pwm` | `index`, `duty?` | set a pwm-type output's duty 0–1023 (omit `duty` to read it back) |
-| `set_pwm_config` | `index`, `frequency?`, `resolution?` | get/set a PWM output's frequency (Hz) + resolution (bits) — e.g. 50 Hz servo |
+| `set_pwm` | `index`, `duty?` | set a pwm-type output's duty 0-1023 (omit `duty` to read it back) |
+| `set_pwm_config` | `index`, `frequency?`, `resolution?` | get/set a PWM output's frequency (Hz) + resolution (bits), e.g. 50 Hz servo |
 | `set_rgb` | `index`, `hex?` / `r`,`g`,`b?` | set an rgb-type (addressable-LED) output's color (omit all to read it back) |
-| `describe_pins` | — | the provisioning menu — GPIOs that can take an IO role, with supported roles + cautions (provision-capable devices) |
-| `get_io_config` | — | the current IO table (role + pin + name per output) |
+| `describe_pins` | none | the provisioning menu: GPIOs that can take an IO role, with supported roles + cautions (provision-capable devices) |
+| `get_io_config` | none | the current IO table (role + pin + name per output) |
 | `set_io_config` | `outputs?` / `reset?` | re-provision the IO table at runtime (or revert to default); persists, applies after `reboot_device` |
-| `list_inputs` | — | inputs with current values (digital/analog) |
+| `list_inputs` | none | inputs with current values (digital/analog) |
 | `read_input` | `index` | read one input value |
 | `set_baud` | `baud`, `data_bits?`, `parity?`, `stop_bits?` | reconfigure the **target** DATA UART (over CMD) |
-| `serial_signal` | `dtr?`, `rts?`, `break?` | drive DTR/RTS/BREAK — enter an ESP/AVR bootloader |
+| `serial_signal` | `dtr?`, `rts?`, `break?` | drive DTR/RTS/BREAK: enter an ESP/AVR bootloader |
 | `reboot_device` | `bootloader?` | reset the Duta, optionally into DFU/download mode |
-| `list_macros` | — | macro **names only** (never contents) |
+| `list_macros` | none | macro **names only** (never contents) |
 | `run_macro` | `name` | runs a stored macro by name (sends its text); returns `applied`, not the content |
 | `create_macro` | `name`, `text`, `secret?` | author/overwrite a reusable macro |
-| `list_serial_ports` | — | enumerate serial ports (Duta tagged) |
-| `connect_duta` | — | auto-detect + connect a Duta — **dual-CDC or single-port muxed** |
+| `list_serial_ports` | none | enumerate serial ports (Duta tagged) |
+| `connect_duta` | none | auto-detect + connect a Duta (**dual-CDC or single-port muxed**) |
 | `connect_port` | `port`, `baud?`, `parity?`, `stop_bits?` | connect any serial port as a console |
-| `disconnect_port` | — | disconnect |
+| `disconnect_port` | none | disconnect |
 | `set_serial` | `baud`, `parity?`, `stop_bits?` | change the host-side DATA serial params |
-| `connection_status` | — | current port/baud/Duta status |
+| `connection_status` | none | current port/baud/Duta status |
 
 > **Muxed devices.** ESP32-S3, RP2040/RP2350 (Pico), and nRF52840 Dutas carry the
 > console and the control channel over a *single* USB port via [skrit-mux](PROTOCOL.md).
-> `connect_duta` detects and connects them automatically — the tools above behave
+> `connect_duta` detects and connects them automatically; the tools above behave
 > identically whether the Duta is dual-CDC or muxed.
 
 `set_baud` / `serial_signal` / `reboot_device` / `set_pwm` need a Duta with the matching
-capability (`serial`, `reboot`, `pwm`) — `describe_device` lists what the connected
+capability (`serial`, `reboot`, `pwm`); `describe_device` lists what the connected
 board supports.
 
-`describe_pins` / `get_io_config` / `set_io_config` are **runtime provisioning** — they let
+`describe_pins` / `get_io_config` / `set_io_config` are **runtime provisioning**: they let
 you re-assign a board's IO (which pin is a relay/PWM, its name) without reflashing, on devices
 that advertise the `provision` flag (ESP32). `set_io_config` validates each pin against the
 board's pin map, persists, and takes effect after `reboot_device`. See [PROTOCOL.md](PROTOCOL.md)
@@ -57,7 +57,7 @@ board's pin map, persists, and takes effect after `reboot_device`. See [PROTOCOL
 ### Tool toggles (Settings ▸ MCP tools)
 
 Each group is individually switchable in the app's **Settings**. A disabled
-group is **removed from the router** — it doesn't appear in `tools/list` and any
+group is **removed from the router**: it doesn't appear in `tools/list` and any
 call is rejected, so the model can't even see it. Groups:
 `console_read`, `console_write`, `outputs` (incl. the provisioning tools),
 `macros_run`, `macros_create`, `connection`. All on by default. Toggling restarts
@@ -67,7 +67,7 @@ a running server so the change takes effect on the client's next list.
 
 Macros are a **backend-owned store** shared between the app UI and the MCP
 server (persisted to `macros.json` in the app data dir). The LLM can **list
-names**, **run by name**, and **create** macros — but **can never read a
+names**, **run by name**, and **create** macros, but **can never read a
 macro's text**. So you can keep a `prod-login` macro holding a password: the
 model applies it (`run_macro "prod-login"`) without ever seeing the secret.
 Macros the LLM creates appear live in the app.
@@ -77,11 +77,11 @@ Macros the LLM creates appear live in the app.
 > literals of every `secret` macro (bare lines + `STRING` args, ≥3 chars) are
 > replaced with `<REDACTED>` in `read_console` output. The human terminal is
 > unaffected. Caveat: a transformed echo (e.g. masked `****`) won't match, and a
-> very short secret over-redacts — over-redaction is the safe failure mode.
+> very short secret over-redacts (over-redaction is the safe failure mode).
 
 ### Macro language (Bash Bunny / DuckyScript style)
 
-Macro text is a line-based payload — **one command per line**. A line with no
+Macro text is a line-based payload: **one command per line**. A line with no
 command keyword is **typed verbatim + Enter**. (Canonical reference, incl. the
 tier model: [MACROS.md](MACROS.md).)
 
@@ -117,12 +117,12 @@ CTRL c
 | `WAITOK` | abort the macro if the last `RUN` exited non-zero |
 | `IF OK` / `IF FAIL` … `ELSE` … `END` | branch on the last `RUN`'s exit code |
 | `TIMEOUT <ms>` | wait timeout for `WAITFOR`/`RUN` (default 10000) |
-| `SET <name\|index> <0\|1>` | drive an output by name (e.g. `SET Relay1 0`) — needs a CMD link |
+| `SET <name\|index> <0\|1>` | drive an output by name (e.g. `SET Relay1 0`); needs a CMD link |
 | `WAITIO <name> <op> <value>` | wait until an input passes (`WAITIO LDR > 124`); ops `> < >= <= == !=` |
 | `$Name` | run another macro inline (e.g. `$Login`); nesting capped at depth 8 |
 
 `RUN` captures `$?` by appending a split-marker `echo` (`echo "sut""ra_N_:$?"`) so
-the echoed command can't false-match — it needs a **POSIX shell** on the target.
+the echoed command can't false-match: it needs a **POSIX shell** on the target.
 
 ```
 WAITFOR login:
@@ -159,6 +159,6 @@ claude mcp add --transport http sutra http://127.0.0.1:8551/mcp
 ## ⚠️ Safety
 
 This gives the connected LLM **read/write access to whatever is on the DATA
-port** — it can run arbitrary commands on the target (e.g. a root console). It's
+port**: it can run arbitrary commands on the target (e.g. a root console). It's
 bound to **localhost** and **disabled until you start it**, but treat enabling it
 as handing the model a live shell. Stop the server when you're done.

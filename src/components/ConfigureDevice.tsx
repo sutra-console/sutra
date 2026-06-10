@@ -1,7 +1,7 @@
-// Configure-device screen — runtime IO provisioning. Reads the device's pin menu
+// Configure-device screen: runtime IO provisioning. Reads the device's pin menu
 // (PIN_CAPS, mcu ∩ board) and current table (CONFIG_GET), lets the user assign a
 // role + name to each offerable pin, writes it back (CONFIG_SET), and reboots to
-// apply. The pin picker is constrained to what each pin supports — no hardcoded
+// apply. The pin picker is constrained to what each pin supports, no hardcoded
 // chip knowledge. See PROTOCOL.md "Provisioning".
 import { AlertTriangle, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -118,7 +118,7 @@ export function ConfigureDevice({
     try {
       await reboot();
     } catch {
-      /* the link drops as the device resets — expected */
+      /* the link drops as the device resets, expected */
     }
     setBusy(false);
     onOpenChange(false);
@@ -172,7 +172,7 @@ export function ConfigureDevice({
                       </SelectContent>
                     </Select>
 
-                    {/* pin — a pin outside the menu (e.g. a fixed onboard LED) can
+                    {/* pin: a pin outside the menu (e.g. a fixed onboard LED) can
                         be kept in its compiled role but not moved or repurposed */}
                     <Select value={String(row.pin)} onValueChange={(v) => update(i, { pin: Number(v) })}>
                       <SelectTrigger className="h-8 w-32 shrink-0">

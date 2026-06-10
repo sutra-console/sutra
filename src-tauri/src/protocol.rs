@@ -1,4 +1,4 @@
-//! skrit CMD-port wire protocol — see protocol/PROTOCOL.md
+//! skrit CMD-port wire protocol. See protocol/PROTOCOL.md
 //!
 //! Binary frame on the wire:  COBS( TYPE SEQ LEN BODY[LEN] CRC8 ) 0x00
 //! Multi-byte integers are little-endian. BODY is capped at 64 bytes.
@@ -350,7 +350,7 @@ impl MuxReader {
     }
 
     /// Feed received bytes; returns each complete `(channel, payload)` that became
-    /// available. A malformed (un-decodable) frame is dropped silently — the link
+    /// available. A malformed (un-decodable) frame is dropped silently: the link
     /// resyncs on the next 0x00 delimiter.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
         let mut out = Vec::new();

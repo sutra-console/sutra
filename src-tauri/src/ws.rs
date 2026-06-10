@@ -1,4 +1,4 @@
-//! WebSocket client — connect a Duta over the network transport.
+//! WebSocket client: connect a Duta over the network transport.
 //!
 //! The network transport is muxed (`caps.muxed`), so this reuses the same mux
 //! demux + response matcher (`Shared::mux_rx`) as a single-USB-CDC link: a read
@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::protocol::{is_event, msg, mux_wrap, status, Frame, Frame as F, MuxReader, RESP_FLAG};
 use crate::serial::{RespFrame, Shared};
 
-/// Live WebSocket link — a channel to the write task carrying raw wire bytes.
+/// Live WebSocket link: a channel to the write task carrying raw wire bytes.
 pub struct WsLink {
     tx: UnboundedSender<Vec<u8>>,
 }
@@ -25,7 +25,7 @@ pub struct WsLink {
 #[derive(Debug, Clone, Serialize)]
 pub struct WsConnectResult {
     pub name: String,
-    pub default_cred: bool, // device still on the factory password — prompt a change
+    pub default_cred: bool, // device still on the factory password; prompt a change
 }
 
 /// Connect to `url` (ws:// or wss://), authenticate with `password`, and wire the
@@ -88,7 +88,7 @@ pub async fn connect(
     *shared.ws_slot() = Some(WsLink { tx: out_tx });
     let _ = app.emit("sutra://link", true);
 
-    // AUTH handshake — routed through send_cmd (which now targets this WS link).
+    // AUTH handshake: routed through send_cmd (which now targets this WS link).
     let auth = {
         let sh = shared.clone();
         let pw = password.into_bytes();
@@ -101,7 +101,7 @@ pub async fn connect(
         return Err("authentication failed (wrong password?)".into());
     }
 
-    // INFO — read the device name + the default-credential flag (flags = body[9]).
+    // INFO: read the device name + the default-credential flag (flags = body[9]).
     let (name, default_cred) = {
         let sh = shared.clone();
         let info = tokio::task::spawn_blocking(move || crate::serial::send_cmd(&sh, msg::INFO, vec![]))
