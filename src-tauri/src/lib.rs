@@ -113,7 +113,7 @@ fn macros_get(state: tauri::State<AppState>) -> Vec<MacroRec> {
 
 #[tauri::command]
 fn macro_upsert(state: tauri::State<AppState>, name: String, text: String, secret: bool, set: String) {
-    serial::macro_upsert(&state.shared, MacroRec { name, text, secret, set });
+    serial::macro_upsert(&state.shared, MacroRec { name, text, secret, set, tier: 0 });
 }
 
 #[derive(Serialize, serde::Deserialize)]

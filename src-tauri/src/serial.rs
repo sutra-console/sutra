@@ -78,6 +78,10 @@ pub struct MacroRec {
     pub secret: bool,
     #[serde(default)]
     pub set: String, // project/collection this macro belongs to ("" = default)
+    /// skrit-mc tier (1=replay, 2=interactive, 3=app-only). Derived from `text`;
+    /// recomputed on every read, so a stored/incoming value is ignored.
+    #[serde(default)]
+    pub tier: u8,
 }
 
 /// Name-only view returned to the LLM (no `text`).
@@ -519,15 +523,15 @@ fn persist(shared: &Arc<Shared>) {
             let _ = std::fs::write(&path, json);
         }
     }
-    // notify the UI so LLM-created/changed macros appear live
+    // notify the UI so LLM-created/changed macros appear live (with fresh tiers)
     if let Some(app) = shared.app.lock().unwrap().clone() {
-        let _ = app.emit("ttl://macros", &list);
+        let _ = app.emit("ttl://macros", &tiered(&list));
     }
 }
 
-/// Full macro list (for the app UI — includes text).
+/// Full macro list (for the app UI — includes text + derived `tier`).
 pub fn macros_all(shared: &Arc<Shared>) -> Vec<MacroRec> {
-    shared.macros.lock().unwrap().clone()
+    tiered(&shared.macros.lock().unwrap())
 }
 
 /// Literal strings typed by SECRET macros (bare lines + STRING args, escapes
@@ -771,6 +775,54 @@ fn parse_command(kw: &str, rest: &str) -> Option<Vec<Step>> {
         "HEX" => bytes(rest.split_whitespace().filter_map(|h| u8::from_str_radix(h, 16).ok()).collect()),
         _ => None,
     }
+}
+
+/// skrit-mc tier of one step. Control-flow ops (`WaitOk`/`If`/`Else`/`End`) are
+/// transparent — they ride whatever read set the outcome — so they cost tier 1;
+/// the read op (`WaitFor`/`WaitIo` = 2) or `Run` (= 3) is what dominates.
+fn step_tier(step: &Step) -> u8 {
+    match step {
+        Step::WaitFor(_) | Step::WaitIo(..) => 2,
+        Step::Run(_) => 3,
+        _ => 1, // Bytes, Delay, Timeout, SetOut, WaitOk, If/Else/End, Call
+    }
+}
+
+/// Highest tier a macro's text needs, inlining `$call` against `list`
+/// (cycle-/depth-guarded; an over-deep chain is treated as app-only).
+fn tier_of_text(list: &[MacroRec], text: &str, depth: u32) -> u8 {
+    if depth > MAX_CALL_DEPTH {
+        return 3;
+    }
+    let mut t = 1u8;
+    for step in parse_macro(text) {
+        let st = match &step {
+            Step::Call(name) => {
+                let want = name.trim().to_lowercase();
+                list.iter()
+                    .find(|m| m.name.trim().to_lowercase() == want)
+                    .map(|m| tier_of_text(list, &m.text, depth + 1))
+                    .unwrap_or(1)
+            }
+            s => step_tier(s),
+        };
+        if st > t {
+            t = st;
+        }
+    }
+    t
+}
+
+/// Clone `list` with each record's `tier` freshly computed (resolves `$call`
+/// across the whole list, so an edit to a callee re-tiers its callers).
+fn tiered(list: &[MacroRec]) -> Vec<MacroRec> {
+    list.iter()
+        .cloned()
+        .map(|mut m| {
+            m.tier = tier_of_text(list, &m.text, 0);
+            m
+        })
+        .collect()
 }
 
 fn parse_macro(s: &str) -> Vec<Step> {

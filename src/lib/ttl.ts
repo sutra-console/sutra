@@ -92,9 +92,10 @@ export interface DeviceInfo {
   storeKb: number;
   protoVer: number;
   nInputs: number;
+  macroTier: number; // highest skrit-mc tier the device VM runs (0 = no VM)
 }
 export async function getInfo(): Promise<DeviceInfo> {
-  const b = (await sendCmd(MSG.INFO)).body; // [status, fwlo, fwhi, caps, nout, eekb, ver, nin?]
+  const b = (await sendCmd(MSG.INFO)).body; // [status, fwlo, fwhi, caps, nout, eekb, ver, nin?, tier?]
   return {
     fwVer: ((b[2] ?? 0) << 8) | (b[1] ?? 0),
     caps: b[3] ?? 0,
@@ -102,6 +103,7 @@ export async function getInfo(): Promise<DeviceInfo> {
     storeKb: b[5] ?? 0,
     protoVer: b[6] ?? 0,
     nInputs: b[7] ?? 0,
+    macroTier: b[8] ?? 0,
   };
 }
 
@@ -226,7 +228,15 @@ export interface MacroRec {
   text: string;
   secret: boolean;
   set: string; // project/collection ("" = default)
+  tier: number; // derived skrit-mc tier: 1=replay, 2=interactive, 3=app-only
 }
+
+/** Label + short title for a skrit-mc tier. */
+export const TIER_INFO: Record<number, { label: string; title: string }> = {
+  1: { label: "Replay", title: "open-loop: emit / delay / set output — runs on any device" },
+  2: { label: "Interactive", title: "closed-loop: waits on / branches on a read (expect, input)" },
+  3: { label: "App-only", title: "host orchestration (RUN exit codes) — Sutra player only" },
+};
 export const macrosGet = () => invoke<MacroRec[]>("macros_get");
 export const macroUpsert = (name: string, text: string, secret: boolean, set: string) =>
   invoke<void>("macro_upsert", { name, text, secret, set });

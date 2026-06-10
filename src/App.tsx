@@ -55,9 +55,17 @@ import {
   type MacroRec,
   type MacroRunInfo,
   type ControlDesc,
+  TIER_INFO,
 } from "@/lib/ttl";
 
 const BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1500000];
+
+// tint a tier badge: 1=replay (green), 2=interactive (amber), 3=app-only (muted)
+const TIER_COLOR: Record<number, string> = {
+  1: "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
+  2: "border-amber-500/40 text-amber-600 dark:text-amber-400",
+  3: "border-muted-foreground/40 text-muted-foreground",
+};
 
 interface Settings {
   autoStartMcp: boolean;
@@ -177,6 +185,7 @@ export default function App() {
   const [draftSet, setDraftSet] = useState("");
   const [showHelp, setShowHelp] = useState(false);
   const [setFilter, setSetFilter] = useState(""); // active project/set ("" = all)
+  const [tierFilter, setTierFilter] = useState(0); // active tier (0 = all)
 
   // macro drag-reorder (live projected order + ghost)
   const [dragName, setDragName] = useState<string | null>(null);
@@ -381,7 +390,9 @@ export default function App() {
 
   // distinct project/set names present in the store
   const sets = Array.from(new Set(macros.map((m) => m.set).filter(Boolean))).sort();
-  const shownMacros = orderedMacros.filter((s) => !setFilter || s.set === setFilter);
+  const shownMacros = orderedMacros.filter(
+    (s) => (!setFilter || s.set === setFilter) && (!tierFilter || s.tier === tierFilter)
+  );
 
   async function doExport() {
     const label = setFilter || "macros";
@@ -765,17 +776,32 @@ export default function App() {
                   <Plus />
                 </Button>
               </div>
-              <Select value={setFilter || "__all"} onValueChange={(v) => setSetFilter(v === "__all" ? "" : v)}>
-                <SelectTrigger className="h-7 text-xs" title="Project / set">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__all">All sets</SelectItem>
-                  {sets.map((s) => (
-                    <SelectItem key={s} value={s}>{s}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="flex gap-1">
+                <Select value={setFilter || "__all"} onValueChange={(v) => setSetFilter(v === "__all" ? "" : v)}>
+                  <SelectTrigger className="h-7 flex-1 text-xs" title="Project / set">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__all">All sets</SelectItem>
+                    {sets.map((s) => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={tierFilter ? String(tierFilter) : "__all"} onValueChange={(v) => setTierFilter(v === "__all" ? 0 : Number(v))}>
+                  <SelectTrigger className="h-7 flex-1 text-xs" title="Capability tier">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__all">All tiers</SelectItem>
+                    {[1, 2, 3].map((t) => (
+                      <SelectItem key={t} value={String(t)} title={TIER_INFO[t]?.title}>
+                        {TIER_INFO[t]?.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </CardHeader>
             <CardContent className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
               {shownMacros.length === 0 && (
@@ -822,11 +848,20 @@ export default function App() {
                     <div className="flex items-center gap-1">
                       {s.secret && <Lock className="size-3 shrink-0 text-muted-foreground" />}
                       <span className="truncate text-sm">{s.name}</span>
-                      {!setFilter && s.set && (
-                        <Badge variant="secondary" className="ml-auto shrink-0 px-1 py-0 text-[9px]">
-                          {s.set}
+                      <span className="ml-auto flex shrink-0 items-center gap-1">
+                        <Badge
+                          variant="outline"
+                          className={cn("px-1 py-0 text-[9px]", TIER_COLOR[s.tier])}
+                          title={TIER_INFO[s.tier]?.title}
+                        >
+                          {TIER_INFO[s.tier]?.label ?? `T${s.tier}`}
                         </Badge>
-                      )}
+                        {!setFilter && s.set && (
+                          <Badge variant="secondary" className="px-1 py-0 text-[9px]">
+                            {s.set}
+                          </Badge>
+                        )}
+                      </span>
                     </div>
                     <div className="truncate font-mono text-[11px] text-muted-foreground">
                       {s.secret ? "••••••••" : s.text.replace(/\n/g, " ⏎ ")}
