@@ -7,6 +7,7 @@ export const MSG = {
   INFO: 0x02,
   DEVICE_NAME: 0x03,
   REBOOT: 0x04,
+  DATA_DESC: 0x07,
   OUTPUT_SET: 0x10,
   OUTPUT_GET: 0x11,
   OUTPUT_TOGGLE: 0x12,
@@ -228,6 +229,17 @@ export interface ControlDesc {
 export async function getDeviceName(): Promise<string> {
   const b = (await sendCmd(MSG.DEVICE_NAME)).body; // [status, name...]
   return dec.decode(Uint8Array.from(b.slice(1)));
+}
+
+/** What the device's DATA channel carries (so the app can pick a viewer). */
+export const DATA_KIND = { UART: 0, CAN: 1, RS485: 2, SPI: 3, BLE_SNIFF: 4, LOGIC: 5 } as const;
+export interface DataDesc {
+  kind: number;
+  name: string;
+}
+export async function getDataDesc(): Promise<DataDesc> {
+  const b = (await sendCmd(MSG.DATA_DESC)).body; // [status, kind, name...]
+  return { kind: b[1] ?? 0, name: dec.decode(Uint8Array.from(b.slice(2))) || "UART" };
 }
 export async function getOutputDesc(index: number): Promise<ControlDesc> {
   const b = (await sendCmd(MSG.OUTPUT_DESC, [index])).body; // [status, index, type, name...]

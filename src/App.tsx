@@ -38,6 +38,9 @@ import {
   getInfo,
   getDeviceName,
   getControls,
+  getDataDesc,
+  DATA_KIND,
+  type DataDesc,
   CAP,
   CTRL,
   outputPwm,
@@ -181,6 +184,7 @@ export default function App() {
   const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
   const [pwmVals, setPwmVals] = useState<Record<number, number>>({}); // index -> duty 0..1023
   const [rgbVals, setRgbVals] = useState<Record<number, Rgb[]>>({}); // index -> per-pixel colors
+  const [dataDesc, setDataDesc] = useState<DataDesc | null>(null); // what the DATA channel carries
   const [deviceName, setDeviceName] = useState("");
   const [caps, setCaps] = useState(0); // device capability bits (Duta only)
   const [macros, setMacros] = useState<MacroRec[]>([]);
@@ -430,6 +434,7 @@ export default function App() {
   async function loadDevice() {
     getDeviceName().then(setDeviceName).catch(() => {});
     getInfo().then((i) => setCaps(i.caps)).catch(() => {});
+    getDataDesc().then(setDataDesc).catch(() => setDataDesc(null)); // UART if unsupported
     try {
       const cs = await getControls();
       setControls(cs);
@@ -459,6 +464,7 @@ export default function App() {
     setOutBitmap(0);
     setPwmVals({});
     setRgbVals({});
+    setDataDesc(null);
     setCaps(0);
   }
 
@@ -830,7 +836,14 @@ export default function App() {
       <div className="flex min-h-0 flex-1 gap-3 p-3">
         <Card className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <CardHeader className="flex-row items-center justify-between border-b py-2">
-            <CardTitle>Console — DATA</CardTitle>
+            <CardTitle className="flex items-center gap-2">
+              Console — {dataDesc ? dataDesc.name : "DATA"}
+              {dataDesc && dataDesc.kind !== DATA_KIND.UART && (
+                <Badge variant="outline" className="text-[10px] font-normal">
+                  raw {dataDesc.name} stream · typed viewer coming
+                </Badge>
+              )}
+            </CardTitle>
             <span className="text-xs text-muted-foreground">
               {baud} 8{parity[0].toUpperCase()}
               {stopBits}

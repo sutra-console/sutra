@@ -17,6 +17,7 @@ pub mod msg {
     pub const REBOOT: u8 = 0x04;
     pub const AUTH: u8 = 0x05;
     pub const AUTH_SET: u8 = 0x06;
+    pub const DATA_DESC: u8 = 0x07;
     pub const OUTPUT_SET: u8 = 0x10;
     pub const OUTPUT_GET: u8 = 0x11;
     pub const OUTPUT_TOGGLE: u8 = 0x12;

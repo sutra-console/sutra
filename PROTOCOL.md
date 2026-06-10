@@ -10,8 +10,12 @@ single-channel device (single USB-CDC, TCP, BLE) carries both over one stream vi
 | **DATA** | transparent USB↔UART bridge — the target console | **raw bytes**, no framing |
 | **CMD** | control / macros / config | this protocol |
 
-The **DATA** role is never framed — it carries the target's serial console verbatim
-and is what the terminal widget renders. Everything below is the **CMD** role only.
+The **DATA** role is never framed — it carries the bridged bus verbatim. By default
+that's a UART console (what the terminal widget renders), but a device reports what its
+DATA channel actually carries via [`DATA_DESC`](#message-types) (uart, can, rs485, spi,
+ble-sniff, logic) so the app can pick the right viewer — see the
+[roadmap](https://github.com/sutra-console/.github). Everything below is the **CMD**
+role only.
 
 The CMD port speaks **two interchangeable modes** so it stays debuggable by hand while
 being efficient for the app:
@@ -93,6 +97,7 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x04` | `REBOOT` | `mode(1)` | — (replies OK, then reboots). `mode` 0=app reset, 1=bootloader/DFU. Needs `CAP_REBOOT`. |
 | `0x05` | `AUTH` | `password…` | — | authenticate the session on a network transport. OK = authed; `0x08` = wrong password. Until authed the device answers only `PING`/`INFO`/`AUTH`. |
 | `0x06` | `AUTH_SET` | `new_password…` | — | change the password (≤32 bytes); must already be authed. Persists. |
+| `0x07` | `DATA_DESC` | — | `kind(1)`, `name…` | what the DATA channel carries: 0=uart (raw console), 1=can, 2=rs485, 3=spi, 4=ble-sniff, 5=logic. A device that doesn't answer is treated as **uart**. Lets the app pick a viewer. |
 | `0x10` | `OUTPUT_SET` | `index(1)`, `value(1)` | — | drive output `index` on/off (0/1). Outputs are self-described via `OUTPUT_DESC`. |
 | `0x11` | `OUTPUT_GET` | — | `bitmap(1)` — bit `i` = output `i` is on |
 | `0x12` | `OUTPUT_TOGGLE` | `index(1)` | `bitmap(1)` |
