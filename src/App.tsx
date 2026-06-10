@@ -26,6 +26,7 @@ import { Slider } from "@/components/ui/slider";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import {
   autodetect,
+  autodetectMux,
   connect as serialConnect,
   connectMuxed,
   bleScan,
@@ -334,10 +335,10 @@ export default function App() {
           setHasCmd(true);
           setDataPort(data);
           setStatus(`Duta: DATA ${data} · CMD ${cmd}`);
-        } catch (dualErr) {
-          // One Duta port → a single-port muxed board (ESP32 / Pico / nRF52840).
-          const muxPort = dutaPorts[0]?.name;
-          if (!muxPort) throw dualErr;
+        } catch {
+          // No dual-CDC pair → probe candidates for a single-port muxed board
+          // (ESP32 / Pico / nRF52840); the backend confirms with a mux PING.
+          const muxPort = await autodetectMux();
           await connectMuxed(muxPort);
           setHasCmd(true);
           setDataPort(muxPort);

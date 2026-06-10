@@ -16,8 +16,18 @@ use tauri::{AppHandle, Emitter};
 
 use crate::protocol::{is_event, msg, mux_wrap, Frame, FrameReader, MuxReader};
 
-pub const DUTA_VID: u16 = 0x1209;
-pub const DUTA_PID: u16 = 0xC550;
+pub const DUTA_VID: u16 = 0x1209; // pid.codes: CH552 dual-CDC (+ the Zephyr nRF builds)
+pub const DUTA_PID: u16 = 0xC550; // the CH552 dual-CDC product id
+// VIDs the single-port muxed boards enumerate as. These mark a port as a Duta
+// *candidate* — autodetect confirms with a skrit-mux PING before claiming it.
+const VID_ESPRESSIF: u16 = 0x303A; // ESP32-S3/C3 native USB-Serial/JTAG
+const VID_RASPBERRY_PI: u16 = 0x2E8A; // RP2040/RP2350 (arduino-pico)
+
+/// Could this port be a Duta? Exact ids plus the vendor ids our muxed boards
+/// use; a candidate is only *claimed* after it answers a skrit-mux PING.
+fn duta_candidate(vid: Option<u16>) -> bool {
+    matches!(vid, Some(DUTA_VID) | Some(VID_ESPRESSIF) | Some(VID_RASPBERRY_PI))
+}
 const CONSOLE_CAP: usize = 64 * 1024; // rolling DATA-console buffer for the UI/MCP
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,7 +248,7 @@ pub fn list_ports() -> Vec<PortDesc> {
                 }
                 _ => (None, None, None, None, None),
             };
-            let is_duta = vid == Some(DUTA_VID) && pid == Some(DUTA_PID);
+            let is_duta = duta_candidate(vid);
             PortDesc { name: p.port_name, vid, pid, product, manufacturer, serial_number, is_duta }
         })
         .collect()
@@ -310,8 +320,13 @@ pub fn probe_is_cmd(name: &str) -> bool {
 }
 
 pub fn autodetect() -> Result<(String, String), String> {
-    let ports: Vec<String> =
-        list_ports().into_iter().filter(|p| p.is_duta).map(|p| p.name).collect();
+    // dual-CDC pairing only applies to the exact CH552 id — candidate VIDs
+    // (ESP32 / Pico) are single-port muxed and must not be paired here.
+    let ports: Vec<String> = list_ports()
+        .into_iter()
+        .filter(|p| p.vid == Some(DUTA_VID) && p.pid == Some(DUTA_PID))
+        .map(|p| p.name)
+        .collect();
     if ports.len() < 2 {
         return Err(format!("expected 2 Duta ports, found {}", ports.len()));
     }
@@ -322,6 +337,21 @@ pub fn autodetect() -> Result<(String, String), String> {
         }
     }
     Ok((ports[0].clone(), ports[1].clone()))
+}
+
+/// Probe every Duta-candidate port with a skrit-mux PING; first to answer wins.
+pub fn autodetect_mux() -> Result<String, String> {
+    let cands: Vec<String> =
+        list_ports().into_iter().filter(|p| p.is_duta).map(|p| p.name).collect();
+    if cands.is_empty() {
+        return Err("no Duta-capable ports found".into());
+    }
+    for name in &cands {
+        if probe_is_mux(name) {
+            return Ok(name.clone());
+        }
+    }
+    Err(format!("no candidate port answered skrit-mux (probed {})", cands.join(", ")))
 }
 
 // ---- connection ------------------------------------------------------------
@@ -562,30 +592,13 @@ pub enum Detected {
     Mux(String),
 }
 
-/// Find a connected Duta, dual-CDC or muxed. Two Duta ports → dual; one that
-/// answers a mux PING → muxed.
+/// Find a connected Duta, dual-CDC or muxed: a CH552 dual-CDC pair wins, else
+/// the first candidate port that answers a skrit-mux PING.
 pub fn autodetect_any() -> Result<Detected, String> {
-    let ports: Vec<String> =
-        list_ports().into_iter().filter(|p| p.is_duta).map(|p| p.name).collect();
-    match ports.len() {
-        0 => Err("no Duta found".into()),
-        1 => {
-            if probe_is_mux(&ports[0]) {
-                Ok(Detected::Mux(ports[0].clone()))
-            } else {
-                Err("one Duta port, but it didn't answer skrit-mux".into())
-            }
-        }
-        _ => {
-            for cand in &ports {
-                if probe_is_cmd(cand) {
-                    let data = ports.iter().find(|n| *n != cand).cloned().unwrap();
-                    return Ok(Detected::Dual { data, cmd: cand.clone() });
-                }
-            }
-            Ok(Detected::Dual { data: ports[0].clone(), cmd: ports[1].clone() })
-        }
+    if let Ok((data, cmd)) = autodetect() {
+        return Ok(Detected::Dual { data, cmd });
     }
+    autodetect_mux().map(Detected::Mux)
 }
 
 /// MCP/auto connect: detect a Duta (dual or muxed) and connect it. Returns a
@@ -1571,4 +1584,21 @@ pub fn play(shared: &Arc<Shared>, name: &str, text: &str) {
         shared.runs.lock().unwrap().retain(|r| r.id != id);
         emit_runs(&shared, &app);
     });
+}
+
+#[cfg(test)]
+mod hw_tests {
+    // Hardware-in-the-loop smoke tests — need a real Duta plugged in, so they
+    // are #[ignore]d for CI. Run locally with:  cargo test -- --ignored hw_
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn hw_autodetect_mux_finds_a_duta() {
+        let ports = list_ports();
+        let cands: Vec<_> = ports.iter().filter(|p| p.is_duta).collect();
+        println!("candidates: {cands:?}");
+        let port = autodetect_mux().expect("a muxed Duta should answer the probe");
+        println!("muxed Duta on {port}");
+    }
 }

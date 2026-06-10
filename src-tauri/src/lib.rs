@@ -39,6 +39,13 @@ fn autodetect() -> Result<DetectResult, String> {
     serial::autodetect().map(|(data, cmd)| DetectResult { data, cmd })
 }
 
+/// Find a single-port muxed Duta: probe every candidate port (ESP32 / Pico /
+/// nRF vendor ids) with a skrit-mux PING and return the first that answers.
+#[tauri::command]
+fn autodetect_mux() -> Result<String, String> {
+    serial::autodetect_mux()
+}
+
 #[tauri::command]
 fn connect(
     app: tauri::AppHandle,
@@ -273,6 +280,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_ports,
             autodetect,
+            autodetect_mux,
             connect,
             connect_muxed,
             ble_scan,

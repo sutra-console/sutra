@@ -73,6 +73,8 @@ export interface DetectResult {
 
 export const listPorts = () => invoke<PortDesc[]>("list_ports");
 export const autodetect = () => invoke<DetectResult>("autodetect");
+/** Find a single-port muxed Duta: probes candidate ports with a skrit-mux PING. */
+export const autodetectMux = () => invoke<string>("autodetect_mux");
 /** Connect a DATA port. Pass cmdPort for a Duta, or null/omit for any generic serial port. */
 export const connect = (dataPort: string, cmdPort?: string | null) =>
   invoke<void>("connect", { dataPort, cmdPort: cmdPort ?? null });
