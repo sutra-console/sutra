@@ -2,7 +2,7 @@
 
 The desktop app embeds an **MCP server** so an LLM can read the target device's
 serial console and drive it. It's **off by default** — enable it in the app's
-**MCP server** card (sidebar), pick a port (default **8765**), click **Start**.
+**MCP server** card (sidebar), pick a port (default **8551**), click **Start**.
 
 Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only).
 

@@ -90,8 +90,8 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x02` | `INFO` | — | `fw_ver(2)`, `caps(1)`, `n_outputs(1)`, `store_kb(1)`, `proto_ver(1)`, `n_inputs(1)`, `macro_tier(1)` |
 | `0x03` | `DEVICE_NAME` | — | device name string |
 | `0x04` | `REBOOT` | `mode(1)` | — (replies OK, then reboots). `mode` 0=app reset, 1=bootloader/DFU. Needs `CAP_REBOOT`. |
-| `0x10` | `OUTPUT_SET` | `index(1)`, `value(1)` | — | sets relay/LED. index: 0=R1,1=R2,2=LED |
-| `0x11` | `OUTPUT_GET` | — | `bitmap(1)` (bit0=R1,bit1=R2,bit2=LED) |
+| `0x10` | `OUTPUT_SET` | `index(1)`, `value(1)` | — | drive output `index` on/off (0/1). Outputs are self-described via `OUTPUT_DESC`. |
+| `0x11` | `OUTPUT_GET` | — | `bitmap(1)` — bit `i` = output `i` is on |
 | `0x12` | `OUTPUT_TOGGLE` | `index(1)` | `bitmap(1)` |
 | `0x13` | `OUTPUT_DESC` | `index(1)` | `index(1)`, `type(1)`, `name…` — type is the *behavior*: 0=io (digital on/off), 1=pwm, 2=rgb; what the pin drives (relay, LED, reset…) is the descriptive `name`. |
 | `0x14` | `INPUT_DESC` | `index(1)` | `index(1)`, `type(1)`, `name…` (type 0=digital, 1=analog) |
@@ -101,7 +101,7 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x18` | `SERIAL_SET` | `baud(4)`, `data_bits(1)`, `parity(1)`, `stop_bits(1)` | — | reconfigure DATA UART (works even on a muxed link where USB line-coding isn't available). Needs `CAP_SERIAL`. |
 | `0x19` | `SERIAL_SIGNAL` | `mask(1)`, `value(1)` | — | drive DATA modem/break lines. bit0=DTR, bit1=RTS, bit2=BREAK. Lets a host sequence ESP32 / AVR bootloader entry. Needs `CAP_SERIAL`. |
 | `0x1A` | `OUTPUT_PWM` | `index(1)`[, `duty(2)`] | `index(1)`, `duty(2)` | with `duty` (0–1023) = set the output's PWM duty; without = read it back. Needs `CAP_PWM`; non-PWM outputs answer `0x03`. A PWM output still honors `OUTPUT_SET` (0 = duty 0, 1 = full). |
-| `0x1B` | `OUTPUT_RGB` | `index(1)`[, [`pixel(1)`,] `r(1)`, `g(1)`, `b(1)`] | `index(1)`, `count(1)`, `r(1)`, `g(1)`, `b(1)` | addressable-LED color. Body **1** = read; **4** = set all pixels; **5** = set one `pixel`. Response carries the strip's pixel `count` and pixel 0's color. Only `OUTPUT_DESC` type 4 (rgb); others answer `0x03`. Still honors `OUTPUT_SET` (0 = off, 1 = white). |
+| `0x1B` | `OUTPUT_RGB` | `index(1)`[, [`pixel(1)`,] `r(1)`, `g(1)`, `b(1)`] | `index(1)`, `count(1)`, `r(1)`, `g(1)`, `b(1)` | addressable-LED color. Body **1** = read; **4** = set all pixels; **5** = set one `pixel`. Response carries the strip's pixel `count` and pixel 0's color. Only `OUTPUT_DESC` type 2 (rgb); others answer `0x03`. Still honors `OUTPUT_SET` (0 = off, 1 = white). |
 | `0x20` | `MACRO_LIST` | `start(1)` | `count(1)`, then repeated `{id(1), name_len(1), name…}` until frame full; more via next `start`. |
 | `0x21` | `MACRO_META` | `id(1)` | `id(1)`, `len(2)`, `name_len(1)`, `name…` |
 | `0x22` | `MACRO_READ` | `id(1)`, `off(2)`, `n(1)` | `bytes…` (n ≤ 64) |
