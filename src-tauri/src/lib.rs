@@ -71,7 +71,7 @@ fn ble_scan() -> Result<Vec<ble::BleDevice>, String> {
     tauri::async_runtime::block_on(ble::scan(3))
 }
 
-/// Connect a Duta over BLE by scanned device id (dual NUS DATA + CMD service).
+/// Connect a Duta over BLE by scanned device id (dual skrit GATT services: DATA + CMD).
 #[tauri::command]
 fn ble_connect(
     app: tauri::AppHandle,

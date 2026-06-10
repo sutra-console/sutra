@@ -280,24 +280,25 @@ DATA payloads should stay ≤ 240 B so COBS overhead is a single byte; larger co
 bursts are split across frames (order is preserved). There is no CRC on the DATA
 channel — it mirrors the lossless, unframed nature of the raw console port.
 
-### BLE — NUS console + a CMD service
+### BLE — two skrit GATT services (DATA + CMD)
 
 BLE is **dual-channel**, like dual-CDC — GATT gives each role its own pipe, so there's
-no need to mux. The two roles map to two GATT services, and **`caps.muxed` is 0**:
+no need to mux. The two roles map to two **GATT services**, and **`caps.muxed` is 0**:
 
-- **DATA** = a **Nordic UART Service (NUS)** — the de-facto "serial over BLE". It carries
-  the **raw** target console, so any generic BLE-UART terminal (nRF Connect, etc.) reads
-  it directly, no skrit knowledge needed.
-- **CMD** = a **skrit CMD service** carrying the framed CMD protocol (`TYPE SEQ LEN BODY
+- **DATA** = the **skrit DATA service**, carrying the **raw** target console. Its UUID is
+  deliberately NUS-compatible (the de-facto "serial over BLE"), so any generic BLE-UART
+  terminal (nRF Connect, etc.) reads the console directly, no skrit knowledge needed —
+  but the contract is the GATT service below, not Nordic's.
+- **CMD** = the **skrit CMD service** carrying the framed CMD protocol (`TYPE SEQ LEN BODY
   CRC8`, `0x00`-delimited) — byte-identical to the dual-CDC CMD port.
 
 | Service | UUID base | RX (host→device, write) | TX (device→host, notify) |
 |---------|-----------|-------------------------|--------------------------|
-| **DATA** (NUS) | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` | `…0002` raw console in | `…0003` raw console out |
-| **CMD** (skrit) | `6E410001-B5A3-F393-E0A9-E50E24DCCA9E` | `…0002` CMD frames in | `…0003` CMD responses/events out |
+| **DATA** | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` | `…0002` raw console in | `…0003` raw console out |
+| **CMD** | `6E410001-B5A3-F393-E0A9-E50E24DCCA9E` | `…0002` CMD frames in | `…0003` CMD responses/events out |
 
-(The CMD service reuses the Nordic vendor base with service word `6E41xxxx` to mark it as
-a sibling of NUS.) The host subscribes to both TX characteristics (CCC), writes console
+(The CMD service sits on the same vendor base with service word `6E41xxxx`, marking it as
+the DATA service's sibling.) The host subscribes to both TX characteristics (CCC), writes console
 keystrokes to DATA-RX and CMD frames to CMD-RX. A frame larger than the negotiated ATT
 MTU (− 3) is split across notifications and reassembled by the `0x00` delimiters — BLE
 adds no framing of its own. Pair/bond per your security needs.

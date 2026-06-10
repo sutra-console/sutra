@@ -14,7 +14,7 @@ drives any plain COM port.
 - **Universal serial console** (ghostty-web) — connect a Duta device *or* any
   COM port; baud/parity/stop, named connection profiles, link online/offline.
 - **Bluetooth LE** — the toolbar's Bluetooth button scans for a Duta and connects
-  over BLE (dual NUS console + skrit CMD service); from there the console, controls,
+  over BLE (two skrit GATT services: DATA console + CMD); from there the console, controls,
   and macros all work identically to a serial link. *(Scaffold — see duta/zephyr.)*
 - **Network (WebSocket)** — the globe button connects a Duta over `ws://`/`wss://`
   (the skrit-mux stream over WS binary frames), authenticating with the device

@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::protocol::{is_event, Frame, FrameReader, RESP_FLAG};
 use crate::serial::{RespFrame, Shared};
 
-// Dual BLE: NUS for DATA, skrit CMD service (6E41 base) for CMD.
+// Dual BLE: two skrit GATT services — DATA (NUS-compatible UUID) + CMD (6E41 base).
 const DATA_RX: Uuid = Uuid::from_u128(0x6e400002_b5a3_f393_e0a9_e50e24dcca9e); // write
 const DATA_TX: Uuid = Uuid::from_u128(0x6e400003_b5a3_f393_e0a9_e50e24dcca9e); // notify
 const CMD_SVC: Uuid = Uuid::from_u128(0x6e410001_b5a3_f393_e0a9_e50e24dcca9e);
