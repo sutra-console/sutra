@@ -72,7 +72,7 @@ export function MacroHelp() {
           {s.items.map(([cmd, desc]) => (
             <div key={cmd} className="leading-tight">
               <code className="text-foreground">{cmd}</code>
-              <span className="text-muted-foreground"> — {desc}</span>
+              <span className="text-muted-foreground">: {desc}</span>
             </div>
           ))}
         </div>

@@ -276,7 +276,7 @@ export default function App() {
     const unRuns = onRuns(setRuns);
     const unLink = onLink((online) => {
       setLinkOnline(online);
-      setStatus(online ? "target online" : "target offline — link lost, retrying…");
+      setStatus(online ? "target online" : "target offline: link lost, retrying…");
     });
     return () => {
       un.then((f) => f()).catch(() => {});
@@ -305,8 +305,8 @@ export default function App() {
       setSelectedPort(cs.has_cmd ? "auto" : cs.data_port ?? "auto");
       setStatus(
         cs.has_cmd
-          ? `Duta — DATA ${cs.data_port} · CMD ${cs.cmd_port}`
-          : `serial — ${cs.data_port} @ ${cs.params.baud}`
+          ? `Duta: DATA ${cs.data_port} · CMD ${cs.cmd_port}`
+          : `serial: ${cs.data_port} @ ${cs.params.baud}`
       );
       if (cs.has_cmd) loadDevice();
     } catch {
@@ -333,7 +333,7 @@ export default function App() {
           await serialConnect(data, cmd);
           setHasCmd(true);
           setDataPort(data);
-          setStatus(`Duta — DATA ${data} · CMD ${cmd}`);
+          setStatus(`Duta: DATA ${data} · CMD ${cmd}`);
         } catch (dualErr) {
           // One Duta port → a single-port muxed board (ESP32 / Pico / nRF52840).
           const muxPort = dutaPorts[0]?.name;
@@ -341,7 +341,7 @@ export default function App() {
           await connectMuxed(muxPort);
           setHasCmd(true);
           setDataPort(muxPort);
-          setStatus(`Duta (muxed) — ${muxPort}`);
+          setStatus(`Duta (muxed): ${muxPort}`);
         }
         loadDevice();
       } else {
@@ -349,7 +349,7 @@ export default function App() {
         setHasCmd(false);
         setDataPort(selectedPort);
         clearDevice();
-        setStatus(`serial — ${selectedPort} @ ${baud}`);
+        setStatus(`serial: ${selectedPort} @ ${baud}`);
       }
       setConnected(true);
       setLinkOnline(true);
@@ -382,7 +382,7 @@ export default function App() {
       setDataPort(`BLE: ${name}`);
       setConnected(true);
       setLinkOnline(true);
-      setStatus(`Duta (BLE) — ${name}`);
+      setStatus(`Duta (BLE): ${name}`);
       loadDevice();
       focusTerm();
     } catch (e) {
@@ -404,8 +404,8 @@ export default function App() {
       focusTerm();
       setStatus(
         res.default_cred
-          ? `Duta (network) — ${res.name} ⚠ default password, change it`
-          : `Duta (network) — ${res.name}`,
+          ? `Duta (network): ${res.name} ⚠ default password, change it`
+          : `Duta (network): ${res.name}`,
       );
     } catch (e) {
       setStatus(`network connect failed: ${e}`);
@@ -681,7 +681,7 @@ export default function App() {
               )}
               <p className="text-[10px] leading-tight text-muted-foreground">
                 Lets an LLM read the console, run/author macros &amp; control outputs. Macro
-                contents (secrets) are never exposed — it can only run them by name.
+                contents (secrets) are never exposed; it can only run them by name.
               </p>
             </div>
           </PopoverContent>
@@ -702,7 +702,7 @@ export default function App() {
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
                 <Settings2 className="size-4" />
-                <span className="text-sm font-semibold">Serial — DATA</span>
+                <span className="text-sm font-semibold">Serial: DATA</span>
                 {dataPort && (
                   <Badge variant="secondary" className="ml-auto">{dataPort}</Badge>
                 )}
@@ -746,7 +746,7 @@ export default function App() {
                   : hasCmd
                     ? caps & CAP.PARITY
                       ? "Baud + parity reach the UART; stop bits fixed at 1."
-                      : "Duta is 8N1 — only baud reaches the wire (build firmware with PARITY_SUPPORT for parity)."
+                      : "Duta is 8N1, so only baud reaches the wire (build firmware with PARITY_SUPPORT for parity)."
                     : "Applied to the serial adapter (real baud/parity/stop)."}
               </p>
             </div>
@@ -784,7 +784,7 @@ export default function App() {
                   Saved connections
                 </div>
                 {profiles.length === 0 && (
-                  <p className="text-[11px] text-muted-foreground">None yet — save one below.</p>
+                  <p className="text-[11px] text-muted-foreground">None yet. Save one below.</p>
                 )}
                 {profiles.map((p) => (
                   <div key={p.id} className="flex items-center gap-1">
@@ -865,7 +865,7 @@ export default function App() {
         <Card className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <CardHeader className="flex-row items-center justify-between border-b py-2">
             <CardTitle className="flex items-center gap-2">
-              Console — {dataDesc ? dataDesc.name : "DATA"}
+              Console: {dataDesc ? dataDesc.name : "DATA"}
               {dataDesc && dataDesc.kind !== DATA_KIND.UART && (
                 <Badge variant="outline" className="text-[10px] font-normal">
                   raw {dataDesc.name} stream · typed viewer coming
@@ -976,7 +976,7 @@ export default function App() {
               ) : (
                 <p className="text-[10px] text-muted-foreground">
                   {connected && !hasCmd
-                    ? "Generic serial port — no device controls."
+                    ? "Generic serial port. No device controls."
                     : "No controls reported."}
                 </p>
               )}
@@ -1263,7 +1263,7 @@ export default function App() {
               {!showHelp && (
                 <p className="text-[10px] leading-tight text-muted-foreground">
                   One command per line. <code>STRING</code> <code>ENTER</code> <code>DELAY ms</code>{" "}
-                  <code>WAITFOR text</code> <code>RUN cmd</code> <code>IF OK…END</code> — or tap{" "}
+                  <code>WAITFOR text</code> <code>RUN cmd</code> <code>IF OK…END</code>, or tap{" "}
                   <CircleHelp className="inline size-3" /> for the full reference.
                 </p>
               )}

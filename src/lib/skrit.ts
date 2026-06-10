@@ -466,9 +466,9 @@ export interface MacroRec {
 
 /** Label + short title for a skrit-mc tier. */
 export const TIER_INFO: Record<number, { label: string; title: string }> = {
-  1: { label: "Replay", title: "open-loop: emit / delay / set output — runs on any device" },
+  1: { label: "Replay", title: "open-loop: emit / delay / set output, runs on any device" },
   2: { label: "Interactive", title: "closed-loop: waits on / branches on a read (expect, input)" },
-  3: { label: "App-only", title: "host orchestration (RUN exit codes) — Sutra player only" },
+  3: { label: "App-only", title: "host orchestration (RUN exit codes), Sutra player only" },
 };
 export const macrosGet = () => invoke<MacroRec[]>("macros_get");
 export const macroUpsert = (name: string, text: string, secret: boolean, set: string) =>
