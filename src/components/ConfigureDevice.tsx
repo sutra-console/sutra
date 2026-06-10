@@ -145,7 +145,9 @@ export function ConfigureDevice({
                 const cap = capOf(row.pin);
                 const used = usedPins(i);
                 const roleOpts = cap ? rolesFor(cap.caps) : [];
-                if (row.type === CTRL.RGB && !roleOpts.includes(CTRL.RGB)) roleOpts.push(CTRL.RGB);
+                // off-menu (fixed) pins and RGB rows keep their current role only
+                if (!roleOpts.includes(row.type)) roleOpts.push(row.type);
+                const roleLocked = row.type === CTRL.RGB || !cap;
                 const isBad = badRow === i;
                 return (
                   <div
@@ -156,7 +158,7 @@ export function ConfigureDevice({
                     <Select
                       value={String(row.type)}
                       onValueChange={(v) => update(i, { type: Number(v) })}
-                      disabled={row.type === CTRL.RGB}
+                      disabled={roleLocked}
                     >
                       <SelectTrigger className="h-8 w-24 shrink-0">
                         <SelectValue />
@@ -170,12 +172,18 @@ export function ConfigureDevice({
                       </SelectContent>
                     </Select>
 
-                    {/* pin */}
+                    {/* pin — a pin outside the menu (e.g. a fixed onboard LED) can
+                        be kept in its compiled role but not moved or repurposed */}
                     <Select value={String(row.pin)} onValueChange={(v) => update(i, { pin: Number(v) })}>
                       <SelectTrigger className="h-8 w-32 shrink-0">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
+                        {!cap && (
+                          <SelectItem value={String(row.pin)} disabled>
+                            GPIO{row.pin} (fixed)
+                          </SelectItem>
+                        )}
                         {pins
                           .filter((p) => p.pin === row.pin || (!used.has(p.pin) && rolesFor(p.caps).includes(row.type)))
                           .map((p) => (
