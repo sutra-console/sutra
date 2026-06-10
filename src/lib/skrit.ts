@@ -72,6 +72,15 @@ export const connect = (dataPort: string, cmdPort?: string | null) =>
 /** Connect a single-port muxed Duta (ESP32 / Pico / nRF52840) — DATA + CMD over one port. */
 export const connectMuxed = (port: string) => invoke<void>("connect_muxed", { port });
 export const disconnect = () => invoke<void>("disconnect");
+
+export interface BleDevice {
+  id: string;
+  name: string;
+}
+/** Scan for Duta peripherals over Bluetooth LE (~3s). */
+export const bleScan = () => invoke<BleDevice[]>("ble_scan");
+/** Connect a Duta over BLE by scanned device id. Returns the device name. */
+export const bleConnect = (id: string) => invoke<string>("ble_connect", { id });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });

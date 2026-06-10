@@ -13,6 +13,9 @@ drives any plain COM port.
 
 - **Universal serial console** (ghostty-web) — connect a Duta device *or* any
   COM port; baud/parity/stop, named connection profiles, link online/offline.
+- **Bluetooth LE** — the toolbar's Bluetooth button scans for a Duta and connects
+  over BLE (dual NUS console + skrit CMD service); from there the console, controls,
+  and macros all work identically to a serial link. *(Scaffold — see duta/zephyr.)*
 - **Macros** — saved, reorderable command scripts (line-based Bash Bunny /
   DuckyScript) plus an expect engine: `WAITFOR`, `RUN` (with exit-code capture),
   `IF OK…ELSE…END`, `SET` an output, `WAITIO` on an input, `$call` another macro.

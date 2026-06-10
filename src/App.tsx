@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload,
+  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,9 @@ import {
   autodetect,
   connect as serialConnect,
   connectMuxed,
+  bleScan,
+  bleConnect,
+  type BleDevice,
   disconnect as serialDisconnect,
   listPorts,
   connState,
@@ -141,6 +144,9 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [linkOnline, setLinkOnline] = useState(true); // target present on the wire
   const [dataPort, setDataPort] = useState<string | null>(null); // connected DATA port name
+  const [bleOpen, setBleOpen] = useState(false); // BLE scan dialog
+  const [bleScanning, setBleScanning] = useState(false);
+  const [bleDevices, setBleDevices] = useState<BleDevice[]>([]);
   const [hasCmd, setHasCmd] = useState(false);
   const [selectedPort, setSelectedPort] = useState("auto");
   const [profiles, setProfiles] = useState<Profile[]>(loadProfiles);
@@ -334,6 +340,35 @@ export default function App() {
     } catch (e) {
       setStatus(`connect failed: ${e}`);
       setConnected(false);
+    }
+  }
+
+  async function handleBleScan() {
+    setBleScanning(true);
+    setBleDevices([]);
+    try {
+      setBleDevices(await bleScan());
+    } catch (e) {
+      setStatus(`BLE scan failed: ${e}`);
+    } finally {
+      setBleScanning(false);
+    }
+  }
+
+  async function handleBleConnect(d: BleDevice) {
+    setStatus(`connecting BLE ${d.name || d.id}…`);
+    try {
+      const name = await bleConnect(d.id);
+      setBleOpen(false);
+      setHasCmd(true);
+      setDataPort(`BLE: ${name}`);
+      setConnected(true);
+      setLinkOnline(true);
+      setStatus(`Duta (BLE) — ${name}`);
+      loadDevice();
+      focusTerm();
+    } catch (e) {
+      setStatus(`BLE connect failed: ${e}`);
     }
   }
 
@@ -730,6 +765,19 @@ export default function App() {
           <Button variant="outline" size="sm" onClick={refreshPorts} title="Rescan ports">
             <Usb />
           </Button>
+          {!connected && (
+            <Button
+              variant="outline"
+              size="sm"
+              title="Connect over Bluetooth LE"
+              onClick={() => {
+                setBleOpen(true);
+                handleBleScan();
+              }}
+            >
+              <Bluetooth />
+            </Button>
+          )}
           {connected ? (
             <Button variant="destructive" size="sm" onClick={handleDisconnect}>
               <PlugZap /> Disconnect
@@ -992,6 +1040,42 @@ export default function App() {
           </Card>
         </div>
       </div>
+
+      {/* BLE scan / connect modal */}
+      <Dialog open={bleOpen} onOpenChange={setBleOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Bluetooth className="size-4" /> Bluetooth devices
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 py-1">
+            {bleScanning ? (
+              <p className="text-xs text-muted-foreground">Scanning…</p>
+            ) : bleDevices.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No Duta devices found.</p>
+            ) : (
+              bleDevices.map((d) => (
+                <Button
+                  key={d.id}
+                  variant="outline"
+                  size="sm"
+                  className="justify-start"
+                  onClick={() => handleBleConnect(d)}
+                >
+                  <Bluetooth className="size-3.5" />
+                  <span className="truncate">{d.name || d.id}</span>
+                </Button>
+              ))
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={handleBleScan} disabled={bleScanning}>
+              {bleScanning ? "Scanning…" : "Rescan"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* add / edit macro modal */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>

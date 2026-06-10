@@ -1,3 +1,4 @@
+mod ble;
 mod mcp;
 mod protocol;
 mod serial;
@@ -61,6 +62,22 @@ fn connect_muxed(
 #[tauri::command]
 fn disconnect(state: tauri::State<AppState>) {
     serial::disconnect(&state.shared);
+}
+
+/// Scan for Duta peripherals over Bluetooth LE (blocks ~3s).
+#[tauri::command]
+fn ble_scan() -> Result<Vec<ble::BleDevice>, String> {
+    tauri::async_runtime::block_on(ble::scan(3))
+}
+
+/// Connect a Duta over BLE by scanned device id (dual NUS DATA + CMD service).
+#[tauri::command]
+fn ble_connect(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::block_on(ble::connect(state.shared.clone(), app, id))
 }
 
 #[tauri::command]
@@ -246,6 +263,8 @@ pub fn run() {
             autodetect,
             connect,
             connect_muxed,
+            ble_scan,
+            ble_connect,
             disconnect,
             conn_state,
             set_data_params,

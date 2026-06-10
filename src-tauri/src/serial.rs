@@ -165,10 +165,12 @@ pub struct Shared {
     macros_path: Mutex<Option<std::path::PathBuf>>,
     app: Mutex<Option<AppHandle>>,
     mcp_tools: Mutex<McpToolFlags>,
-    // skrit-mux: the reader thread delivers CMD responses here; send_cmd consumes
-    // them. cmd_lock serializes a muxed request/response round-trip.
+    // skrit-mux + BLE: the reader thread/notification task delivers CMD responses
+    // here; send_cmd consumes them. cmd_lock serializes a request/response round-trip.
     mux_rx: Mutex<Option<std::sync::mpsc::Receiver<Frame>>>,
     cmd_lock: Mutex<()>,
+    // Active BLE link, if connected over Bluetooth instead of serial.
+    ble: Mutex<Option<crate::ble::BleLink>>,
 }
 
 impl Default for Shared {
@@ -187,19 +189,33 @@ impl Default for Shared {
             mcp_tools: Mutex::new(McpToolFlags::default()),
             mux_rx: Mutex::new(None),
             cmd_lock: Mutex::new(()),
+            ble: Mutex::new(None),
         }
     }
 }
 
 impl Shared {
-    fn next_seq(&self) -> u8 {
+    pub(crate) fn next_seq(&self) -> u8 {
         let mut s = self.seq.lock().unwrap();
         *s = s.wrapping_add(1);
         *s
     }
 
-    fn push_console(&self, bytes: &[u8]) {
+    pub(crate) fn push_console(&self, bytes: &[u8]) {
         self.console.lock().unwrap().push(bytes);
+    }
+
+    // Accessors so the BLE module can share the response matcher + cmd serialization.
+    pub(crate) fn ble_slot(&self) -> std::sync::MutexGuard<'_, Option<crate::ble::BleLink>> {
+        self.ble.lock().unwrap()
+    }
+    pub(crate) fn mux_rx_slot(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<std::sync::mpsc::Receiver<Frame>>> {
+        self.mux_rx.lock().unwrap()
+    }
+    pub(crate) fn cmd_lock_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.cmd_lock.lock().unwrap()
     }
 }
 
@@ -615,10 +631,21 @@ pub fn disconnect(shared: &Arc<Shared>) {
         drop(conn.cmd);
         drop(conn.data_writer);
     }
+    crate::ble::disconnect(shared);
     *shared.mux_rx.lock().unwrap() = None;
 }
 
 pub fn state(shared: &Arc<Shared>) -> ConnState {
+    // BLE link: report it as a connected "port" with the CMD channel available.
+    if let Some(link) = shared.ble.lock().unwrap().as_ref() {
+        return ConnState {
+            connected: true,
+            data_port: Some(format!("BLE: {}", link.name)),
+            cmd_port: None,
+            has_cmd: true,
+            params: shared.params.lock().unwrap().clone(),
+        };
+    }
     // A muxed link has the CMD channel too (INFO/relays available over the mux).
     let has_cmd =
         shared.conn.lock().unwrap().as_ref().is_some_and(|c| c.cmd.is_some() || c.muxed);
@@ -661,6 +688,9 @@ pub fn mcp_set_params(shared: &Arc<Shared>, params: SerialParams) -> Result<(), 
 }
 
 pub fn data_write(shared: &Arc<Shared>, bytes: &[u8]) -> Result<(), String> {
+    if shared.ble.lock().unwrap().is_some() {
+        return crate::ble::data_write(shared, bytes);
+    }
     let mut guard = shared.conn.lock().unwrap();
     let conn = guard.as_mut().ok_or("not connected")?;
     // On a muxed link the console rides the DATA channel; otherwise it's the raw port.
@@ -676,6 +706,9 @@ pub fn data_write(shared: &Arc<Shared>, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFrame, String> {
+    if shared.ble.lock().unwrap().is_some() {
+        return crate::ble::send_cmd(shared, typ, body);
+    }
     let seq = shared.next_seq();
     let muxed = shared.conn.lock().unwrap().as_ref().is_some_and(|c| c.muxed);
     if muxed {

@@ -26,6 +26,9 @@ serde_json = "1"
 serialport = "4"
 rmcp = { version = "0.16", features = ["server", "transport-streamable-http-server"] }
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 tokio-util = "0.7"
+btleplug = "0.11"        # BLE central (CoreBluetooth / WinRT / BlueZ)
+uuid = "1"               # GATT service/characteristic UUIDs
+futures = "0.3"          # notification stream
 

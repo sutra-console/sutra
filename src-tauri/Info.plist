@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Merged into the macOS app bundle's Info.plist by Tauri. CoreBluetooth
+     requires this usage string or the app crashes on first BLE access. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Sutra connects to Duta devices over Bluetooth LE.</string>
+</dict>
+</plist>
