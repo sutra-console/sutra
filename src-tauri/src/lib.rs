@@ -237,6 +237,12 @@ fn save_ble_pcap(app: tauri::AppHandle, name: String, records: Vec<Vec<u8>>) -> 
     workspace::save_ble_pcap(&app, &name, records)
 }
 
+/// Save raw ieee802154 records as an 802.15.4-TAP pcap (workspace or dialog).
+#[tauri::command]
+fn save_ieee154_pcap(app: tauri::AppHandle, name: String, records: Vec<Vec<u8>>) -> Result<String, String> {
+    workspace::save_ieee154_pcap(&app, &name, records)
+}
+
 /// The I2C device definitions in the workspace's .sutra/i2c/ (raw JSON).
 #[tauri::command]
 fn list_i2c_defs(app: tauri::AppHandle) -> Vec<serde_json::Value> {
@@ -339,6 +345,7 @@ pub fn run() {
             get_workspace,
             pick_workspace,
             save_ble_pcap,
+            save_ieee154_pcap,
             list_i2c_defs,
             export_set,
             import_set,

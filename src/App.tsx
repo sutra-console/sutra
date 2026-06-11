@@ -23,6 +23,7 @@ import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { BleSnifferPanel } from "@/components/BleSnifferPanel";
+import { Ieee154Panel } from "@/components/Ieee154Panel";
 import { ConfigureDevice } from "@/components/ConfigureDevice";
 import { I2cPanel } from "@/components/I2cPanel";
 import { NetworkConfig } from "@/components/NetworkConfig";
@@ -53,11 +54,13 @@ import {
   dataPins,
   decodeBleSniff,
   decodeI2cRecord,
+  decodeIeee154,
   getInfo,
   getIoConfig,
   onData,
   setDataKind,
   type BleSniffPacket,
+  type Ieee154Frame,
   type I2cRecord,
   getDeviceName,
   getControls,
@@ -77,6 +80,7 @@ import {
   pickWorkspace,
   rgbToHex,
   saveBlePcap,
+  saveIeee154Pcap,
   wifiStatus,
   wsDiscover,
   type DiscoveredDuta,
@@ -235,6 +239,8 @@ export default function App() {
   const [i2cRecords, setI2cRecords] = useState<I2cRecord[]>([]); // decoded i2c DATA records
   const [blePackets, setBlePackets] = useState<BleSniffPacket[]>([]); // decoded ble-sniff records (last 2000)
   const [bleTotal, setBleTotal] = useState(0); // total received (the buffer is capped)
+  const [ieee154Frames, setIeee154Frames] = useState<Ieee154Frame[]>([]); // decoded 802.15.4 frames (last 2000)
+  const [ieee154Total, setIeee154Total] = useState(0); // total received (the buffer is capped)
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
   const [i2cDefs, setI2cDefs] = useState<I2cDef[]>([]); // i2c device definitions from .sutra/i2c
   const [i2cPresent, setI2cPresent] = useState<Set<number>>(new Set()); // addresses seen in the last scan
@@ -489,6 +495,8 @@ export default function App() {
     // (we keep it on screen across a disconnect; a new connect starts clean).
     setBlePackets([]);
     setBleTotal(0);
+    setIeee154Frames([]);
+    setIeee154Total(0);
     setI2cRecords([]);
     setI2cPresent(new Set());
     getDeviceName().then(setDeviceName).catch(() => {});
@@ -559,14 +567,18 @@ export default function App() {
   // saturate the renderer (which would starve the disconnect click → "freeze").
   useEffect(() => {
     const kind = dataDesc?.kind;
-    if (kind !== DATA_KIND.I2C && kind !== DATA_KIND.BLE_SNIFF) return;
+    if (kind !== DATA_KIND.I2C && kind !== DATA_KIND.BLE_SNIFF && kind !== DATA_KIND.IEEE802154) return;
     const bleBuf: BleSniffPacket[] = [];
     const i2cBuf: I2cRecord[] = [];
+    const ieeeBuf: Ieee154Frame[] = [];
     let unlisten: (() => void) | undefined;
     onData((bytes) => {
       if (kind === DATA_KIND.I2C) {
         const rec = decodeI2cRecord(bytes);
         if (rec) i2cBuf.push(rec);
+      } else if (kind === DATA_KIND.IEEE802154) {
+        const f = decodeIeee154(bytes);
+        if (f) ieeeBuf.push(f);
       } else {
         const pkt = decodeBleSniff(bytes);
         if (pkt) bleBuf.push(pkt);
@@ -577,6 +589,10 @@ export default function App() {
         const chunk = bleBuf.splice(0);
         setBlePackets((ps) => [...ps, ...chunk].slice(-2000));
         setBleTotal((t) => t + chunk.length);
+      } else if (kind === DATA_KIND.IEEE802154 && ieeeBuf.length) {
+        const chunk = ieeeBuf.splice(0);
+        setIeee154Frames((fs) => [...fs, ...chunk].slice(-2000));
+        setIeee154Total((t) => t + chunk.length);
       } else if (kind === DATA_KIND.I2C && i2cBuf.length) {
         const chunk = i2cBuf.splice(0);
         setI2cRecords((rs) => [...rs, ...chunk].slice(-500));
@@ -611,6 +627,19 @@ export default function App() {
     try {
       const path = await saveBlePcap(`ble-${stamp}`, records);
       setStatus(`saved ${records.length} packets → ${path}`);
+    } catch (e) {
+      setStatus(`pcap save failed: ${e}`);
+    }
+  }
+
+  /** Save the current 802.15.4 capture as a pcap (workspace, else a dialog). */
+  async function saveIeee154() {
+    const records = ieee154Frames.map((f) => f.raw);
+    if (!records.length) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    try {
+      const path = await saveIeee154Pcap(`802154-${stamp}`, records);
+      setStatus(`saved ${records.length} frames → ${path}`);
     } catch (e) {
       setStatus(`pcap save failed: ${e}`);
     }
@@ -1035,8 +1064,20 @@ export default function App() {
             <div className="flex items-center self-end">
               {(() => {
                 const kind = dataDesc?.kind ?? DATA_KIND.UART;
-                const Icon = kind === DATA_KIND.BLE_SNIFF ? Radio : kind === DATA_KIND.I2C ? Activity : TerminalIcon;
-                const label = kind === DATA_KIND.BLE_SNIFF ? "BLE sniffer" : kind === DATA_KIND.I2C ? "I²C" : "Console";
+                const Icon =
+                  kind === DATA_KIND.BLE_SNIFF || kind === DATA_KIND.IEEE802154
+                    ? Radio
+                    : kind === DATA_KIND.I2C
+                      ? Activity
+                      : TerminalIcon;
+                const label =
+                  kind === DATA_KIND.BLE_SNIFF
+                    ? "BLE sniffer"
+                    : kind === DATA_KIND.IEEE802154
+                      ? "802.15.4"
+                      : kind === DATA_KIND.I2C
+                        ? "I²C"
+                        : "Console";
                 return (
                   <div className="flex items-center gap-1.5 border-b-2 border-primary px-2 py-2 text-sm font-medium">
                     <Icon className="size-3.5" /> {label}
@@ -1081,6 +1122,13 @@ export default function App() {
                 total={bleTotal}
                 onClear={() => { setBlePackets([]); setBleTotal(0); }}
                 onSavePcap={saveSniffPcap}
+              />
+            ) : dataDesc?.kind === DATA_KIND.IEEE802154 ? (
+              <Ieee154Panel
+                frames={ieee154Frames}
+                total={ieee154Total}
+                onClear={() => { setIeee154Frames([]); setIeee154Total(0); }}
+                onSavePcap={saveIeee154}
               />
             ) : (
               <Terminal ref={terminalRef} connected={connected} />

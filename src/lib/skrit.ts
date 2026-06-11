@@ -122,6 +122,8 @@ export const pickWorkspace = () => invoke<string | null>("pick_workspace");
 /** Save ble-sniff records as a pcap (workspace captures/ or a save dialog). */
 export const saveBlePcap = (name: string, records: number[][]) =>
   invoke<string>("save_ble_pcap", { name, records });
+export const saveIeee154Pcap = (name: string, records: number[][]) =>
+  invoke<string>("save_ieee154_pcap", { name, records });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });
@@ -563,6 +565,96 @@ export function decodeBleSniff(p: number[] | Uint8Array): BleSniffPacket | null 
   return { ts, channel, rssi, type, addr, name, company, payloadHex, raw: b };
 }
 
+export interface Ieee154Frame {
+  ts: number; // device millis
+  channel: number; // 11..26
+  rssi: number; // signed dBm
+  lqi: number;
+  type: string; // MAC frame-type name (Beacon/Data/Ack/Command, refined for commands)
+  seq: number | null; // sequence number (null if suppressed)
+  dstPan: string; // "0xABCD" or ""
+  dst: string; // short "0x1234" / ext MAC / "Broadcast" / ""
+  src: string; // short / ext / ""
+  payloadHex: string; // MAC payload (after addressing, before FCS) as hex
+  raw: number[]; // original record bytes (for pcap export)
+}
+
+const IEEE154_FTYPE = ["Beacon", "Data", "Ack", "MAC Command", "0x4", "0x5", "0x6", "0x7"];
+// a few common MAC command frame ids (the first payload byte of a command frame)
+const IEEE154_CMD: Record<number, string> = {
+  0x01: "Assoc Request",
+  0x02: "Assoc Response",
+  0x03: "Disassoc Notify",
+  0x04: "Data Request",
+  0x05: "PAN ID Conflict",
+  0x06: "Orphan Notify",
+  0x07: "Beacon Request",
+  0x08: "Coordinator Realign",
+  0x09: "GTS Request",
+};
+const hex16 = (lo: number, hi: number) =>
+  `0x${(((hi << 8) | lo) >>> 0).toString(16).padStart(4, "0")}`;
+
+/** Decode one ieee802154 DATA record: ts·ch·rssi·lqi·flags·len·psdu. Parses the
+ *  MAC header (FCF addressing, PAN-ID compression) for a Devices/Packets view. */
+export function decodeIeee154(p: number[] | Uint8Array): Ieee154Frame | null {
+  const b = Array.from(p);
+  if (b.length < 9) return null;
+  const ts = (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
+  const channel = b[4];
+  const rssi = (b[5] << 24) >> 24; // signed
+  const lqi = b[6];
+  const plen = b[8];
+  const mac = b.slice(9, 9 + plen - 2); // drop trailing FCS field
+  if (mac.length < 3) return null;
+
+  const fcf = mac[0] | (mac[1] << 8);
+  const ftype = fcf & 0x07;
+  const panComp = (fcf >> 6) & 1;
+  const dstMode = (fcf >> 10) & 0x03; // 0 none, 2 short, 3 ext
+  const frameVer = (fcf >> 12) & 0x03;
+  const srcMode = (fcf >> 14) & 0x03;
+  const seqSuppressed = frameVer === 2 && (fcf >> 8) & 1;
+
+  let i = 2;
+  const seq = seqSuppressed ? null : mac[i++] ?? null;
+
+  let dstPan = "";
+  let dst = "";
+  let src = "";
+  if (dstMode !== 0) {
+    dstPan = hex16(mac[i], mac[i + 1]);
+    i += 2;
+    if (dstMode === 2) {
+      dst = mac[i] === 0xff && mac[i + 1] === 0xff ? "Broadcast" : hex16(mac[i], mac[i + 1]);
+      i += 2;
+    } else if (dstMode === 3) {
+      dst = macStr(mac.slice(i, i + 8));
+      i += 8;
+    }
+  }
+  if (srcMode !== 0) {
+    if (!panComp) {
+      i += 2; // src PAN (same as dst when compressed)
+    }
+    if (srcMode === 2) {
+      src = hex16(mac[i], mac[i + 1]);
+      i += 2;
+    } else if (srcMode === 3) {
+      src = macStr(mac.slice(i, i + 8));
+      i += 8;
+    }
+  }
+
+  const payload = mac.slice(i);
+  let type = IEEE154_FTYPE[ftype] ?? `0x${ftype.toString(16)}`;
+  if (ftype === 3 && payload.length >= 1) {
+    type = IEEE154_CMD[payload[0]] ?? `Command 0x${payload[0].toString(16)}`;
+  }
+  const payloadHex = payload.map((x) => x.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+  return { ts, channel, rssi, lqi, type, seq, dstPan, dst, src, payloadHex, raw: b };
+}
+
 /** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */
 export async function wifiConfigure(ssid: string, password: string): Promise<void> {
   await cfgSetStr(CFG.WIFI_PASS, password);
@@ -582,7 +674,7 @@ export async function getDeviceName(): Promise<string> {
 }
 
 /** What the device's DATA channel carries (so the app can pick a viewer). */
-export const DATA_KIND = { UART: 0, CAN: 1, RS485: 2, SPI: 3, BLE_SNIFF: 4, LOGIC: 5, I2C: 6 } as const;
+export const DATA_KIND = { UART: 0, CAN: 1, RS485: 2, SPI: 3, BLE_SNIFF: 4, LOGIC: 5, I2C: 6, IEEE802154: 7 } as const;
 export interface DataDesc {
   kind: number;
   name: string;

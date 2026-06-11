@@ -155,6 +155,74 @@ fn ble_pcap(records: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
+const LINKTYPE_IEEE802_15_4_TAP: u32 = 283;
+
+/// Build a pcap (LINKTYPE_IEEE802_15_4_TAP) from raw ieee802154 records
+/// (each: ts(4)·ch(1)·rssi(1,signed)·lqi(1)·flags(1)·len(1)·psdu). One TAP
+/// packet per record: a TLV pseudo-header + the MAC frame (FCS dropped). Mirrors
+/// sutra-extcap so saved captures and live Wireshark captures look identical.
+fn ieee154_pcap(records: &[Vec<u8>]) -> Vec<u8> {
+    fn push_tlv(buf: &mut Vec<u8>, typ: u16, val: &[u8]) {
+        buf.extend_from_slice(&typ.to_le_bytes());
+        buf.extend_from_slice(&(val.len() as u16).to_le_bytes());
+        buf.extend_from_slice(val);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
+    let mut out = pcap_header(LINKTYPE_IEEE802_15_4_TAP);
+    for rec in records {
+        if rec.len() < 9 {
+            continue;
+        }
+        let ts = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
+        let channel = rec[4];
+        let rssi = rec[5] as i8;
+        let lqi = rec[6];
+        let plen = rec[8] as usize;
+        if plen < 2 || rec.len() < 9 + plen {
+            continue;
+        }
+        let mac = &rec[9..9 + plen - 2]; // drop the trailing FCS field
+
+        let mut tlvs = Vec::new();
+        push_tlv(&mut tlvs, 0, &[0u8]); // FCS type: none present
+        push_tlv(&mut tlvs, 1, &(rssi as f32).to_le_bytes()); // RSS dBm
+        let mut ch = (channel as u16).to_le_bytes().to_vec();
+        ch.push(0); // channel page 0
+        push_tlv(&mut tlvs, 3, &ch);
+        push_tlv(&mut tlvs, 10, &[lqi]); // LQI
+
+        let mut data = Vec::with_capacity(4 + tlvs.len() + mac.len());
+        data.push(0); // version
+        data.push(0); // reserved
+        data.extend_from_slice(&((4 + tlvs.len()) as u16).to_le_bytes());
+        data.extend_from_slice(&tlvs);
+        data.extend_from_slice(mac);
+        pcap_record(&mut out, ts, &data);
+    }
+    out
+}
+
+/// Save the given raw ieee802154 records as a pcap (workspace or save dialog).
+pub fn save_ieee154_pcap(app: &AppHandle, name: &str, records: Vec<Vec<u8>>) -> Result<String, String> {
+    if records.is_empty() {
+        return Err("no frames to save".into());
+    }
+    let bytes = ieee154_pcap(&records);
+    let safe = name.replace(['/', '\\', ':'], "_");
+    let path = if let Some(dot) = dot_sutra(app) {
+        dot.join("captures").join(format!("{safe}.pcap"))
+    } else {
+        match app.dialog().file().add_filter("pcap", &["pcap"]).set_file_name(format!("{safe}.pcap")).blocking_save_file() {
+            Some(p) => p.into_path().map_err(|e| e.to_string())?,
+            None => return Err("cancelled".into()),
+        }
+    };
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 // ---- Tauri commands --------------------------------------------------------
 
 /// Open a folder picker and adopt the chosen folder as the workspace.
