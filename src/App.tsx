@@ -545,21 +545,37 @@ export default function App() {
   }
 
   // For typed DATA kinds the Terminal is unmounted, so App is the only DATA
-  // consumer — decode the records into the matching view's state.
+  // consumer. The sniffer streams ~70 records/s; decode into a buffer and flush
+  // to React on an interval (not per-record) so a high-rate stream can't
+  // saturate the renderer (which would starve the disconnect click → "freeze").
   useEffect(() => {
     const kind = dataDesc?.kind;
     if (kind !== DATA_KIND.I2C && kind !== DATA_KIND.BLE_SNIFF) return;
+    const bleBuf: BleSniffPacket[] = [];
+    const i2cBuf: I2cRecord[] = [];
     let unlisten: (() => void) | undefined;
     onData((bytes) => {
       if (kind === DATA_KIND.I2C) {
         const rec = decodeI2cRecord(bytes);
-        if (rec) setI2cRecords((rs) => [...rs.slice(-499), rec]);
+        if (rec) i2cBuf.push(rec);
       } else {
         const pkt = decodeBleSniff(bytes);
-        if (pkt) setBlePackets((ps) => [...ps.slice(-1999), pkt]);
+        if (pkt) bleBuf.push(pkt);
       }
     }).then((u) => (unlisten = u));
-    return () => unlisten?.();
+    const flush = window.setInterval(() => {
+      if (kind === DATA_KIND.BLE_SNIFF && bleBuf.length) {
+        const chunk = bleBuf.splice(0);
+        setBlePackets((ps) => [...ps, ...chunk].slice(-2000));
+      } else if (kind === DATA_KIND.I2C && i2cBuf.length) {
+        const chunk = i2cBuf.splice(0);
+        setI2cRecords((rs) => [...rs, ...chunk].slice(-500));
+      }
+    }, 150);
+    return () => {
+      unlisten?.();
+      window.clearInterval(flush);
+    };
   }, [dataDesc?.kind]);
 
   /** Choose the workspace folder (.sutra/ for macros + captures). */

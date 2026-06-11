@@ -2,7 +2,7 @@
 // a "Devices" table (grouped by advertiser address — what's nearby) and a live
 // "Packets" stream. Fed by decoded sniff records from the DATA channel.
 import { Download, Radio, Trash2, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -63,31 +63,35 @@ export function BleSnifferPanel({
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight;
   }, [packets.length, mode]);
 
-  // group into devices (newest RSSI/name win; keep packet count + channels)
-  const devices = new Map<string, Device>();
-  packets.forEach((p, i) => {
-    const key = p.addr || `(no addr) ${p.type}`;
-    const d = devices.get(key);
-    if (d) {
-      d.count++;
-      d.rssi = p.rssi;
-      d.last = i;
-      d.channels.add(p.channel);
-      if (p.name) d.name = p.name;
-      if (p.company) d.company = p.company;
-    } else {
-      devices.set(key, {
-        addr: p.addr,
-        name: p.name,
-        company: p.company,
-        type: p.type,
-        rssi: p.rssi,
-        count: 1,
-        channels: new Set([p.channel]),
-        last: i,
-      });
-    }
-  });
+  // group into devices (newest RSSI/name win; keep packet count + channels) —
+  // only recompute when packets change, not on every sort/select re-render.
+  const devices = useMemo(() => {
+    const m = new Map<string, Device>();
+    packets.forEach((p, i) => {
+      const key = p.addr || `(no addr) ${p.type}`;
+      const d = m.get(key);
+      if (d) {
+        d.count++;
+        d.rssi = p.rssi;
+        d.last = i;
+        d.channels.add(p.channel);
+        if (p.name) d.name = p.name;
+        if (p.company) d.company = p.company;
+      } else {
+        m.set(key, {
+          addr: p.addr,
+          name: p.name,
+          company: p.company,
+          type: p.type,
+          rssi: p.rssi,
+          count: 1,
+          channels: new Set([p.channel]),
+          last: i,
+        });
+      }
+    });
+    return m;
+  }, [packets]);
   const devList = [...devices.values()].sort((a, b) => {
     let c: number;
     switch (sort.key) {
