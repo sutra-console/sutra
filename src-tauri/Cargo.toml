@@ -33,4 +33,9 @@ uuid = "1"               # GATT service/characteristic UUIDs
 futures = "0.3"          # notification / message streams
 tokio-tungstenite = "0.24" # WebSocket client (network transport; ws://, wss via a TLS feature)
 mdns-sd = "0.13"         # LAN auto-discovery: browse the _skrit._tcp services Dutas advertise
+tungstenite = "0.24"     # sync WS client for the sutra-extcap bin (Wireshark capture)
+
+[[bin]]
+name = "sutra-extcap"
+path = "src/bin/sutra_extcap.rs"
 

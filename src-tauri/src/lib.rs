@@ -1,8 +1,8 @@
 mod ble;
 mod mcp;
-mod protocol;
+pub mod protocol;
 mod serial;
-mod ws;
+pub mod ws;
 
 use std::sync::{Arc, Mutex};
 
