@@ -68,6 +68,12 @@ Wireshark ── runs ──> sutra-extcap ──┬── COMxx (USB, DTR-only 
   by Wireshark's own dissector. The radio CRC-checks on-device, so the pseudo-
   header sets CRC-valid and carries a placeholder (the real 3-byte CRC is dropped
   by the firmware). Advertising PDUs today (the sniffer's scope).
+- **ieee802154 → native 802.15.4** (`LINKTYPE_IEEE802_15_4_TAP`): each record is
+  wrapped in a TAP pseudo-header (FCS type, RSS, channel, LQI) + the MAC frame, so
+  Wireshark's own stack decodes **Zigbee and Thread** (and 6LoWPAN/Matter). The
+  nRF52840 radio FCS-checks in hardware (bad frames dropped), and the TAP header
+  declares "no FCS" so frames dissect clean. Hardware-verified against a live
+  Zigbee network (NWK commands, data-request/ack polling).
 - **everything else → `USER0`**: the raw stream (UART console), one packet per
   chunk. The optional [`wireshark/skrit-ble-sniff.lua`](wireshark/skrit-ble-sniff.lua)
   dissector predates the native path — kept as the decoder reference (see

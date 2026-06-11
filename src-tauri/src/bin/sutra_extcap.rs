@@ -30,6 +30,10 @@ const LINKTYPE_USER0: u32 = 147;
 // `btle` dissector reads this directly — full BLE decode, no Lua needed.
 const LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR: u32 = 256;
 const DATA_KIND_BLE_SNIFF: u8 = 4; // SKRIT_DATA_BLE_SNIFF
+// IEEE 802.15.4 TAP: a TLV pseudo-header + the MAC frame. Wireshark's native
+// 802.15.4 stack decodes Zigbee/Thread/6LoWPAN/Matter from it — no Lua.
+const LINKTYPE_IEEE802_15_4_TAP: u32 = 283;
+const DATA_KIND_IEEE802154: u8 = 7; // SKRIT_DATA_IEEE802154
 const EXTCAP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
@@ -45,8 +49,64 @@ fn dlt_for_kind(kind: u8) -> (u32, &'static str, &'static str) {
             "BLUETOOTH_LE_LL_WITH_PHDR",
             "Bluetooth LE Link Layer (native btle dissector)",
         ),
+        DATA_KIND_IEEE802154 => (
+            LINKTYPE_IEEE802_15_4_TAP,
+            "IEEE802_15_4_TAP",
+            "IEEE 802.15.4 TAP (native Zigbee/Thread dissector)",
+        ),
         _ => (LINKTYPE_USER0, "USER0", "skrit DATA stream (raw console bytes)"),
     }
+}
+
+/// Reframe one ieee802154 DATA record into a LINKTYPE_IEEE802_15_4_TAP packet:
+/// a TLV pseudo-header (FCS type, RSS, channel, LQI) followed by the MAC frame.
+/// Wireshark's native 802.15.4 dissector decodes the rest (Zigbee / Thread / …).
+///
+/// Input record (PROTOCOL.md "IEEE 802.15.4 sniffer"):
+///   ts_ms(4 LE) · channel(1) · rssi(1, signed dBm) · lqi(1) · flags(1) ·
+///     psdu_len(1) · psdu…   (psdu includes the 2-byte FCS)
+fn ieee802154_tap_packet(rec: &[u8]) -> Option<Vec<u8>> {
+    if rec.len() < 9 {
+        return None;
+    }
+    let channel = rec[4];
+    let rssi = rec[5] as i8;
+    let lqi = rec[6];
+    let plen = rec[8] as usize;
+    if plen < 2 || rec.len() < 9 + plen {
+        return None;
+    }
+    // The PHR length counts the 2-byte FCS, but the radio doesn't hand us a
+    // usable FCS (it checks the CRC in hardware and we drop bad frames). Present
+    // the MAC frame WITHOUT the trailing FCS and tell the TAP header "no FCS",
+    // so Wireshark dissects cleanly instead of flagging every frame "Bad FCS".
+    let psdu = &rec[9..9 + plen - 2];
+
+    // Each TLV: type(u16 LE) · length(u16 LE) · value, value padded to 4 bytes.
+    fn push_tlv(buf: &mut Vec<u8>, typ: u16, val: &[u8]) {
+        buf.extend_from_slice(&typ.to_le_bytes());
+        buf.extend_from_slice(&(val.len() as u16).to_le_bytes());
+        buf.extend_from_slice(val);
+        while !buf.len().is_multiple_of(4) {
+            buf.push(0);
+        }
+    }
+    let mut tlvs = Vec::new();
+    push_tlv(&mut tlvs, 0, &[0u8]); // FCS type: 0 = none present (radio stripped it)
+    push_tlv(&mut tlvs, 1, &(rssi as f32).to_le_bytes()); // RSS, dBm (float32)
+    let mut ch = (channel as u16).to_le_bytes().to_vec();
+    ch.push(0); // channel page 0 (2.4 GHz O-QPSK)
+    push_tlv(&mut tlvs, 3, &ch); // channel assignment
+    push_tlv(&mut tlvs, 10, &[lqi]); // LQI
+
+    let tap_len = 4 + tlvs.len(); // header is 4-aligned; TLVs each padded to 4
+    let mut pkt = Vec::with_capacity(tap_len + plen);
+    pkt.push(0); // version
+    pkt.push(0); // reserved
+    pkt.extend_from_slice(&(tap_len as u16).to_le_bytes());
+    pkt.extend_from_slice(&tlvs);
+    pkt.extend_from_slice(psdu);
+    Some(pkt)
 }
 
 /// Reframe one ble-sniff DATA record into a LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR
@@ -96,14 +156,43 @@ fn ble_ll_packet(rec: &[u8]) -> Option<Vec<u8>> {
     Some(pkt)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // Reframe a known 802.15.4 data frame and drop a one-packet pcap for tshark.
+    #[test]
+    fn ieee802154_tap_pcap() {
+        // MAC data frame: FCF 0x8841 (data, PAN-compressed, short dst+src),
+        // seq 1, dst PAN abcd, dst ffff (bcast), src 0000, payload, + 2 FCS bytes.
+        let psdu: &[u8] =
+            &[0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34];
+        let mut rec = vec![0u8, 0, 0, 0, 15, 0xD0u8, 0xFF, 0x01, psdu.len() as u8];
+        rec.extend_from_slice(psdu);
+
+        let tap = ieee802154_tap_packet(&rec).expect("reframe");
+        assert_eq!(tap[0], 0, "version");
+        assert_eq!(u16::from_le_bytes([tap[2], tap[3]]), 36, "tap header length");
+        // MAC frame follows the header, minus the 2-byte FCS we drop.
+        assert_eq!(&tap[36..], &psdu[..psdu.len() - 2], "MAC frame (no FCS)");
+
+        let path = std::env::temp_dir().join("duta_154_tap.pcap");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&pcap_global_header(LINKTYPE_IEEE802_15_4_TAP)).unwrap();
+        write_record(&mut f, &tap).unwrap();
+        eprintln!("wrote {}", path.display());
+    }
+}
+
 /// Frame one DATA record for the chosen link type. ble-sniff records become LL
 /// packets; any other kind is written through unchanged (USER0). Returns None to
 /// drop a record (malformed ble-sniff capture).
 fn frame_record(kind: u8, payload: &[u8]) -> Option<Vec<u8>> {
-    if kind == DATA_KIND_BLE_SNIFF {
-        ble_ll_packet(payload)
-    } else {
-        Some(payload.to_vec())
+    match kind {
+        DATA_KIND_BLE_SNIFF => ble_ll_packet(payload),
+        DATA_KIND_IEEE802154 => ieee802154_tap_packet(payload),
+        _ => Some(payload.to_vec()),
     }
 }
 

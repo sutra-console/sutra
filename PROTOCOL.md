@@ -97,7 +97,7 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x04` | `REBOOT` | `mode(1)` | (none) (replies OK, then reboots). `mode` 0=app reset, 1=bootloader/DFU. Needs `CAP_REBOOT`. |
 | `0x05` | `AUTH` | `password…` | (none) | authenticate the session on a network transport. OK = authed; `0x08` = wrong password. Until authed the device answers only `PING`/`INFO`/`AUTH`. |
 | `0x06` | `AUTH_SET` | `new_password…` | (none) | change the password (≤32 bytes); must already be authed. Persists. |
-| `0x07` | `DATA_DESC` | (none) | `kind(1)`, `name…` | what the DATA channel carries: 0=uart (raw console), 1=can, 2=rs485, 3=spi, 4=ble-sniff, 5=logic, 6=i2c. A device that doesn't answer is treated as **uart**. Lets the app pick a viewer. |
+| `0x07` | `DATA_DESC` | (none) | `kind(1)`, `name…` | what the DATA channel carries: 0=uart (raw console), 1=can, 2=rs485, 3=spi, 4=ble-sniff, 5=logic, 6=i2c, 7=ieee802154 (Zigbee/Thread). A device that doesn't answer is treated as **uart**. Lets the app pick a viewer. |
 | `0x10` | `OUTPUT_SET` | `index(1)`, `value(1)` | (none) | drive output `index` on/off (0/1). Outputs are self-described via `OUTPUT_DESC`. |
 | `0x11` | `OUTPUT_GET` | (none) | `bitmap(1)`, bit `i` = output `i` is on |
 | `0x12` | `OUTPUT_TOGGLE` | `index(1)` | `bitmap(1)` |
@@ -377,6 +377,25 @@ header + payload), de-whitened and CRC-checked by the radio (bad-CRC captures ar
 dropped). v1 is advertising-only — connection following and data channels are
 future work. Records flow to every link, so Sutra's packet viewer and
 `sutra-extcap` → Wireshark both see the same capture.
+
+## IEEE 802.15.4 sniffer (`DATA = ieee802154`)
+
+The nRF52840 is a multiprotocol radio: the same silicon that sniffs BLE also
+does IEEE 802.15.4 (O-QPSK, 250 kbps), the PHY/MAC under **both Zigbee and
+Thread** (one capture kind, two ecosystems — they differ only in upper layers).
+A device advertises `DATA_DESC kind = 7` and streams captured frames, one DATA
+record per frame:
+
+```
+ts_ms(4 LE) · channel(1, 11..26) · rssi(1, signed dBm) · lqi(1) · flags(1) · psdu_len(1) · psdu…
+```
+
+`channel` is the 802.15.4 channel (11–26 = 2405–2480 MHz); `flags` bit0 = FCS ok
+(the radio computes the 16-bit FCS in hardware; bad-FCS frames are dropped);
+`psdu` is the MAC frame **including** its 2-byte FCS. `sutra-extcap` reframes
+each record as `LINKTYPE_IEEE802_15_4_TAP`, so Wireshark's native 802.15.4 stack
+decodes Zigbee/Thread/6LoWPAN with no dissector from us. It's a single radio, so
+802.15.4 and BLE sniffing are separate sessions (one mode at a time).
 
 ## WiFi provisioning (network-bridge devices)
 
