@@ -127,14 +127,16 @@ export const saveIeee154Pcap = (name: string, records: number[][]) =>
 
 export interface DecodedRow {
   num: number; // 1-based, maps to record index num-1
-  protocol: string; // Wireshark Protocol column (ZigBee, Thread, 6LoWPAN, …)
-  info: string; // Info column (human summary)
+  protocol: string; // friendly upper-layer protocol (ZigBee NWK, Thread, …)
+  summary: string; // one-line src → dst
+  fields: [string, string][]; // dissected field tree (name, value) — the macro hook
 }
-/** Is Wireshark's tshark available for in-app decoding? */
-export const tsharkAvailable = () => invoke<boolean>("tshark_available");
-/** Dissect raw ieee802154 records with tshark → per-packet Protocol/Info. */
-export const dissectIeee154 = (records: number[][]) =>
-  invoke<DecodedRow[]>("dissect_ieee154", { records });
+/** Is Wireshark's tshark available for in-app decoding? (optional path override) */
+export const tsharkAvailable = (tsharkPath?: string) =>
+  invoke<boolean>("tshark_available", { tsharkPath: tsharkPath || null });
+/** Dissect raw ieee802154 records with tshark (rtshark) → per-packet decode rows. */
+export const dissectIeee154 = (records: number[][], tsharkPath?: string) =>
+  invoke<DecodedRow[]>("dissect_ieee154", { records, tsharkPath: tsharkPath || null });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });

@@ -133,6 +133,7 @@ interface Settings {
   mcpPort: number;
   rememberLastPort: boolean;
   lastPort: string;
+  tsharkPath: string; // optional override for Wireshark's tshark (empty = autodetect)
   mcpTools: McpToolFlags;
 }
 const DEFAULT_SETTINGS: Settings = {
@@ -140,6 +141,7 @@ const DEFAULT_SETTINGS: Settings = {
   mcpPort: 8551,
   rememberLastPort: true,
   lastPort: "auto",
+  tsharkPath: "",
   mcpTools: {
     consoleRead: true,
     consoleWrite: true,
@@ -618,12 +620,14 @@ export default function App() {
   }, [dataDesc?.kind, connected]);
 
   // Is Wireshark's tshark available? (enables in-app Zigbee/Thread/Matter decode)
+  // Re-checks when the manual path setting changes.
   useEffect(() => {
-    tsharkAvailable().then(setTsharkOk).catch(() => setTsharkOk(false));
-  }, []);
+    tsharkAvailable(settings.tsharkPath).then(setTsharkOk).catch(() => setTsharkOk(false));
+  }, [settings.tsharkPath]);
 
   /** Dissect the current 802.15.4 capture with tshark (Zigbee/Thread/Matter). */
-  const decodeIeee154Capture = () => dissectIeee154(ieee154Frames.map((f) => f.raw));
+  const decodeIeee154Capture = () =>
+    dissectIeee154(ieee154Frames.map((f) => f.raw), settings.tsharkPath);
 
   /** Pin the 802.15.4 sniffer to a channel (0 = auto-hop). */
   async function applyChannel(ch: number) {
@@ -1733,6 +1737,33 @@ export default function App() {
               </div>
               <div className="text-[11px] text-muted-foreground">
                 Last used: <code>{settings.lastPort}</code>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 border-t pt-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Packet decode (Wireshark)
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm">tshark path</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    For decoding Zigbee/Thread captures. Leave blank to autodetect;{" "}
+                    {tsharkOk ? (
+                      <span className="text-success">found ✓</span>
+                    ) : (
+                      <span className="text-destructive">not found</span>
+                    )}
+                    .
+                  </div>
+                </div>
+                <Input
+                  className="h-8 w-44 font-mono text-xs"
+                  placeholder="autodetect"
+                  value={settings.tsharkPath}
+                  spellCheck={false}
+                  onChange={(e) => setSetting("tsharkPath", e.target.value)}
+                />
               </div>
             </div>
 

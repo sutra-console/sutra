@@ -3,7 +3,7 @@
 // address — who's on the network) and a live "Packets" stream. Fed by decoded
 // 802.15.4 frame records from the DATA channel.
 import { Download, Radio, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,7 @@ export function Ieee154Panel({
   const [mode, setMode] = useState<"nodes" | "packets" | "decoded">("nodes");
   const [decoded, setDecoded] = useState<DecodedRow[]>([]);
   const [decoding, setDecoding] = useState(false);
+  const [expanded, setExpanded] = useState<Set<number>>(new Set()); // decoded rows showing their field tree
   async function runDecode() {
     if (!onDecode) return;
     setDecoding(true);
@@ -261,22 +262,46 @@ export function Ieee154Panel({
               <tr>
                 <th className="px-2 py-1 font-normal">#</th>
                 <th className="px-2 py-1 font-normal">Ch</th>
-                <th className="px-2 py-1 font-normal">RSSI</th>
                 <th className="px-2 py-1 font-normal">Protocol</th>
-                <th className="px-2 py-1 font-normal">Info</th>
+                <th className="px-2 py-1 font-normal">Summary</th>
               </tr>
             </thead>
             <tbody>
               {decoded.map((d) => {
                 const f = frames[d.num - 1];
+                const open = expanded.has(d.num);
                 return (
-                  <tr key={d.num} className="border-t">
-                    <td className="px-2 py-0.5 tabular-nums text-muted-foreground">{d.num}</td>
-                    <td className="px-2 py-0.5 text-muted-foreground">{f?.channel ?? "—"}</td>
-                    <td className="px-2 py-0.5 tabular-nums">{f?.rssi ?? "—"}</td>
-                    <td className={`px-2 py-0.5 ${protoColor(d.protocol)}`}>{d.protocol}</td>
-                    <td className="whitespace-nowrap px-2 py-0.5">{d.info}</td>
-                  </tr>
+                  <Fragment key={d.num}>
+                    <tr
+                      className="cursor-pointer select-none border-t hover:bg-accent/40"
+                      title={d.fields.length ? "Click to show the decoded fields" : undefined}
+                      onClick={() => setExpanded((s) => {
+                        const n = new Set(s);
+                        n.has(d.num) ? n.delete(d.num) : n.add(d.num);
+                        return n;
+                      })}>
+                      <td className="px-2 py-0.5 tabular-nums text-muted-foreground">
+                        {d.fields.length ? (open ? "▾ " : "▸ ") : ""}{d.num}
+                      </td>
+                      <td className="px-2 py-0.5 text-muted-foreground">{f?.channel ?? "—"}</td>
+                      <td className={`px-2 py-0.5 ${protoColor(d.protocol)}`}>{d.protocol}</td>
+                      <td className="whitespace-nowrap px-2 py-0.5">{d.summary || "—"}</td>
+                    </tr>
+                    {open && d.fields.length > 0 && (
+                      <tr className="bg-muted/30">
+                        <td />
+                        <td colSpan={3} className="px-2 py-1">
+                          <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+                            {d.fields.map(([k, v]) => (
+                              <span key={k} className="text-[11px]">
+                                <span className="text-muted-foreground">{k}</span>={v}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>

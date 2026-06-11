@@ -229,8 +229,28 @@ pub fn save_ieee154_pcap(app: &AppHandle, name: &str, records: Vec<Vec<u8>>) -> 
 // engine: build the same LINKTYPE_IEEE802_15_4_TAP pcap, let tshark decode the
 // whole stack, and consume the per-packet Protocol/Info columns.
 
-/// Find a `tshark` binary: PATH, then the usual install locations per-OS.
-fn tshark_path() -> Option<PathBuf> {
+/// Resolve the tshark binary: an explicit override (a file or its directory)
+/// from Sutra's settings, else autodetect — PATH, then the usual install dirs.
+fn resolve_tshark(explicit: Option<&str>) -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "tshark.exe" } else { "tshark" };
+    if let Some(p) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return Some(pb); // a full path to the binary
+        }
+        let in_dir = pb.join(exe);
+        if in_dir.is_file() {
+            return Some(in_dir); // a directory containing it
+        }
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let p = dir.join(exe);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
     let candidates: &[&str] = if cfg!(windows) {
         &[
             r"C:\Program Files\Wireshark\tshark.exe",
@@ -244,67 +264,142 @@ fn tshark_path() -> Option<PathBuf> {
             "/Applications/Wireshark.app/Contents/MacOS/tshark",
         ]
     };
-    // PATH first (handles custom installs), then the known spots.
-    let exe = if cfg!(windows) { "tshark.exe" } else { "tshark" };
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let p = dir.join(exe);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
     candidates.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
 #[derive(serde::Serialize)]
 pub struct DecodedRow {
     pub num: u32,
-    pub protocol: String, // Wireshark's Protocol column (ZigBee, Thread, 6LoWPAN, …)
-    pub info: String,     // the Info column (human summary, incl. addresses)
+    pub protocol: String,              // friendly top-layer protocol (ZigBee NWK, Thread, …)
+    pub summary: String,               // one-line src → dst (from the decoded fields)
+    pub fields: Vec<(String, String)>, // (name, display) — the dissected field tree, our hook
 }
 
-/// Whether tshark is available (so the UI can offer/disable the Decode action).
-pub fn tshark_available() -> bool {
-    tshark_path().is_some()
+/// Friendly label for a tshark layer name (the upper-layer protocol).
+fn friendly_proto(layer: &str) -> Option<&'static str> {
+    Some(match layer {
+        "wpan" => "802.15.4",
+        "zbee_nwk" => "ZigBee NWK",
+        "zbee_aps" => "ZigBee APS",
+        "zbee_zcl" => "ZigBee ZCL",
+        "zbee_zdp" => "ZigBee ZDP",
+        "6lowpan" => "6LoWPAN",
+        "ipv6" => "IPv6",
+        "udp" => "UDP",
+        "coap" => "CoAP",
+        "mle" => "Thread MLE",
+        "thread" | "thread_meshcop" | "thread_nwd" | "thread_address" => "Thread",
+        _ => return None,
+    })
 }
 
-/// Dissect raw ieee802154 records with tshark and return per-packet decode rows.
-/// One tshark run over a temp TAP pcap; rows map 1:1 to the input records by order.
-pub fn dissect_ieee154(records: Vec<Vec<u8>>) -> Result<Vec<DecodedRow>, String> {
+/// Fields we surface from the dissection — the addressing + routing identity that
+/// drives filtering today and macro `EXPECT`-on-fields later.
+const FIELD_WHITELIST: &[&str] = &[
+    "wpan.src16", "wpan.dst16", "wpan.dst_pan",
+    "zbee_nwk.src", "zbee_nwk.dst", "zbee_nwk.radius", "zbee_nwk.seqno",
+    "zbee_aps.cluster", "zbee_aps.profile", "zbee_aps.src", "zbee_aps.dst",
+    "zbee_zcl.cmd.id", "coap.code", "coap.mid", "mle.cmd",
+];
+
+/// Whether tshark is reachable (gates/loads the Decode action in the UI).
+pub fn tshark_available(tshark_path: Option<String>) -> bool {
+    resolve_tshark(tshark_path.as_deref()).is_some()
+}
+
+/// Dissect raw ieee802154 records with tshark (via rtshark) into per-packet rows:
+/// the upper-layer protocol + a src→dst summary + the whitelisted field tree.
+/// Rows map 1:1 to the input records by capture order.
+pub fn dissect_ieee154(
+    records: Vec<Vec<u8>>,
+    tshark_path: Option<String>,
+) -> Result<Vec<DecodedRow>, String> {
     if records.is_empty() {
         return Ok(vec![]);
     }
-    let tshark = tshark_path().ok_or("Wireshark (tshark) not found — install it to decode")?;
+    let bin = resolve_tshark(tshark_path.as_deref())
+        .ok_or("Wireshark (tshark) not found — set its path in Settings")?;
+    let dir = bin
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
     let bytes = ieee154_pcap(&records);
     let tmp = std::env::temp_dir().join("sutra_dissect.pcap");
     std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
 
-    let out = std::process::Command::new(&tshark)
-        .args([
-            "-r", &tmp.to_string_lossy(),
-            "-T", "fields",
-            "-e", "frame.number",
-            "-e", "_ws.col.Protocol",
-            "-e", "_ws.col.Info",
-            "-E", "separator=/t",
-        ])
-        .output()
-        .map_err(|e| format!("run tshark: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("tshark: {}", String::from_utf8_lossy(&out.stderr)));
-    }
+    // rtshark finds tshark via PATH; point PATH at the resolved Wireshark dir so a
+    // non-PATH install (the Windows default) and its DLLs both resolve.
+    let mut rt = rtshark::RTSharkBuilder::builder()
+        .input_path(&tmp.to_string_lossy())
+        .env_path(&dir)
+        .spawn()
+        .map_err(|e| format!("tshark: {e}"))?;
 
-    let text = String::from_utf8_lossy(&out.stdout);
     let mut rows = Vec::new();
-    for line in text.lines() {
-        let mut it = line.splitn(3, '\t');
-        let num = it.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-        let protocol = it.next().unwrap_or("").to_string();
-        let info = it.next().unwrap_or("").to_string();
-        rows.push(DecodedRow { num, protocol, info });
+    while let Some(pkt) = rt.read().map_err(|e| format!("tshark read: {e}"))? {
+        let num = pkt
+            .layer_name("frame")
+            .and_then(|l| l.metadata("frame.number"))
+            .and_then(|m| m.value().parse().ok())
+            .unwrap_or((rows.len() + 1) as u32);
+
+        // protocol = the friendliest known layer, topmost wins
+        let mut protocol = "802.15.4".to_string();
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for layer in pkt.iter() {
+            if let Some(f) = friendly_proto(layer.name()) {
+                protocol = f.to_string();
+            }
+            for &w in FIELD_WHITELIST {
+                if let Some(m) = layer.metadata(w) {
+                    // value() = the decoded value ("0x0000"); display() prepends the
+                    // field label, which is redundant with our field-name key.
+                    fields.push((w.to_string(), m.value().to_string()));
+                }
+            }
+        }
+        let get = |n: &str| fields.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
+        let src = get("zbee_nwk.src").or_else(|| get("wpan.src16")).unwrap_or_default();
+        let dst = get("zbee_nwk.dst").or_else(|| get("wpan.dst16")).unwrap_or_default();
+        let summary = if src.is_empty() && dst.is_empty() {
+            String::new()
+        } else {
+            format!("{src} → {dst}")
+        };
+        rows.push(DecodedRow { num, protocol, summary, fields });
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // End-to-end: a crafted 802.15.4 data frame through ieee154_pcap -> rtshark.
+    // Skipped when tshark isn't installed (so CI without Wireshark stays green).
+    #[test]
+    fn dissect_roundtrip() {
+        if !tshark_available(None) {
+            eprintln!("tshark not found — skipping dissect_roundtrip");
+            return;
+        }
+        // record: ts(4)·ch·rssi·lqi·flags·plen·psdu (psdu = MAC frame + 2 FCS bytes).
+        // MAC: FCF 0x8841 (data, PAN-compressed, short addrs), seq 1, dst PAN abcd,
+        // dst ffff (bcast), src 0000, payload, + FCS.
+        let psdu: &[u8] =
+            &[0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34];
+        let mut rec = vec![0u8, 0, 0, 0, 15, 0xD0, 0xFF, 0x01, psdu.len() as u8];
+        rec.extend_from_slice(psdu);
+
+        let rows = dissect_ieee154(vec![rec], None).expect("dissect");
+        assert_eq!(rows.len(), 1, "one packet");
+        eprintln!("protocol={} summary={} fields={:?}", rows[0].protocol, rows[0].summary, rows[0].fields);
+        assert!(
+            rows[0].fields.iter().any(|(k, _)| k == "wpan.src16"),
+            "extracted the wpan source address"
+        );
+    }
 }
 
 // ---- Tauri commands --------------------------------------------------------
