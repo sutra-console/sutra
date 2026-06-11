@@ -7,7 +7,20 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { type DecodedRow, type Ieee154Frame } from "@/lib/skrit";
+
+const copyText = (s: string) => navigator.clipboard?.writeText(s).catch(() => {});
+const fieldsText = (d: DecodedRow) => d.fields.map(([k, v]) => `${k}=${v}`).join("\n");
+const rowText = (d: DecodedRow) => {
+  const f = d.fields.map(([k, v]) => `${k}=${v}`).join(" ");
+  return `#${d.num} ${d.protocol} | ${d.summary}${f ? " | " + f : ""}`;
+};
 
 // Color the protocol badge by upper-layer stack (from Wireshark's Protocol column).
 function protoColor(p: string): string {
@@ -49,6 +62,7 @@ export function Ieee154Panel({
   const [hideNoise, setHideNoise] = useState(true); // hide Ack / Data Request / Link Status chatter
   const [live, setLive] = useState(false); // auto re-decode as frames arrive
   const [decErr, setDecErr] = useState(""); // last decode error (shown, not thrown)
+  const [ctxRow, setCtxRow] = useState<DecodedRow | null>(null); // right-clicked decoded row
   // keep the latest onDecode + frame count in refs so the live interval (set up
   // once) always decodes the CURRENT capture, not a stale closure.
   const onDecodeRef = useRef(onDecode);
@@ -321,55 +335,81 @@ export function Ieee154Panel({
         ) : (
           // Decoded: Wireshark (tshark) dissection of the capture — the real
           // upper-layer protocol (ZigBee/Thread/6LoWPAN/Matter) and a summary.
-          <table className="w-full text-left font-mono text-xs">
-            <thead className="sticky top-0 bg-background text-muted-foreground">
-              <tr>
-                <th className="px-2 py-1 font-normal">#</th>
-                <th className="px-2 py-1 font-normal">Ch</th>
-                <th className="px-2 py-1 font-normal">Protocol</th>
-                <th className="px-2 py-1 font-normal">Summary</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shownDecoded.map((d) => {
-                const f = frames[d.num - 1];
-                const open = expanded.has(d.num);
-                return (
-                  <Fragment key={d.num}>
-                    <tr
-                      className="cursor-pointer select-none border-t hover:bg-accent/40"
-                      title={d.fields.length ? "Click to show the decoded fields" : undefined}
-                      onClick={() => setExpanded((s) => {
-                        const n = new Set(s);
-                        n.has(d.num) ? n.delete(d.num) : n.add(d.num);
-                        return n;
-                      })}>
-                      <td className="px-2 py-0.5 tabular-nums text-muted-foreground">
-                        {d.fields.length ? (open ? "▾ " : "▸ ") : ""}{d.num}
-                      </td>
-                      <td className="px-2 py-0.5 text-muted-foreground">{f?.channel ?? "—"}</td>
-                      <td className={`px-2 py-0.5 ${protoColor(d.protocol)}`}>{d.protocol}</td>
-                      <td className="whitespace-nowrap px-2 py-0.5">{d.summary || "—"}</td>
-                    </tr>
-                    {open && d.fields.length > 0 && (
-                      <tr className="bg-muted/30">
-                        <td />
-                        <td colSpan={3} className="px-2 py-1">
-                          <div className="flex flex-wrap gap-x-4 gap-y-0.5">
-                            {d.fields.map(([k, v]) => (
-                              <span key={k} className="text-[11px]">
-                                <span className="text-muted-foreground">{k}</span>={v}
-                              </span>
-                            ))}
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
+          // Right-click a row to copy; click a field value (when expanded) to copy it.
+          <ContextMenu>
+            <ContextMenuTrigger asChild>
+              <table className="w-full text-left font-mono text-xs">
+                <thead className="sticky top-0 bg-background text-muted-foreground">
+                  <tr>
+                    <th className="px-2 py-1 font-normal">#</th>
+                    <th className="px-2 py-1 font-normal">Ch</th>
+                    <th className="px-2 py-1 font-normal">Protocol</th>
+                    <th className="px-2 py-1 font-normal">Summary</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shownDecoded.map((d) => {
+                    const f = frames[d.num - 1];
+                    const open = expanded.has(d.num);
+                    return (
+                      <Fragment key={d.num}>
+                        <tr
+                          className="cursor-pointer select-none border-t hover:bg-accent/40"
+                          title={d.fields.length ? "Click to show fields · right-click to copy" : "Right-click to copy"}
+                          onContextMenu={() => setCtxRow(d)}
+                          onClick={() => setExpanded((s) => {
+                            const n = new Set(s);
+                            n.has(d.num) ? n.delete(d.num) : n.add(d.num);
+                            return n;
+                          })}>
+                          <td className="px-2 py-0.5 tabular-nums text-muted-foreground">
+                            {d.fields.length ? (open ? "▾ " : "▸ ") : ""}{d.num}
+                          </td>
+                          <td className="px-2 py-0.5 text-muted-foreground">{f?.channel ?? "—"}</td>
+                          <td className={`px-2 py-0.5 ${protoColor(d.protocol)}`}>{d.protocol}</td>
+                          <td className="whitespace-nowrap px-2 py-0.5">{d.summary || "—"}</td>
+                        </tr>
+                        {open && d.fields.length > 0 && (
+                          <tr className="bg-muted/30">
+                            <td />
+                            <td colSpan={3} className="px-2 py-1">
+                              <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+                                {d.fields.map(([k, v]) => (
+                                  <button key={k} type="button"
+                                    className="text-left text-[11px] hover:text-primary"
+                                    title="Click to copy value"
+                                    onClick={() => copyText(v)}>
+                                    <span className="text-muted-foreground">{k}</span>={v}
+                                  </button>
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              <ContextMenuItem disabled={!ctxRow} onSelect={() => ctxRow && copyText(ctxRow.summary)}>
+                Copy summary
+              </ContextMenuItem>
+              <ContextMenuItem disabled={!ctxRow} onSelect={() => ctxRow && copyText(ctxRow.protocol)}>
+                Copy protocol
+              </ContextMenuItem>
+              <ContextMenuItem disabled={!ctxRow?.fields.length} onSelect={() => ctxRow && copyText(fieldsText(ctxRow))}>
+                Copy fields
+              </ContextMenuItem>
+              <ContextMenuItem disabled={!ctxRow} onSelect={() => ctxRow && copyText(rowText(ctxRow))}>
+                Copy row
+              </ContextMenuItem>
+              <ContextMenuItem disabled={!ctxRow} onSelect={() => ctxRow && setDecFilter(ctxRow.protocol)}>
+                Filter to “{ctxRow?.protocol}”
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         )}
         {frames.length === 0 && mode !== "decoded" && (
           <p className="px-2 py-6 text-center text-xs text-muted-foreground">
