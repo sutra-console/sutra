@@ -45,6 +45,7 @@ import {
   connState,
   outputToggle,
   outputsBitmap,
+  dataPins,
   getInfo,
   getIoConfig,
   getDeviceName,
@@ -213,6 +214,7 @@ export default function App() {
   const [configOpen, setConfigOpen] = useState(false);
   const [hasWifi, setHasWifi] = useState(false); // device answers the WiFi CFG keys
   const [ioPins, setIoPins] = useState<Record<number, number>>({}); // output index -> GPIO (tooltips)
+  const [dataSrcPins, setDataSrcPins] = useState<{ tx: number; rx: number } | null>(null); // Duta pins the bridged UART enters on
   const [macros, setMacros] = useState<MacroRec[]>([]);
   const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
@@ -474,6 +476,7 @@ export default function App() {
       })
       .catch(() => {});
     getDataDesc().then(setDataDesc).catch(() => setDataDesc(null)); // UART if unsupported
+    dataPins().then(setDataSrcPins).catch(() => setDataSrcPins(null)); // which Duta pins the source rides
     wifiStatus().then(() => setHasWifi(true)).catch(() => setHasWifi(false));
     try {
       const cs = await getControls();
@@ -509,6 +512,8 @@ export default function App() {
     setPwmCfg({});
     setRgbVals({});
     setDataDesc(null);
+    setDataSrcPins(null);
+    setIoPins({});
     setCaps(0);
   }
 
@@ -902,8 +907,21 @@ export default function App() {
       <div className="flex min-h-0 flex-1 gap-3 p-3">
         <Card className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <CardHeader className="flex-row items-center justify-between border-b py-2">
-            <CardTitle className="flex items-center gap-2">
+            <CardTitle
+              className="flex items-center gap-2"
+              title={
+                dataSrcPins
+                  ? `bridged ${dataDesc?.name ?? "UART"} — into the Duta on TX GPIO${dataSrcPins.tx} · RX GPIO${dataSrcPins.rx}`
+                  : undefined
+              }
+            >
               Console: {dataDesc ? dataDesc.name : "DATA"}
+              {dataSrcPins && (
+                <span className="font-mono text-[10px] font-normal text-muted-foreground">
+                  TX {dataSrcPins.tx >= 0 ? `GPIO${dataSrcPins.tx}` : "—"} · RX{" "}
+                  {dataSrcPins.rx >= 0 ? `GPIO${dataSrcPins.rx}` : "—"}
+                </span>
+              )}
               {dataDesc && dataDesc.kind !== DATA_KIND.UART && (
                 <Badge variant="outline" className="text-[10px] font-normal">
                   raw {dataDesc.name} stream · typed viewer coming
