@@ -30,11 +30,19 @@ Interfaces come from **both transports**:
   **Network** button gets them online) are listed as `Duta: <name> — <ip>
   (WiFi)`. The gear icon sets the **device password** (default `duta`).
 
-Start the capture: each chunk of console bytes arrives as one timestamped
-packet (classic pcap, `LINKTYPE_USER0`). The same physical board can appear
-twice — once per transport; the WiFi one coexists with a Sutra USB session
-(the console is teed to every link), so you can drive the target from Sutra
-while Wireshark captures.
+Start the capture and packets flow live. The **link type follows what the device
+bridges** (`sutra-extcap` probes `DATA_DESC` first):
+
+- **ble-sniff** → `LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR` — each record is reframed
+  into a BLE LL packet with a 10-byte pseudo-header, so **Wireshark's native
+  `btle` dissector** decodes it in full (PDU types, advertising addresses with
+  OUI names, AD structures, CRC status). No plugin needed.
+- **anything else** (UART console today) → `LINKTYPE_USER0`, one packet per
+  transport chunk (raw bytes; boundaries are reads, not protocol framing).
+
+The same physical board can appear twice — once per transport; the WiFi one
+coexists with a Sutra USB session (the console is teed to every link), so you can
+drive the target from Sutra while Wireshark captures.
 
 ## How it works
 
@@ -45,18 +53,25 @@ Wireshark ── runs ──> sutra-extcap ──┬── COMxx (USB, DTR-only 
 ```
 
 - `--extcap-interfaces` → 2.5 s mDNS browse, one interface per Duta.
-- `--capture --fifo <pipe>` → WebSocket connect + `AUTH`, then the DATA channel
-  is written as pcap records until Wireshark stops the capture (broken pipe) or
-  the WS closes.
+- `--extcap-dlts` → probes the device's `DATA_DESC` kind and reports the matching
+  link type (BTLE for a sniffer, USER0 otherwise).
+- `--capture --fifo <pipe>` → connect (+ `AUTH` over WS), probe the kind, write
+  the pcap header for that link type, then stream reframed records until
+  Wireshark stops the capture (broken pipe) or the link closes.
 - The capture session coexists with USB: a Duta serves USB and WebSocket
   simultaneously, with the console teed to both — so you can drive the target
   from Sutra over USB *while* Wireshark captures the same traffic over WiFi.
 
-## v1 scope & the path forward
+## Scope & the path forward
 
-- **Today**: USB and WebSocket Dutas; the raw UART console as `USER0` packets
-  (chunk-per-packet — boundaries are transport reads, not protocol framing).
-- **Next** (with typed DATA streams): real link types per kind — SocketCAN for
-  `can`, `LINKTYPE_NORDIC_BLE` for the sniffer, I²C transaction records — and a
-  move to **pcapng** so one capture can carry several streams (console + I²C)
-  as separate interfaces.
+- **ble-sniff → native BTLE** (`LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR`): full decode
+  by Wireshark's own dissector. The radio CRC-checks on-device, so the pseudo-
+  header sets CRC-valid and carries a placeholder (the real 3-byte CRC is dropped
+  by the firmware). Advertising PDUs today (the sniffer's scope).
+- **everything else → `USER0`**: the raw stream (UART console), one packet per
+  chunk. The optional [`wireshark/skrit-ble-sniff.lua`](wireshark/skrit-ble-sniff.lua)
+  dissector predates the native path — kept as the decoder reference (see
+  [`DECODERS.md`](DECODERS.md)); the native BTLE link type supersedes it for BLE.
+- **Next**: more typed link types per kind (SocketCAN for `can`, I²C transaction
+  records), connection-following in the sniffer, and a move to **pcapng** so one
+  capture carries several streams (console + I²C) as separate interfaces.

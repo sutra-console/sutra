@@ -1,15 +1,22 @@
-# Duta in Wireshark — extcap + dissector
+# Duta in Wireshark — extcap
 
-Capture a Duta's DATA stream **live in Wireshark**. Two pieces work together:
+Capture a Duta's DATA stream **live in Wireshark**. The one thing you need is the
+**extcap** binary:
 
 | File | What it is | Installs to |
 |------|-----------|-------------|
-| `sutra-extcap` (binary, built from [`src-tauri/src/bin/sutra_extcap.rs`](../src-tauri/src/bin/sutra_extcap.rs)) | a Wireshark **extcap** — makes each Duta a live capture interface | Wireshark *Personal Extcap path* |
-| [`skrit-ble-sniff.lua`](skrit-ble-sniff.lua) | a **dissector** — decodes the captured `USER0` bytes into BLE-sniff fields | Wireshark *Personal Lua Plugins* |
+| `sutra-extcap` (built from [`src-tauri/src/bin/sutra_extcap.rs`](../src-tauri/src/bin/sutra_extcap.rs)) | a Wireshark **extcap** — makes each Duta a live capture interface | Wireshark *Personal Extcap path* |
 
-The extcap gets the bytes in; the dissector makes them readable. The extcap alone
-works (you'll just see raw `USER0` hex); add the dissector for a real **BLE-Sniff**
-column. Background and design: [`../EXTCAP.md`](../EXTCAP.md).
+The extcap probes what the device bridges and picks the link type to match. For a
+**BLE sniffer** it emits `LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR`, so **Wireshark's
+own `btle` dissector** decodes everything natively — PDU types, advertising
+addresses with vendor names, AD structures, CRC status. **No plugin required.**
+Other (untyped) streams come through as raw `USER0`. Background: [`../EXTCAP.md`](../EXTCAP.md).
+
+> The [`skrit-ble-sniff.lua`](skrit-ble-sniff.lua) dissector in this folder is
+> **optional** — it predates the native BTLE path and is now kept as the reference
+> parser for Sutra's own decoder layer ([`../DECODERS.md`](../DECODERS.md)). You do
+> *not* need it for live BLE capture anymore.
 
 ---
 
@@ -24,20 +31,18 @@ cargo build --release --bin sutra-extcap
 # -> target\release\sutra-extcap.exe
 ```
 
-## 2. Install both pieces
+## 2. Install the binary
 
-Find the exact folders in **Wireshark ▸ Help ▸ About Wireshark ▸ Folders**
-("Personal Extcap path" and "Personal Lua Plugins"). On Windows they are:
+Find the exact folder in **Wireshark ▸ Help ▸ About Wireshark ▸ Folders**
+("Personal Extcap path"). On Windows:
 
 ```powershell
-# extcap binary
 copy sutra\src-tauri\target\release\sutra-extcap.exe "$env:APPDATA\Wireshark\extcap\"
-# dissector
-copy sutra\wireshark\skrit-ble-sniff.lua            "$env:APPDATA\Wireshark\plugins\"
 ```
 
-(macOS/Linux: `~/.local/lib/wireshark/extcap/` and `~/.local/lib/wireshark/plugins/`,
-or the per-user paths the Folders dialog shows.)
+(macOS/Linux: `~/.local/lib/wireshark/extcap/`, or the path the Folders dialog shows.)
+
+That's it — BLE decode is native, no Lua plugin to install.
 
 ## 3. Run Wireshark
 
@@ -51,13 +56,11 @@ or the per-user paths the Folders dialog shows.)
    nothing — it isn't session-gated.
 4. **Double-click** the interface to start. Packets stream in live.
 
-With the dissector loaded, the **Protocol** column reads `BLE-Sniff` and the
-**Info** column reads like `ch37  -61 dBm  ADV_IND — <name>`. Expand a packet for
-channel, RSSI, access address, PDU type, advertising address, and parsed AD
-structures (flags, local name, manufacturer data…).
-
-> Edited the `.lua` and don't want to restart? **Analyze ▸ Reload Lua Plugins**
-> (`Ctrl+Shift+L`) reloads dissectors without dropping Wireshark.
+For a BLE sniffer the **Protocol** column reads **`LE LL`** (Wireshark's native
+dissector). Source = advertising address (with the vendor name resolved),
+Destination = `Broadcast`; the Info column shows `ADV_IND` / `ADV_NONCONN_IND` /
+`SCAN_REQ`. Expand a packet for the pseudo-header (RF channel → advertising
+channel, signal dBm, CRC valid) and the full LL PDU with parsed AD structures.
 
 ---
 
@@ -72,12 +75,11 @@ structures (flags, local name, manufacturer data…).
   path* the Folders dialog names, then restart. Sanity-check from a shell:
   `sutra-extcap.exe --extcap-interfaces` should print an `interface {…}` line per
   Duta.
-- **Raw hex instead of BLE-Sniff?** The dissector isn't loaded — check it's in
-  *Personal Lua Plugins* and hit `Ctrl+Shift+L`. It auto-binds to `USER0`; no
-  `DLT_USER` preference setup is needed.
-- **Today's scope:** advertising PDUs as `LINKTYPE_USER0` (one record per packet).
-  Real `LINKTYPE_NORDIC_BLE` + `pcapng` multi-stream is the next step — see
-  [`../EXTCAP.md`](../EXTCAP.md).
+- **`LE LL` shows `Unknown` PDU types?** That would mean the RF-channel mapping is
+  off (the pseudo-header needs the *physical* RF channel, not the BLE channel
+  index) — the binary handles 37/38/39 → RF 0/12/39. Rebuild if you've patched it.
+- **CRC shows `0x000000`:** expected — the radio CRC-checks on-device and discards
+  the bytes, so the pseudo-header marks CRC-valid and ships a placeholder.
 
 ---
 
@@ -90,21 +92,19 @@ debug. (`--fifo` accepts a plain file path, so a capture lands in a normal pcap.
 $bin = "sutra\src-tauri\target\release\sutra-extcap.exe"
 
 & $bin --extcap-interfaces                                   # list Dutas
-& $bin --extcap-dlts   --extcap-interface COM34              # -> USER0 (147)
+& $bin --extcap-dlts   --extcap-interface COM34              # -> BTLE (256) for a sniffer
 & $bin --extcap-config --extcap-interface COM34              # -> password, max-time
 & $bin --capture --extcap-interface COM34 --fifo cap.pcap --max-time 4
 
-# then verify with tshark + our dissector:
-& "C:\Program Files\Wireshark\tshark.exe" -r cap.pcap `
-    -X "lua_script:sutra\wireshark\skrit-ble-sniff.lua" `
-    -T fields -e skrit_blesniff.channel -e skrit_blesniff.rssi `
-    -e skrit_blesniff.aa -e skrit_blesniff.pdu_type -e skrit_blesniff.adv_addr -E header=y
+# verify with tshark — native btle, no plugin:
+& "C:\Program Files\Wireshark\tshark.exe" -r cap.pcap -c 10
 ```
 
-## The dissector is a preview of Sutra's own decoders
+## The `.lua` is a preview of Sutra's own decoders
 
-`skrit-ble-sniff.lua` parses one DATA record into fields. Sutra will embed the
-same idea (via `mlua`) so the **same parsing logic** powers the in-app viewer and
-filters — Lua is the shared language between the two tools. The contract for that
-is sketched in [`../DECODERS.md`](../DECODERS.md); the record-layout/AD-walk logic
-in this file ports almost directly.
+[`skrit-ble-sniff.lua`](skrit-ble-sniff.lua) parses one DATA record into fields.
+It's no longer needed for capture (native BTLE supersedes it), but it stays as the
+reference for Sutra's `mlua` decoder layer: the **same parsing logic** will power
+the in-app viewer and filters — Lua is the shared language between the two tools.
+The contract is sketched in [`../DECODERS.md`](../DECODERS.md); the
+record-layout/AD-walk logic in this file ports almost directly.

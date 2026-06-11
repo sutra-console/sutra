@@ -26,10 +26,85 @@ use sutra_lib::protocol::{msg, mux, Frame, MuxReader, RESP_FLAG};
 use sutra_lib::{serial, ws};
 
 const LINKTYPE_USER0: u32 = 147;
+// Bluetooth LE Link Layer with a 10-byte pseudo-header. Wireshark's native
+// `btle` dissector reads this directly — full BLE decode, no Lua needed.
+const LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR: u32 = 256;
+const DATA_KIND_BLE_SNIFF: u8 = 4; // SKRIT_DATA_BLE_SNIFF
 const EXTCAP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+}
+
+/// The pcap link type + DLT label for a DATA kind. ble-sniff gets the native
+/// BLE LL link type; everything else stays the opaque raw-DATA stream (USER0).
+fn dlt_for_kind(kind: u8) -> (u32, &'static str, &'static str) {
+    match kind {
+        DATA_KIND_BLE_SNIFF => (
+            LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR,
+            "BLUETOOTH_LE_LL_WITH_PHDR",
+            "Bluetooth LE Link Layer (native btle dissector)",
+        ),
+        _ => (LINKTYPE_USER0, "USER0", "skrit DATA stream (raw console bytes)"),
+    }
+}
+
+/// Reframe one ble-sniff DATA record into a LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR
+/// packet so Wireshark's `btle` dissector decodes it natively.
+///
+/// Input record (PROTOCOL.md "BLE sniffer"):
+///   ts_ms(4 LE) · channel(1) · rssi(1, magnitude) · access-address(4 LE) ·
+///   pdu_len(1) · pdu…
+/// Output packet: 10-byte LE pseudo-header + access-address(4) + pdu + CRC(3).
+/// The radio already de-whitened and CRC-checked, so we set the CRC-valid flag
+/// and append a 3-byte CRC placeholder (the real CRC is discarded on-device).
+fn ble_ll_packet(rec: &[u8]) -> Option<Vec<u8>> {
+    if rec.len() < 11 {
+        return None;
+    }
+    // The phdr's first byte is the PHYSICAL RF channel (0..39 by frequency), not
+    // the BLE logical channel index. The dissector uses it to recognise primary
+    // advertising channels (logical 37/38/39 = RF 0/12/39); get this wrong and it
+    // decodes adv PDUs as data/extended ("Unknown"). We only sniff advertising.
+    let rf_channel = match rec[4] {
+        37 => 0,
+        38 => 12,
+        39 => 39,
+        other => other, // data channels would map by frequency; unused here
+    };
+    let signal = (-(rec[5] as i16)) as i8 as u8; // stored magnitude -> negative dBm
+    let aa = &rec[6..10]; // access address, little-endian (on-air order)
+    let plen = rec[10] as usize;
+    if plen < 2 || rec.len() < 11 + plen {
+        return None;
+    }
+    let pdu = &rec[11..11 + plen];
+
+    // flags (LE): dewhitened | signal-valid | ref-AA-valid | CRC-checked | CRC-valid
+    let flags: u16 = 0x0001 | 0x0002 | 0x0010 | 0x0400 | 0x0800;
+    let mut pkt = Vec::with_capacity(10 + 4 + plen + 3);
+    pkt.push(rf_channel); // physical RF channel (frequency index)
+    pkt.push(signal); // signal power, dBm
+    pkt.push(0); // noise power (not measured; flag left clear)
+    pkt.push(0); // access-address offenses
+    pkt.extend_from_slice(aa); // reference access address (LE)
+    pkt.extend_from_slice(&flags.to_le_bytes());
+    // the LL packet itself: AA + PDU + CRC
+    pkt.extend_from_slice(aa);
+    pkt.extend_from_slice(pdu);
+    pkt.extend_from_slice(&[0, 0, 0]); // CRC placeholder (marked valid via flags)
+    Some(pkt)
+}
+
+/// Frame one DATA record for the chosen link type. ble-sniff records become LL
+/// packets; any other kind is written through unchanged (USER0). Returns None to
+/// drop a record (malformed ble-sniff capture).
+fn frame_record(kind: u8, payload: &[u8]) -> Option<Vec<u8>> {
+    if kind == DATA_KIND_BLE_SNIFF {
+        ble_ll_packet(payload)
+    } else {
+        Some(payload.to_vec())
+    }
 }
 
 fn main() {
@@ -39,7 +114,13 @@ fn main() {
     if has("--extcap-interfaces") {
         list_interfaces();
     } else if has("--extcap-dlts") {
-        println!("dlt {{number={LINKTYPE_USER0}}}{{name=USER0}}{{display=skrit DATA stream (raw console bytes)}}");
+        // Report the link type that matches what this device actually bridges, so
+        // the dropdown agrees with the captured stream (ble-sniff -> native BTLE).
+        let iface = arg_value(&args, "--extcap-interface").unwrap_or_default();
+        let password = arg_value(&args, "--password").unwrap_or_else(|| "duta".into());
+        let kind = probe_kind(&iface, &password).unwrap_or(0);
+        let (num, name, display) = dlt_for_kind(kind);
+        println!("dlt {{number={num}}}{{name={name}}}{{display={display}}}");
     } else if has("--extcap-config") {
         // The options Wireshark shows in the interface's gear dialog.
         println!("arg {{number=0}}{{call=--password}}{{display=Device password}}{{tooltip=The Duta's session password (AUTH)}}{{type=password}}{{default=duta}}");
@@ -157,12 +238,104 @@ fn usb_probe_name(port: &str) -> Option<String> {
     }
 }
 
+/// Ask a device what its DATA channel carries (DATA_DESC -> kind). Returns the
+/// kind byte (uart=0, …, ble-sniff=4, i2c=6), or None if it doesn't answer.
+/// Used to pick the pcap link type up front. Best-effort: a device that predates
+/// DATA_DESC just looks like uart, so we fall back to the raw USER0 stream.
+fn probe_kind(iface: &str, password: &str) -> Option<u8> {
+    if iface.is_empty() {
+        return None;
+    }
+    if iface.starts_with("ws://") || iface.starts_with("wss://") {
+        probe_kind_ws(iface, password)
+    } else {
+        let mut p = open_usb(iface, Duration::from_millis(100)).ok()?;
+        let mut reader = MuxReader::new();
+        let mut buf = [0u8; 256];
+        let kind = usb_data_kind(&mut p, &mut reader, &mut buf);
+        park_lines(&mut p);
+        kind
+    }
+}
+
+/// DATA_DESC roundtrip on an already-open serial port, reusing the caller's mux
+/// reader/buffer so a follow-on capture loses no frames. Reply body = [status,
+/// kind, name…]; we want body[1].
+fn usb_data_kind(
+    p: &mut Box<dyn serialport::SerialPort>,
+    reader: &mut MuxReader,
+    buf: &mut [u8],
+) -> Option<u8> {
+    let wire = Frame::new(msg::DATA_DESC, 0xD1, vec![]).to_mux_wire().ok()?;
+    p.write_all(&wire).ok()?;
+    let _ = p.flush();
+    let deadline = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < deadline {
+        let n = match p.read(buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => return None,
+        };
+        for (ch, payload) in reader.push(&buf[..n]) {
+            if ch == mux::CMD {
+                if let Ok(f) = Frame::from_raw(&payload) {
+                    if f.typ == (msg::DATA_DESC | RESP_FLAG) {
+                        return f.body.get(1).copied();
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// DATA_DESC over WebSocket (connect + AUTH + DATA_DESC). Best-effort probe for
+/// --extcap-dlts; capture() does its own kind probe inline while streaming.
+fn probe_kind_ws(url: &str, password: &str) -> Option<u8> {
+    let (mut sock, _resp) = tungstenite::connect(url).ok()?;
+    let auth = Frame::new(msg::AUTH, 1, password.as_bytes().to_vec()).to_mux_wire().ok()?;
+    sock.send(tungstenite::Message::Binary(auth)).ok()?;
+    let desc = Frame::new(msg::DATA_DESC, 0xD1, vec![]).to_mux_wire().ok()?;
+    let mut reader = MuxReader::new();
+    let mut sent_desc = false;
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < deadline {
+        let m = sock.read().ok()?;
+        let bytes = match m {
+            tungstenite::Message::Binary(b) => b,
+            tungstenite::Message::Close(_) => return None,
+            _ => continue,
+        };
+        for (ch, payload) in reader.push(&bytes) {
+            if ch != mux::CMD {
+                continue;
+            }
+            if let Ok(f) = Frame::from_raw(&payload) {
+                if f.typ == (msg::AUTH | RESP_FLAG) && f.status() == Some(0) && !sent_desc {
+                    sock.send(tungstenite::Message::Binary(desc.clone())).ok()?;
+                    sent_desc = true;
+                } else if f.typ == (msg::DATA_DESC | RESP_FLAG) {
+                    let _ = sock.close(None);
+                    return f.body.get(1).copied();
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Capture from a USB-attached Duta: demux the serial stream, DATA -> pcap.
 /// (No AUTH — USB links aren't session-gated.)
 fn capture_usb(port: &str, out: &mut std::fs::File, max_time: u64) -> Result<(), String> {
     let mut p = open_usb(port, Duration::from_millis(50))?;
     let mut reader = MuxReader::new();
     let mut buf = [0u8; 512];
+    // Probe the DATA kind first so the pcap header carries the right link type;
+    // the same reader continues into the stream loop (no frame loss).
+    let kind = usb_data_kind(&mut p, &mut reader, &mut buf).unwrap_or(0);
+    let (linktype, _, _) = dlt_for_kind(kind);
+    out.write_all(&pcap_global_header(linktype)).map_err(|e| format!("fifo: {e}"))?;
+    out.flush().ok();
     let started = Instant::now();
     loop {
         if max_time > 0 && started.elapsed().as_secs() >= max_time {
@@ -178,9 +351,14 @@ fn capture_usb(port: &str, out: &mut std::fs::File, max_time: u64) -> Result<(),
             }
         };
         for (ch, payload) in reader.push(&buf[..n]) {
-            if ch == mux::DATA && !payload.is_empty() && write_record(out, &payload).is_err() {
-                park_lines(&mut p); // Wireshark closed its end — done
-                return Ok(());
+            if ch != mux::DATA || payload.is_empty() {
+                continue;
+            }
+            if let Some(pkt) = frame_record(kind, &payload) {
+                if write_record(out, &pkt).is_err() {
+                    park_lines(&mut p); // Wireshark closed its end — done
+                    return Ok(());
+                }
             }
         }
     }
@@ -224,28 +402,45 @@ fn capture(iface: &str, fifo: &str, password: &str, max_time: u64) -> Result<(),
         .truncate(false)
         .open(fifo)
         .map_err(|e| format!("open fifo {fifo}: {e}"))?;
-    out.write_all(&pcap_global_header(LINKTYPE_USER0)).map_err(|e| format!("fifo: {e}"))?;
-    out.flush().ok();
 
+    // USB writes its own pcap header after probing the kind (see capture_usb).
     if !iface.starts_with("ws://") && !iface.starts_with("wss://") {
         return capture_usb(iface, &mut out, max_time); // a serial port name
     }
     let url = iface;
     let (mut sock, _resp) = tungstenite::connect(url).map_err(|e| format!("connect {url}: {e}"))?;
 
-    // AUTH, then confirm the OK before streaming.
+    // AUTH, then DATA_DESC to learn the kind, then stream. The pcap header is
+    // written once we know the link type; DATA before that is dropped (ms).
     let auth = Frame::new(msg::AUTH, 1, password.as_bytes().to_vec())
         .to_mux_wire()
         .map_err(|e| format!("auth frame: {e:?}"))?;
     sock.send(tungstenite::Message::Binary(auth)).map_err(|e| format!("auth send: {e}"))?;
+    let desc = Frame::new(msg::DATA_DESC, 0xD1, vec![])
+        .to_mux_wire()
+        .map_err(|e| format!("desc frame: {e:?}"))?;
 
     let mut reader = MuxReader::new();
     let mut authed = false;
+    let mut kind: Option<u8> = None; // Some once the header is written
+    let mut auth_at: Option<Instant> = None;
     let started = std::time::Instant::now();
 
     loop {
         if max_time > 0 && started.elapsed().as_secs() >= max_time {
             return Ok(());
+        }
+        // Fallback: a device that doesn't answer DATA_DESC (predates it) still
+        // captures — default to the raw USER0 stream after a short grace period.
+        if kind.is_none() {
+            if let Some(t) = auth_at {
+                if t.elapsed() > Duration::from_millis(1500) {
+                    out.write_all(&pcap_global_header(LINKTYPE_USER0))
+                        .map_err(|e| format!("fifo: {e}"))?;
+                    out.flush().ok();
+                    kind = Some(0);
+                }
+            }
         }
         let msg_in = match sock.read() {
             Ok(m) => m,
@@ -263,16 +458,31 @@ fn capture(iface: &str, fifo: &str, password: &str, max_time: u64) -> Result<(),
                     if f.typ == (msg::AUTH | RESP_FLAG) {
                         if f.status() == Some(0) {
                             authed = true;
+                            auth_at = Some(Instant::now());
+                            sock.send(tungstenite::Message::Binary(desc.clone()))
+                                .map_err(|e| format!("desc send: {e}"))?;
                         } else {
                             return Err("device rejected the password".into());
                         }
+                    } else if f.typ == (msg::DATA_DESC | RESP_FLAG) && kind.is_none() {
+                        let k = f.body.get(1).copied().unwrap_or(0);
+                        let (linktype, _, _) = dlt_for_kind(k);
+                        out.write_all(&pcap_global_header(linktype))
+                            .map_err(|e| format!("fifo: {e}"))?;
+                        out.flush().ok();
+                        kind = Some(k);
                     }
                 }
             } else if ch == mux::DATA && authed && !payload.is_empty() {
-                // One console chunk = one pcap packet. Wireshark closing its end
-                // of the pipe surfaces as a write error — that's our stop signal.
-                if write_record(&mut out, &payload).is_err() {
-                    return Ok(());
+                // Hold DATA until DATA_DESC has set the link type + header.
+                if let Some(k) = kind {
+                    // Wireshark closing its pipe end surfaces as a write error —
+                    // that's our stop signal.
+                    if let Some(pkt) = frame_record(k, &payload) {
+                        if write_record(&mut out, &pkt).is_err() {
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
