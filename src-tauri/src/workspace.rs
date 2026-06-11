@@ -248,11 +248,97 @@ pub fn load_keys(app: &AppHandle) -> WorkspaceKeys {
         .unwrap_or_default()
 }
 
-/// Persist the workspace key store to `<ws>/.sutra/keys.json`.
-pub fn save_keys(app: &AppHandle, keys: WorkspaceKeys) -> Result<(), String> {
-    let path = dot_sutra(app).ok_or("no workspace selected")?.join("keys.json");
-    let json = serde_json::to_string_pretty(&keys).map_err(|e| e.to_string())?;
+// ---- workspace network model (.sutra/networks.json) ------------------------
+// The network is the unit everything hangs off: its decryption key lives here
+// (not as a device/link param — the firmware stays a dumb radio), alongside the
+// nodes we discover *passively* from sniffed traffic. Active discovery (ZDP) and
+// control fill in manufacturer/endpoints/clusters later.
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+pub struct NetNode {
+    pub addr: String,             // short address, "0x1234"
+    #[serde(default)]
+    pub role: String,             // Coordinator / Router / End Device / Node (inferred)
+    #[serde(default)]
+    pub channels: Vec<u8>,        // 802.15.4 channels it's been heard on
+    #[serde(default)]
+    pub count: u32,               // frames observed
+    #[serde(default)]
+    pub last_seen: String,        // ISO-ish stamp set by the host when saved
+    // -- enriched by active discovery (Phase B+), absent from passive capture --
+    #[serde(default)]
+    pub ieee: String,             // 64-bit IEEE/EUI address
+    #[serde(default)]
+    pub manufacturer: String,
+    #[serde(default)]
+    pub endpoints: Vec<NetEndpoint>,
+}
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+pub struct NetEndpoint {
+    pub id: u8,
+    #[serde(default)]
+    pub clusters: Vec<String>,    // input cluster ids, "0x0006"
+}
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+pub struct Network {
+    #[serde(default)]
+    pub label: String,            // human name
+    #[serde(default)]
+    pub pan: String,              // PAN id, "0x39fd" ("" until known)
+    #[serde(default)]
+    pub channel: u8,              // 0 = unknown
+    #[serde(default)]
+    pub key: String,              // network/trust-center key, 32 hex (decryption)
+    #[serde(default)]
+    pub nodes: Vec<NetNode>,
+}
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+pub struct Networks {
+    #[serde(default)]
+    pub networks: Vec<Network>,
+}
+
+/// Load the workspace network model. If `networks.json` doesn't exist yet but a
+/// legacy `keys.json` does, migrate its keys into keyless-but-keyed networks so
+/// no decryption key is lost in the move.
+pub fn load_networks(app: &AppHandle) -> Networks {
+    if let Some(dir) = dot_sutra(app) {
+        if let Ok(s) = std::fs::read_to_string(dir.join("networks.json")) {
+            if let Ok(n) = serde_json::from_str::<Networks>(&s) {
+                return n;
+            }
+        }
+    }
+    // migrate legacy keys.json → one network per stored key
+    let legacy = load_keys(app);
+    Networks {
+        networks: legacy
+            .zigbee
+            .into_iter()
+            .map(|k| Network { label: k.label, key: k.key, ..Default::default() })
+            .collect(),
+    }
+}
+
+/// Persist the workspace network model to `<ws>/.sutra/networks.json`.
+pub fn save_networks(app: &AppHandle, nets: &Networks) -> Result<(), String> {
+    let path = dot_sutra(app).ok_or("no workspace selected")?.join("networks.json");
+    let json = serde_json::to_string_pretty(nets).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// The (key, label) pairs to hand tshark for decryption — every network that has
+/// a key set. This is what the network model unlocks.
+pub fn dissect_keys(app: &AppHandle) -> Vec<ZigbeeKey> {
+    load_networks(app)
+        .networks
+        .into_iter()
+        .filter(|n| !n.key.trim().is_empty())
+        .map(|n| ZigbeeKey {
+            key: n.key,
+            label: if n.label.is_empty() { n.pan } else { n.label },
+        })
+        .collect()
 }
 
 // ---- tshark dissection -----------------------------------------------------

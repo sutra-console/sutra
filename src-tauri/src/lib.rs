@@ -257,24 +257,23 @@ fn dissect_ieee154(
     records: Vec<Vec<u8>>,
     tshark_path: Option<String>,
 ) -> Result<Vec<workspace::DecodedRow>, String> {
-    let keys = workspace::load_keys(&app)
-        .zigbee
+    let keys = workspace::dissect_keys(&app)
         .into_iter()
         .map(|k| (k.key, k.label))
         .collect();
     workspace::dissect_ieee154(records, tshark_path, keys)
 }
 
-/// Read the workspace credential store (Zigbee keys, …).
+/// Read the workspace network model (keys + discovered nodes).
 #[tauri::command]
-fn get_workspace_keys(app: tauri::AppHandle) -> workspace::WorkspaceKeys {
-    workspace::load_keys(&app)
+fn get_networks(app: tauri::AppHandle) -> workspace::Networks {
+    workspace::load_networks(&app)
 }
 
-/// Persist the workspace credential store.
+/// Persist the workspace network model.
 #[tauri::command]
-fn set_workspace_keys(app: tauri::AppHandle, keys: workspace::WorkspaceKeys) -> Result<(), String> {
-    workspace::save_keys(&app, keys)
+fn set_networks(app: tauri::AppHandle, networks: workspace::Networks) -> Result<(), String> {
+    workspace::save_networks(&app, &networks)
 }
 
 /// The I2C device definitions in the workspace's .sutra/i2c/ (raw JSON).
@@ -382,8 +381,8 @@ pub fn run() {
             save_ieee154_pcap,
             tshark_available,
             dissect_ieee154,
-            get_workspace_keys,
-            set_workspace_keys,
+            get_networks,
+            set_networks,
             list_i2c_defs,
             export_set,
             import_set,

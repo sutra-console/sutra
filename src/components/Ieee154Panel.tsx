@@ -24,6 +24,11 @@ const frameMac = (f: Ieee154Frame): number[] => {
 };
 const parseHex = (s: string): number[] =>
   (s.replace(/0x/gi, "").match(/[0-9a-fA-F]{2}/g) ?? []).map((b) => parseInt(b, 16));
+const roleClass = (role: string): string =>
+  role === "Coordinator" ? "text-amber-400"
+  : role === "Router" ? "text-sky-400"
+  : role === "End Device" ? "text-emerald-400"
+  : "text-muted-foreground";
 const fieldsText = (d: DecodedRow) => d.fields.map(([k, v]) => `${k}=${v}`).join("\n");
 const rowText = (d: DecodedRow) => {
   const f = d.fields.map(([k, v]) => `${k}=${v}`).join(" ");
@@ -44,7 +49,29 @@ interface Node {
   count: number;
   channels: Set<number>;
   types: Set<string>;
+  pans: Set<string>; // PAN ids this node appears on
+  broadcasts: boolean; // ever sent a broadcast (Link Status etc. ⇒ a router)
   last: number;
+}
+
+// A passively-discovered node, flattened for persistence into the workspace
+// network model (App merges these into networks[].nodes, grouped by PAN).
+export interface NodeSnapshot {
+  addr: string;
+  role: string;
+  pan: string;
+  channels: number[];
+  count: number;
+}
+
+// Infer the node's role from what we've *passively* seen it transmit — no key
+// needed. 0x0000 is always the coordinator; a node that polls its parent
+// (Data Request) is a sleepy end-device; one that broadcasts / beacons routes.
+export function nodeRole(n: Pick<Node, "addr" | "types" | "broadcasts">): string {
+  if (n.addr === "0x0000") return "Coordinator";
+  if (n.types.has("Data Request")) return "End Device";
+  if (n.broadcasts || n.types.has("Beacon")) return "Router";
+  return "Node";
 }
 
 export function Ieee154Panel({
@@ -55,6 +82,7 @@ export function Ieee154Panel({
   canDecode,
   onDecode,
   onInject,
+  onSaveNodes,
 }: {
   frames: Ieee154Frame[];
   total: number; // total received (the frames buffer is capped)
@@ -63,6 +91,7 @@ export function Ieee154Panel({
   canDecode?: boolean; // Wireshark/tshark present
   onDecode?: () => Promise<DecodedRow[]>; // dissect the current capture
   onInject?: (mac: number[]) => void; // transmit a MAC frame (no FCS); undefined if not connected
+  onSaveNodes?: (nodes: NodeSnapshot[]) => void; // persist discovered nodes to the workspace network model
 }) {
   const [mode, setMode] = useState<"nodes" | "packets" | "decoded">("nodes");
   const [decoded, setDecoded] = useState<DecodedRow[]>([]);
@@ -135,6 +164,8 @@ export function Ieee154Panel({
         d.last = i;
         d.channels.add(f.channel);
         d.types.add(f.type);
+        if (f.dstPan) d.pans.add(f.dstPan);
+        if (f.dst === "Broadcast") d.broadcasts = true;
       } else {
         m.set(f.src, {
           addr: f.src,
@@ -142,6 +173,8 @@ export function Ieee154Panel({
           count: 1,
           channels: new Set([f.channel]),
           types: new Set([f.type]),
+          pans: new Set(f.dstPan ? [f.dstPan] : []),
+          broadcasts: f.dst === "Broadcast",
           last: i,
         });
       }
@@ -157,6 +190,18 @@ export function Ieee154Panel({
     }
     return (c || a.addr.localeCompare(b.addr)) * sort.dir;
   });
+  const saveNodes = () => {
+    if (!onSaveNodes) return;
+    onSaveNodes(
+      nodeList.map((n) => ({
+        addr: n.addr,
+        role: nodeRole(n),
+        pan: [...n.pans][0] ?? "",
+        channels: [...n.channels].sort((a, b) => a - b),
+        count: n.count,
+      })),
+    );
+  };
   const toggleSort = (key: typeof sort.key) =>
     setSort((s) => (s.key === key ? { key, dir: (s.dir * -1) as 1 | -1 } : { key, dir: 1 }));
   const arrow = (key: typeof sort.key) => (sort.key === key ? (sort.dir === 1 ? " ▲" : " ▼") : "");
@@ -302,7 +347,14 @@ export function Ieee154Panel({
             </button>
           </span>
         )}
-        <Button variant="outline" size="sm" className="ml-auto h-7 gap-1" disabled={!frames.length}
+        {mode === "nodes" && onSaveNodes && (
+          <Button variant="outline" size="sm" className="ml-auto h-7 gap-1" disabled={!nodeList.length}
+            title="Save these discovered nodes into the workspace network model (grouped by PAN)"
+            onClick={saveNodes}>
+            <Radio className="size-3" /> Save nodes
+          </Button>
+        )}
+        <Button variant="outline" size="sm" className={`h-7 gap-1 ${mode === "nodes" && onSaveNodes ? "" : "ml-auto"}`} disabled={!frames.length}
           title="Save the capture as a pcap (opens in Wireshark)" onClick={onSavePcap}>
           <Download className="size-3" /> Save .pcap
         </Button>
@@ -317,6 +369,8 @@ export function Ieee154Panel({
             <thead className="sticky top-0 bg-background text-muted-foreground">
               <tr>
                 <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("addr")}>Address{arrow("addr")}</th>
+                <th className="px-2 py-1 font-normal">Role</th>
+                <th className="px-2 py-1 font-normal">PAN</th>
                 <th className="px-2 py-1 font-normal">Frame types</th>
                 <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("rssi")}>RSSI{arrow("rssi")}</th>
                 <th className="px-2 py-1 font-normal">Ch</th>
@@ -330,6 +384,8 @@ export function Ieee154Panel({
                   title="Filter the Packets view: click = this node · Ctrl/⌘+click = toggle · Shift+click = range"
                   onClick={(e) => clickNode(e, d.addr)}>
                   <td className="px-2 py-0.5">{d.addr}</td>
+                  <td className="px-2 py-0.5"><span className={roleClass(nodeRole(d))}>{nodeRole(d)}</span></td>
+                  <td className="px-2 py-0.5 text-muted-foreground">{[...d.pans].join(",") || "—"}</td>
                   <td className="px-2 py-0.5 text-muted-foreground">{[...d.types].join(", ")}</td>
                   <td className="px-2 py-0.5 tabular-nums">{d.rssi} dBm</td>
                   <td className="px-2 py-0.5 text-muted-foreground">{[...d.channels].sort((a, b) => a - b).join(",")}</td>

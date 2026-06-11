@@ -23,7 +23,7 @@ import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { BleSnifferPanel } from "@/components/BleSnifferPanel";
-import { Ieee154Panel } from "@/components/Ieee154Panel";
+import { Ieee154Panel, type NodeSnapshot } from "@/components/Ieee154Panel";
 import { ConfigureDevice } from "@/components/ConfigureDevice";
 import { I2cPanel } from "@/components/I2cPanel";
 import { NetworkConfig } from "@/components/NetworkConfig";
@@ -86,9 +86,10 @@ import {
   tsharkAvailable,
   dissectIeee154,
   dataWrite,
-  getWorkspaceKeys,
-  setWorkspaceKeys,
-  type ZigbeeKey,
+  getNetworks,
+  setNetworks as saveNetworksApi,
+  type Network,
+  type NetNode,
   wifiStatus,
   wsDiscover,
   type DiscoveredDuta,
@@ -253,7 +254,7 @@ export default function App() {
   const [ieee154Total, setIeee154Total] = useState(0); // total received (the buffer is capped)
   const [ch154, setCh154] = useState(0); // 802.15.4 sniffer channel (0 = auto-hop, 11..26 = pinned)
   const [tsharkOk, setTsharkOk] = useState(false); // Wireshark tshark present (enables in-app decode)
-  const [zbKeys, setZbKeys] = useState<ZigbeeKey[]>([]); // workspace Zigbee decryption keys
+  const [networks, setNetworks] = useState<Network[]>([]); // workspace network model (keys + nodes)
   const [draftKey, setDraftKey] = useState("");
   const [draftKeyLabel, setDraftKeyLabel] = useState("");
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
@@ -632,18 +633,53 @@ export default function App() {
     tsharkAvailable(settings.tsharkPath).then(setTsharkOk).catch(() => setTsharkOk(false));
   }, [settings.tsharkPath]);
 
-  // Load the workspace's saved Zigbee decryption keys (reload when it changes).
+  // Load the workspace's network model — keys + discovered nodes (reload on change).
   useEffect(() => {
-    getWorkspaceKeys().then((k) => setZbKeys(k.zigbee ?? [])).catch(() => setZbKeys([]));
+    getNetworks().then((n) => setNetworks(n.networks ?? [])).catch(() => setNetworks([]));
   }, [workspace]);
 
-  async function saveZbKeys(next: ZigbeeKey[]) {
-    setZbKeys(next);
+  async function saveNetworks(next: Network[]) {
+    setNetworks(next);
     try {
-      await setWorkspaceKeys({ zigbee: next });
+      await saveNetworksApi({ networks: next });
     } catch (e) {
-      setStatus(`save key failed: ${e}`);
+      setStatus(`save network failed: ${e}`);
     }
+  }
+
+  // Merge passively-discovered nodes into the workspace network model, grouped by
+  // PAN: each PAN becomes (or updates) a network you can then drop a key onto.
+  function saveDiscoveredNodes(snaps: NodeSnapshot[]) {
+    if (!workspace) {
+      setStatus("Select a workspace first to save the network");
+      return;
+    }
+    const next = networks.map((n) => ({ ...n, nodes: [...n.nodes] }));
+    const stamp = new Date().toISOString();
+    const byPan = new Map<string, NodeSnapshot[]>();
+    for (const s of snaps) {
+      const list = byPan.get(s.pan) ?? [];
+      list.push(s);
+      byPan.set(s.pan, list);
+    }
+    for (const [pan, list] of byPan) {
+      let net = next.find((n) => pan && n.pan === pan);
+      if (!net) {
+        net = { label: pan ? `PAN ${pan}` : "Unknown PAN", pan, channel: list[0]?.channels[0] ?? 0, key: "", nodes: [] };
+        next.push(net);
+      }
+      for (const s of list) {
+        const node: NetNode = {
+          addr: s.addr, role: s.role, channels: s.channels, count: s.count, lastSeen: stamp,
+          ieee: "", manufacturer: "", endpoints: [],
+        };
+        const existing = net.nodes.find((nd) => nd.addr === s.addr);
+        if (existing) Object.assign(existing, { ...node, ieee: existing.ieee, manufacturer: existing.manufacturer, endpoints: existing.endpoints });
+        else net.nodes.push(node);
+      }
+    }
+    saveNetworks(next);
+    setStatus(`saved ${snaps.length} node(s) across ${byPan.size} network(s)`);
   }
   // Accept what HA/Z2M actually hand you: 32 hex chars (any separators / 0x), or a
   // 16-byte decimal array like [1, 3, 5, …] (the configuration.yaml / diagnostics form).
@@ -656,13 +692,24 @@ export default function App() {
     const hex = s.replace(/0x/gi, "").replace(/[^0-9a-fA-F]/g, "");
     return hex.length === 32 ? hex.toLowerCase() : null;
   }
-  function addZbKey() {
+  function addNetwork() {
     const key = parseZbKey(draftKey);
     if (!key) {
       setStatus("Key must be 32 hex chars, or a 16-byte array (HA/Z2M form)");
       return;
     }
-    saveZbKeys([...zbKeys, { key, label: draftKeyLabel.trim() || `key ${zbKeys.length + 1}` }]);
+    // If we already discovered a network passively (a keyless PAN entry), drop the
+    // key onto it — sniff → Save nodes → paste key lights up decryption in place.
+    const label = draftKeyLabel.trim();
+    const keyless = networks.findIndex((n) => !n.key.trim());
+    if (keyless >= 0) {
+      saveNetworks(networks.map((n, i) => (i === keyless ? { ...n, key, label: label || n.label } : n)));
+    } else {
+      saveNetworks([
+        ...networks,
+        { label: label || `network ${networks.length + 1}`, key, pan: "", channel: 0, nodes: [] },
+      ]);
+    }
     setDraftKey("");
     setDraftKeyLabel("");
   }
@@ -1033,14 +1080,19 @@ export default function App() {
                           where?
                         </span>
                       </div>
-                      {zbKeys.map((k, i) => (
+                      {networks.map((net, i) => (
                         <div key={i} className="flex items-center gap-1 text-[11px]">
                           <span className="min-w-0 flex-1 truncate">
-                            <span className="text-muted-foreground">{k.label}</span>{" "}
-                            <span className="font-mono">{k.key.slice(0, 8)}…</span>
+                            <span className="text-muted-foreground">{net.label}</span>{" "}
+                            {net.key
+                              ? <span className="font-mono">{net.key.slice(0, 8)}…</span>
+                              : <span className="text-amber-500">no key</span>}
+                            {net.nodes.length > 0 && (
+                              <span className="text-muted-foreground"> · {net.nodes.length} nodes</span>
+                            )}
                           </span>
                           <button type="button" className="text-muted-foreground hover:text-destructive"
-                            title="Remove key" onClick={() => saveZbKeys(zbKeys.filter((_, j) => j !== i))}>
+                            title="Remove network" onClick={() => saveNetworks(networks.filter((_, j) => j !== i))}>
                             <X className="size-3" />
                           </button>
                         </div>
@@ -1050,13 +1102,13 @@ export default function App() {
                           placeholder="network key (hex or 16-byte array)"
                           value={draftKey} spellCheck={false}
                           onChange={(e) => setDraftKey(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && addZbKey()} />
-                        <Button size="sm" className="h-7 px-2 text-xs" disabled={!workspace} onClick={addZbKey}>
+                          onKeyDown={(e) => e.key === "Enter" && addNetwork()} />
+                        <Button size="sm" className="h-7 px-2 text-xs" disabled={!workspace} onClick={addNetwork}>
                           Add
                         </Button>
                       </div>
                       {!workspace && (
-                        <p className="text-[10px] text-destructive">Select a workspace to save keys.</p>
+                        <p className="text-[10px] text-destructive">Select a workspace to save the network.</p>
                       )}
                     </div>
                   )}
@@ -1302,6 +1354,7 @@ export default function App() {
                 canDecode={tsharkOk}
                 onDecode={decodeIeee154Capture}
                 onInject={connected ? injectIeee154 : undefined}
+                onSaveNodes={saveDiscoveredNodes}
               />
             ) : (
               <Terminal ref={terminalRef} connected={connected} />
@@ -1865,12 +1918,12 @@ export default function App() {
                 />
               </div>
 
-              {/* Zigbee network keys — saved in the workspace (.sutra/keys.json),
-                  fed to tshark to decrypt NWK/APS so frames decode to real ZCL
-                  commands instead of "Command". */}
+              {/* Networks — the workspace network model (.sutra/networks.json):
+                  each network's decryption key (fed to tshark to decode NWK/APS to
+                  real ZCL commands) plus the nodes discovered passively from sniffing. */}
               <div className="mt-1">
                 <div className="flex items-center gap-2">
-                  <div className="text-sm">Zigbee keys</div>
+                  <div className="text-sm">Networks</div>
                   <span
                     className="cursor-help text-[10px] text-muted-foreground underline decoration-dotted"
                     title={
@@ -1883,19 +1936,25 @@ export default function App() {
                   </span>
                 </div>
                 <div className="text-[11px] text-muted-foreground">
-                  Saved in the workspace. Decrypts your network so frames show the actual
-                  command, not just "Command".
-                  {!workspace && <span className="text-destructive"> Select a workspace to save keys.</span>}
+                  Saved in the workspace. The key decrypts your network so frames show the
+                  actual command, not just "Command"; nodes are discovered by sniffing
+                  (802.15.4 ▸ Nodes ▸ Save nodes).
+                  {!workspace && <span className="text-destructive"> Select a workspace to save.</span>}
                 </div>
               </div>
-              {zbKeys.map((k, i) => (
+              {networks.map((net, i) => (
                 <div key={i} className="flex items-center gap-2">
                   <span className="min-w-0 flex-1 truncate text-xs">
-                    <span className="text-muted-foreground">{k.label}</span>{" "}
-                    <span className="font-mono">{k.key.slice(0, 8)}…</span>
+                    <span className="text-muted-foreground">{net.label}</span>{" "}
+                    {net.key
+                      ? <span className="font-mono">{net.key.slice(0, 8)}…</span>
+                      : <span className="text-amber-500">no key</span>}
+                    {net.nodes.length > 0 && (
+                      <span className="text-muted-foreground"> · {net.nodes.length} nodes</span>
+                    )}
                   </span>
                   <Button variant="ghost" size="icon" className="size-7 text-muted-foreground"
-                    title="Remove key" onClick={() => saveZbKeys(zbKeys.filter((_, j) => j !== i))}>
+                    title="Remove network" onClick={() => saveNetworks(networks.filter((_, j) => j !== i))}>
                     <Trash2 />
                   </Button>
                 </div>
@@ -1903,10 +1962,10 @@ export default function App() {
               <div className="flex items-center gap-1">
                 <Input className="h-8 w-24 text-xs" placeholder="label"
                   value={draftKeyLabel} onChange={(e) => setDraftKeyLabel(e.target.value)} />
-                <Input className="h-8 min-w-0 flex-1 font-mono text-xs" placeholder="hex or 16-byte array"
+                <Input className="h-8 min-w-0 flex-1 font-mono text-xs" placeholder="key: hex or 16-byte array"
                   value={draftKey} spellCheck={false} onChange={(e) => setDraftKey(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addZbKey()} />
-                <Button size="sm" className="h-8" disabled={!workspace} onClick={addZbKey} title="Add key">
+                  onKeyDown={(e) => e.key === "Enter" && addNetwork()} />
+                <Button size="sm" className="h-8" disabled={!workspace} onClick={addNetwork} title="Add network key">
                   <Plus />
                 </Button>
               </div>

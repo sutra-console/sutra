@@ -139,18 +139,38 @@ export const tsharkAvailable = (tsharkPath?: string) =>
 export const dissectIeee154 = (records: number[][], tsharkPath?: string) =>
   invoke<DecodedRow[]>("dissect_ieee154", { records, tsharkPath: tsharkPath || null });
 
-export interface ZigbeeKey {
-  key: string; // 32 hex chars (16-byte network/TC key)
+// The workspace network model (.sutra/networks.json): the unit everything hangs
+// off. Its decryption key lives here (not on the device), next to the nodes we
+// discover passively from sniffed traffic.
+export interface NetEndpoint {
+  id: number;
+  clusters: string[]; // input cluster ids "0x0006"
+}
+export interface NetNode {
+  addr: string; // short address "0x1234"
+  role: string; // Coordinator / Router / End Device / Node
+  channels: number[];
+  count: number;
+  lastSeen: string;
+  ieee: string; // filled by active discovery (Phase B+)
+  manufacturer: string;
+  endpoints: NetEndpoint[];
+}
+export interface Network {
   label: string;
+  pan: string; // "0x39fd" or ""
+  channel: number; // 0 = unknown
+  key: string; // network/TC key, 32 hex (decryption)
+  nodes: NetNode[];
 }
-export interface WorkspaceKeys {
-  zigbee: ZigbeeKey[];
+export interface Networks {
+  networks: Network[];
 }
-/** Read the workspace credential store (Zigbee keys, …) from .sutra/keys.json. */
-export const getWorkspaceKeys = () => invoke<WorkspaceKeys>("get_workspace_keys");
-/** Persist the workspace credential store. Needs a workspace selected. */
-export const setWorkspaceKeys = (keys: WorkspaceKeys) =>
-  invoke<void>("set_workspace_keys", { keys });
+/** Read the workspace network model from .sutra/networks.json (migrates keys.json). */
+export const getNetworks = () => invoke<Networks>("get_networks");
+/** Persist the workspace network model. Needs a workspace selected. */
+export const setNetworks = (networks: Networks) =>
+  invoke<void>("set_networks", { networks });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });
