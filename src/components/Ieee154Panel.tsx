@@ -122,7 +122,9 @@ export function Ieee154Panel({
             m.set(k, { f, n: 1 });
           }
         }
-        return [...m.values()];
+        // 802.15.4 frames rarely repeat byte-for-byte, so grouping collapses
+        // little — cap the rendered rows so a busy network can't balloon the DOM.
+        return [...m.values()].slice(-400);
       })()
     : shown.slice(-300).map((f) => ({ f, n: 1 }));
 
@@ -214,7 +216,11 @@ export function Ieee154Panel({
                   <td className="px-2 py-0.5 text-muted-foreground">{f.type}</td>
                   <td className="px-2 py-0.5">{f.src || "—"}</td>
                   <td className="px-2 py-0.5">{f.dst || "—"}</td>
-                  <td className="whitespace-nowrap px-2 py-0.5 text-muted-foreground">{f.payloadHex}</td>
+                  <td className="px-2 py-0.5 text-muted-foreground">
+                    {/* 802.15.4 payloads run long — cap the column so the table
+                        can't grow wider than the viewport (which breaks scroll). */}
+                    <div className="max-w-[24rem] truncate" title={f.payloadHex}>{f.payloadHex}</div>
+                  </td>
                 </tr>
               ))}
             </tbody>
