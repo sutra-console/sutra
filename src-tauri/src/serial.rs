@@ -131,6 +131,9 @@ struct Connection {
     data_writer: Box<dyn SerialPort>, // also the CMD writer on a muxed link
     stop: Arc<AtomicBool>,
     muxed: bool, // single port carries DATA + CMD via skrit-mux
+    // The reader thread owns a cloned port handle; disconnect must JOIN it or
+    // the OS keeps the port busy and the next open fails (reconnect bug).
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Rolling console buffer with a monotonic total, so a macro can scan only the
@@ -361,7 +364,7 @@ fn spawn_data_reader(
     mut port: Box<dyn SerialPort>,
     stop: Arc<AtomicBool>,
     shared: Arc<Shared>,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buf = [0u8; 256];
         let mut online = true;
@@ -410,7 +413,7 @@ fn spawn_data_reader(
                 }
             }
         }
-    });
+    })
 }
 
 /// Connect a DATA port. `cmd_name` is the Duta CMD interface, or None for a
@@ -440,12 +443,13 @@ pub fn connect(
 
     let reader = data.try_clone().map_err(|e| format!("clone data: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
-    spawn_data_reader(app, reader, stop.clone(), shared.clone());
+    let handle = spawn_data_reader(app, reader, stop.clone(), shared.clone());
 
     *shared.mux_rx.lock().unwrap() = None;
     *shared.data_name.lock().unwrap() = Some(data_name.to_string());
     *shared.cmd_name.lock().unwrap() = cmd_name.map(|s| s.to_string());
-    *shared.conn.lock().unwrap() = Some(Connection { cmd, data_writer: data, stop, muxed: false });
+    *shared.conn.lock().unwrap() =
+        Some(Connection { cmd, data_writer: data, stop, muxed: false, reader: Some(handle) });
     Ok(())
 }
 
@@ -505,7 +509,7 @@ fn spawn_mux_reader(
     tx: std::sync::mpsc::Sender<Frame>,
     stop: Arc<AtomicBool>,
     shared: Arc<Shared>,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut reader = MuxReader::new();
         let mut buf = [0u8; 256];
@@ -561,7 +565,7 @@ fn spawn_mux_reader(
                 }
             }
         }
-    });
+    })
 }
 
 /// Connect a single muxed Duta port (ESP32 / Pico / nRF52840): DATA + CMD share
@@ -576,13 +580,13 @@ pub fn connect_muxed(shared: &Arc<Shared>, app: AppHandle, name: &str) -> Result
     let reader = port.try_clone().map_err(|e| format!("clone port: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel();
-    spawn_mux_reader(app, reader, tx, stop.clone(), shared.clone());
+    let handle = spawn_mux_reader(app, reader, tx, stop.clone(), shared.clone());
 
     *shared.mux_rx.lock().unwrap() = Some(rx);
     *shared.data_name.lock().unwrap() = Some(name.to_string());
     *shared.cmd_name.lock().unwrap() = Some(name.to_string());
     *shared.conn.lock().unwrap() =
-        Some(Connection { cmd: None, data_writer: port, stop, muxed: true });
+        Some(Connection { cmd: None, data_writer: port, stop, muxed: true, reader: Some(handle) });
     Ok(())
 }
 
@@ -621,18 +625,29 @@ pub fn mcp_connect_auto(shared: &Arc<Shared>) -> Result<String, String> {
 pub fn reconnect_data(shared: &Arc<Shared>, app: AppHandle) -> Result<(), String> {
     let data_name = shared.data_name.lock().unwrap().clone().ok_or("not connected")?;
     let params = shared.params.lock().unwrap().clone();
+    // Stop + join the old reader BEFORE reopening: its cloned handle keeps the
+    // port busy and the fresh open would fail.
+    let old = {
+        let mut guard = shared.conn.lock().unwrap();
+        let conn = guard.as_mut().ok_or("not connected")?;
+        conn.stop.store(true, Ordering::Relaxed);
+        conn.reader.take()
+    };
+    if let Some(h) = old {
+        let _ = h.join();
+    }
     let mut data = open_data(&data_name, &params)?;
     let _ = data.write_data_terminal_ready(true);
     let reader = data.try_clone().map_err(|e| format!("clone data: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
+    let handle = spawn_data_reader(app, reader, stop.clone(), shared.clone());
     {
         let mut guard = shared.conn.lock().unwrap();
         let conn = guard.as_mut().ok_or("not connected")?;
-        conn.stop.store(true, Ordering::Relaxed); // stop old reader
         conn.data_writer = data;
-        conn.stop = stop.clone();
+        conn.stop = stop;
+        conn.reader = Some(handle);
     }
-    spawn_data_reader(app, reader, stop, shared.clone());
     Ok(())
 }
 
@@ -645,10 +660,20 @@ pub fn set_params(shared: &Arc<Shared>, app: AppHandle, params: SerialParams) ->
 }
 
 pub fn disconnect(shared: &Arc<Shared>) {
-    if let Some(conn) = shared.conn.lock().unwrap().take() {
+    // Clear the names FIRST: the reader thread's auto-reopen path re-acquires
+    // the port by name, and a zombie holding the handle breaks the next connect.
+    *shared.data_name.lock().unwrap() = None;
+    *shared.cmd_name.lock().unwrap() = None;
+    if let Some(mut conn) = shared.conn.lock().unwrap().take() {
         conn.stop.store(true, Ordering::Relaxed);
+        let reader = conn.reader.take();
         drop(conn.cmd);
         drop(conn.data_writer);
+        // Join outside any lock: the OS only frees the port once the reader's
+        // cloned handle drops (read timeout 50ms; worst case its 750ms retry nap).
+        if let Some(h) = reader {
+            let _ = h.join();
+        }
     }
     crate::ble::disconnect(shared);
     crate::ws::disconnect(shared);

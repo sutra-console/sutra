@@ -763,7 +763,11 @@ export default function App() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="auto">
-                {dutaPorts.length >= 2 ? "Duta (auto)" : "Duta (none)"}
+                {connected && deviceName
+                  ? `Duta (${deviceName})`
+                  : dutaPorts.length > 0
+                    ? "Duta (auto)"
+                    : "Duta (none)"}
               </SelectItem>
               {ports.map((p) => (
                 <SelectItem key={p.name} value={p.name}>
