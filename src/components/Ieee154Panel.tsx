@@ -45,15 +45,39 @@ export function Ieee154Panel({
   const [decoded, setDecoded] = useState<DecodedRow[]>([]);
   const [decoding, setDecoding] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set()); // decoded rows showing their field tree
+  const [decFilter, setDecFilter] = useState(""); // free-text filter on protocol/summary
+  const [hideNoise, setHideNoise] = useState(true); // hide Ack / Data Request / Link Status chatter
+  const [live, setLive] = useState(false); // auto re-decode as frames arrive
+  // keep the latest onDecode + frame count in refs so the live interval (set up
+  // once) always decodes the CURRENT capture, not a stale closure.
+  const onDecodeRef = useRef(onDecode);
+  onDecodeRef.current = onDecode;
+  const framesCount = useRef(frames.length);
+  framesCount.current = frames.length;
+  const lastDecodedAt = useRef(0);
+
   async function runDecode() {
-    if (!onDecode) return;
+    if (!onDecodeRef.current) return;
     setDecoding(true);
     try {
-      setDecoded(await onDecode());
+      lastDecodedAt.current = framesCount.current;
+      setDecoded(await onDecodeRef.current());
     } finally {
       setDecoding(false);
     }
   }
+
+  // Live mode: re-dissect the current buffer every couple seconds when new frames
+  // have arrived. (A pragmatic "streaming" decode — re-runs tshark on the capped
+  // buffer; a true incremental pipeline would feed one long-lived tshark.)
+  useEffect(() => {
+    if (!live || mode !== "decoded" || !canDecode) return;
+    const id = window.setInterval(() => {
+      if (framesCount.current !== lastDecodedAt.current && !decoding) runDecode();
+    }, 2000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, mode, canDecode, decoding]);
   const [group, setGroup] = useState(true); // collapse identical packets to the latest
   const [sort, setSort] = useState<{ key: "addr" | "rssi" | "count"; dir: 1 | -1 }>({
     key: "addr",
@@ -152,6 +176,15 @@ export function Ieee154Panel({
       })()
     : shown.slice(-300).map((f) => ({ f, n: 1 }));
 
+  // Decoded view: hide mesh/MAC chatter and/or free-text match on protocol/info.
+  const noiseRe = /\back\b|data request|link status|beacon request|poll/i;
+  const shownDecoded = decoded.filter((d) => {
+    if (hideNoise && noiseRe.test(d.summary)) return false;
+    if (decFilter && !`${d.protocol} ${d.summary}`.toLowerCase().includes(decFilter.toLowerCase()))
+      return false;
+    return true;
+  });
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 text-foreground">
       <div className="flex items-center gap-2">
@@ -175,13 +208,34 @@ export function Ieee154Panel({
           </button>
         )}
         {mode === "decoded" && canDecode && (
-          <button type="button"
-            className="rounded border px-2 py-0.5 text-[11px] hover:bg-accent/50 disabled:opacity-50"
-            title="Re-run Wireshark dissection on the current capture"
-            disabled={decoding || !frames.length}
-            onClick={runDecode}>
-            {decoding ? "decoding…" : "↻ decode"}
-          </button>
+          <>
+            <button type="button"
+              className="rounded border px-2 py-0.5 text-[11px] hover:bg-accent/50 disabled:opacity-50"
+              title="Re-run Wireshark dissection on the current capture"
+              disabled={decoding || !frames.length}
+              onClick={runDecode}>
+              {decoding ? "decoding…" : "↻ decode"}
+            </button>
+            <button type="button"
+              className={`rounded border px-2 py-0.5 text-[11px] ${live ? "bg-accent" : "hover:bg-accent/50"}`}
+              title="Auto re-decode as new frames arrive"
+              onClick={() => setLive((v) => !v)}>
+              live
+            </button>
+            <button type="button"
+              className={`rounded border px-2 py-0.5 text-[11px] ${hideNoise ? "bg-accent" : "hover:bg-accent/50"}`}
+              title="Hide Ack / Data Request / Link Status mesh + MAC chatter"
+              onClick={() => setHideNoise((v) => !v)}>
+              hide noise
+            </button>
+            <input
+              className="h-6 w-40 rounded border bg-transparent px-2 text-[11px] outline-none focus:border-primary"
+              placeholder="filter protocol / info…"
+              value={decFilter}
+              spellCheck={false}
+              onChange={(e) => setDecFilter(e.target.value)}
+            />
+          </>
         )}
         {selected.size > 0 && (
           <button type="button"
@@ -267,7 +321,7 @@ export function Ieee154Panel({
               </tr>
             </thead>
             <tbody>
-              {decoded.map((d) => {
+              {shownDecoded.map((d) => {
                 const f = frames[d.num - 1];
                 const open = expanded.has(d.num);
                 return (
@@ -332,7 +386,13 @@ export function Ieee154Panel({
               ? "Dissecting with Wireshark…"
               : frames.length === 0
                 ? "Capture some 802.15.4 frames, then ↻ decode."
-                : "Hit ↻ decode to dissect the capture."}
+                : "Hit ↻ decode to dissect the capture, or turn on live."}
+          </p>
+        )}
+        {mode === "decoded" && canDecode && decoded.length > 0 && shownDecoded.length === 0 && (
+          <p className="px-2 py-6 text-center text-xs text-muted-foreground">
+            {decoded.length} frames, all hidden by the filter
+            {hideNoise && " / hide-noise"}.
           </p>
         )}
         {frames.length > 0 && mode === "packets" && shown.length === 0 && (
