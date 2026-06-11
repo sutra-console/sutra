@@ -113,21 +113,39 @@ function p_sniff.dissector(tvb, pinfo, tree)
   ptree:add(f.txadd, pdu(0, 1))
   ptree:add(f.rxadd, pdu(0, 1))
 
-  local name
+  local name, src, dst
   if ptype == 0 or ptype == 2 or ptype == 6 or ptype == 4 then
     -- ADV_IND / ADV_NONCONN_IND / ADV_SCAN_IND / SCAN_RSP: AdvA(6) + AD list
-    ptree:add(f.advaddr, pdu(2, 6)):set_text("Advertising Address: " .. addr_str(pdu(2, 6)))
+    src = addr_str(pdu(2, 6))
+    dst = "Broadcast"
+    ptree:add(f.advaddr, pdu(2, 6)):set_text("Advertising Address: " .. src)
     name = dissect_ad(st, pdu, 8, plen)
   elseif ptype == 1 then
-    -- ADV_DIRECT_IND: AdvA(6) + TargetA(6)
-    ptree:add(f.advaddr, pdu(2, 6)):set_text("Advertising Address: " .. addr_str(pdu(2, 6)))
+    -- ADV_DIRECT_IND: AdvA(6, source) -> TargetA(6, dest)
+    src = addr_str(pdu(2, 6))
+    ptree:add(f.advaddr, pdu(2, 6)):set_text("Advertising Address: " .. src)
     if plen >= 14 then
-      ptree:add(f.payload, pdu(8, 6)):set_text("Target Address: " .. addr_str(pdu(8, 6)))
+      dst = addr_str(pdu(8, 6))
+      ptree:add(f.payload, pdu(8, 6)):set_text("Target Address: " .. dst)
+    end
+  elseif ptype == 3 or ptype == 5 then
+    -- SCAN_REQ / CONNECT_IND: ScanA/InitA(6, source) -> AdvA(6, dest)
+    if plen >= 14 then
+      src = addr_str(pdu(2, 6))
+      dst = addr_str(pdu(8, 6))
+      ptree:add(f.payload, pdu(2, 6)):set_text("Scanner/Initiator Address: " .. src)
+      ptree:add(f.advaddr, pdu(8, 6)):set_text("Advertising Address: " .. dst)
+    else
+      st:add(f.payload, pdu(2, plen - 2))
     end
   else
-    -- SCAN_REQ / CONNECT_IND / ext: show the raw payload (not parsed in v1)
+    -- ext / unknown: show the raw payload (not parsed in v1)
     st:add(f.payload, pdu(2, plen - 2))
   end
+
+  -- Fill Wireshark's Source / Destination columns from the BLE addresses.
+  if src then pinfo.cols.src = src end
+  if dst then pinfo.cols.dst = dst end
 
   pinfo.cols.info = string.format("ch%d  %d dBm  %s%s", ch, rssi, tname,
     name and ("  — " .. name) or "")
