@@ -644,10 +644,21 @@ export default function App() {
       setStatus(`save key failed: ${e}`);
     }
   }
+  // Accept what HA/Z2M actually hand you: 32 hex chars (any separators / 0x), or a
+  // 16-byte decimal array like [1, 3, 5, …] (the configuration.yaml / diagnostics form).
+  function parseZbKey(input: string): string | null {
+    const s = input.trim();
+    const tokens = s.replace(/[[\]]/g, "").split(/[\s,]+/).filter(Boolean);
+    if (tokens.length === 16 && tokens.every((t) => /^\d+$/.test(t) && +t <= 255)) {
+      return tokens.map((t) => (+t).toString(16).padStart(2, "0")).join("");
+    }
+    const hex = s.replace(/0x/gi, "").replace(/[^0-9a-fA-F]/g, "");
+    return hex.length === 32 ? hex.toLowerCase() : null;
+  }
   function addZbKey() {
-    const key = draftKey.replace(/[^0-9a-fA-F]/g, "");
-    if (key.length !== 32) {
-      setStatus("Zigbee key must be 32 hex chars (16 bytes)");
+    const key = parseZbKey(draftKey);
+    if (!key) {
+      setStatus("Key must be 32 hex chars, or a 16-byte array (HA/Z2M form)");
       return;
     }
     saveZbKeys([...zbKeys, { key, label: draftKeyLabel.trim() || `key ${zbKeys.length + 1}` }]);
@@ -959,7 +970,7 @@ export default function App() {
               )}
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="start" className="w-72">
+          <PopoverContent align="start" className={dataDesc?.kind === DATA_KIND.IEEE802154 ? "w-80" : "w-72"}>
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
                 <Settings2 className="size-4" />
@@ -992,6 +1003,52 @@ export default function App() {
                     Pin a channel to follow one network, or Auto-hop to scan 11–26 for traffic
                     (sticking where it appears). Applies immediately.
                   </p>
+
+                  {/* Zigbee decryption keys, right where you configure the radio.
+                      Saved in the workspace; feeds tshark so frames decode to ZCL. */}
+                  {tsharkOk && (
+                    <div className="mt-1 flex flex-col gap-1 border-t pt-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-muted-foreground">Zigbee keys</span>
+                        <span
+                          className="cursor-help text-[10px] text-muted-foreground underline decoration-dotted"
+                          title={
+                            "Where to find your network key:\n" +
+                            "• Home Assistant (ZHA): Settings ▸ Devices & Services ▸ Zigbee Home Automation ▸ ⋮ ▸ Download diagnostics — the JSON has network_info.network_key.\n" +
+                            "• Zigbee2MQTT: data/configuration.yaml ▸ advanced ▸ network_key (a 16-byte array).\n" +
+                            "Paste hex (32 chars) or the 16-byte array; it's saved to the workspace."
+                          }
+                        >
+                          where?
+                        </span>
+                      </div>
+                      {zbKeys.map((k, i) => (
+                        <div key={i} className="flex items-center gap-1 text-[11px]">
+                          <span className="min-w-0 flex-1 truncate">
+                            <span className="text-muted-foreground">{k.label}</span>{" "}
+                            <span className="font-mono">{k.key.slice(0, 8)}…</span>
+                          </span>
+                          <button type="button" className="text-muted-foreground hover:text-destructive"
+                            title="Remove key" onClick={() => saveZbKeys(zbKeys.filter((_, j) => j !== i))}>
+                            <X className="size-3" />
+                          </button>
+                        </div>
+                      ))}
+                      <div className="flex items-center gap-1">
+                        <Input className="h-7 min-w-0 flex-1 font-mono text-[11px]"
+                          placeholder="network key (hex or 16-byte array)"
+                          value={draftKey} spellCheck={false}
+                          onChange={(e) => setDraftKey(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && addZbKey()} />
+                        <Button size="sm" className="h-7 px-2 text-xs" disabled={!workspace} onClick={addZbKey}>
+                          Add
+                        </Button>
+                      </div>
+                      {!workspace && (
+                        <p className="text-[10px] text-destructive">Select a workspace to save keys.</p>
+                      )}
+                    </div>
+                  )}
                 </>
               ) : (
                 <>
@@ -1800,7 +1857,19 @@ export default function App() {
                   fed to tshark to decrypt NWK/APS so frames decode to real ZCL
                   commands instead of "Command". */}
               <div className="mt-1">
-                <div className="text-sm">Zigbee keys</div>
+                <div className="flex items-center gap-2">
+                  <div className="text-sm">Zigbee keys</div>
+                  <span
+                    className="cursor-help text-[10px] text-muted-foreground underline decoration-dotted"
+                    title={
+                      "Where to find your network key:\n" +
+                      "• Home Assistant (ZHA): Settings ▸ Devices & Services ▸ Zigbee Home Automation ▸ ⋮ ▸ Download diagnostics — the JSON has network_info.network_key.\n" +
+                      "• Zigbee2MQTT: data/configuration.yaml ▸ advanced ▸ network_key (a 16-byte array)."
+                    }
+                  >
+                    where?
+                  </span>
+                </div>
                 <div className="text-[11px] text-muted-foreground">
                   Saved in the workspace. Decrypts your network so frames show the actual
                   command, not just "Command".
@@ -1822,7 +1891,7 @@ export default function App() {
               <div className="flex items-center gap-1">
                 <Input className="h-8 w-24 text-xs" placeholder="label"
                   value={draftKeyLabel} onChange={(e) => setDraftKeyLabel(e.target.value)} />
-                <Input className="h-8 min-w-0 flex-1 font-mono text-xs" placeholder="network key (32 hex)"
+                <Input className="h-8 min-w-0 flex-1 font-mono text-xs" placeholder="hex or 16-byte array"
                   value={draftKey} spellCheck={false} onChange={(e) => setDraftKey(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && addZbKey()} />
                 <Button size="sm" className="h-8" disabled={!workspace} onClick={addZbKey} title="Add key">
