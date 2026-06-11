@@ -50,6 +50,7 @@ export function BleSnifferPanel({
     dir: 1,
   });
   const [selected, setSelected] = useState<Set<string>>(new Set()); // device addrs filtering Packets
+  const [anchor, setAnchor] = useState<string | null>(null); // shift-range anchor (by addr)
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // Sticky-follow: keep the packet stream pinned to the bottom ONLY while the
@@ -101,13 +102,30 @@ export function BleSnifferPanel({
     setSort((s) => (s.key === key ? { key, dir: (s.dir * -1) as 1 | -1 } : { key, dir: 1 }));
   const arrow = (key: typeof sort.key) => (sort.key === key ? (sort.dir === 1 ? " ▲" : " ▼") : "");
 
-  // select devices (in the Devices table) to filter the Packets stream to them
-  const toggleSelect = (addr: string) =>
-    setSelected((s) => {
-      const n = new Set(s);
-      n.has(addr) ? n.delete(addr) : n.add(addr);
-      return n;
-    });
+  // select devices (in the Devices table) to filter the Packets stream to them.
+  // Plain click = just this row · Ctrl/⌘ = toggle one · Shift = range from anchor
+  // (looked up by address, so it survives the live re-sort).
+  function clickDevice(e: React.MouseEvent, addr: string) {
+    if (!addr) return;
+    if (e.shiftKey && anchor) {
+      const ai = devList.findIndex((d) => d.addr === anchor);
+      const ci = devList.findIndex((d) => d.addr === addr);
+      if (ai >= 0 && ci >= 0) {
+        const [lo, hi] = ai < ci ? [ai, ci] : [ci, ai];
+        setSelected(new Set(devList.slice(lo, hi + 1).map((d) => d.addr).filter(Boolean)));
+      }
+    } else if (e.ctrlKey || e.metaKey) {
+      setSelected((s) => {
+        const n = new Set(s);
+        n.has(addr) ? n.delete(addr) : n.add(addr);
+        return n;
+      });
+      setAnchor(addr);
+    } else {
+      setSelected(new Set([addr]));
+      setAnchor(addr);
+    }
+  }
   const shownPackets = selected.size
     ? packets.filter((p) => selected.has(p.addr))
     : packets;
@@ -130,7 +148,7 @@ export function BleSnifferPanel({
           <button type="button"
             className="inline-flex items-center gap-1 rounded border border-primary/60 px-1.5 py-0.5 text-[11px] text-primary hover:bg-accent"
             title="Packets are filtered to the selected devices — click to clear"
-            onClick={() => { setSelected(new Set()); }}>
+            onClick={() => { setSelected(new Set()); setAnchor(null); }}>
             filter: {selected.size} · clear <X className="size-3" />
           </button>
         )}
@@ -160,9 +178,9 @@ export function BleSnifferPanel({
             <tbody>
               {devList.map((d) => (
                 <tr key={d.addr || d.type}
-                  className={`cursor-pointer border-t ${selected.has(d.addr) ? "bg-primary/15" : "hover:bg-accent/40"}`}
-                  title="Click to filter the Packets view to this device"
-                  onClick={() => d.addr && toggleSelect(d.addr)}>
+                  className={`cursor-pointer select-none border-t ${selected.has(d.addr) ? "bg-primary/15" : "hover:bg-accent/40"}`}
+                  title="Filter the Packets view: click = this device · Ctrl/⌘+click = toggle · Shift+click = range"
+                  onClick={(e) => clickDevice(e, d.addr)}>
                   <td className="px-2 py-0.5">{d.addr || <span className="text-muted-foreground">—</span>}</td>
                   <td className="px-2 py-0.5 font-sans">{d.name || <span className="text-muted-foreground">·</span>}</td>
                   <td className="px-2 py-0.5 font-sans">{d.company || <span className="text-muted-foreground">·</span>}</td>
