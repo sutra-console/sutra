@@ -25,8 +25,8 @@ pub mod msg {
     pub const INPUT_DESC: u8 = 0x14;
     pub const INPUT_GET: u8 = 0x15;
     pub const OUTPUT_PULSE: u8 = 0x16;
-    pub const SERIAL_GET: u8 = 0x17;
-    pub const SERIAL_SET: u8 = 0x18;
+    pub const PROTO_GET: u8 = 0x17; // bridged-medium link params (idx, flags, value, opt0..2)
+    pub const PROTO_SET: u8 = 0x18;
     pub const SERIAL_SIGNAL: u8 = 0x19;
     pub const OUTPUT_PWM: u8 = 0x1A;
     pub const OUTPUT_RGB: u8 = 0x1B;
@@ -68,7 +68,7 @@ pub mod cap {
     pub const SPI: u8 = 0x04;
     pub const PARITY: u8 = 0x08;
     pub const MUX: u8 = 0x10; // single endpoint carries both channels (skrit-mux)
-    pub const SERIAL: u8 = 0x20; // honors SERIAL_GET/SET/SIGNAL
+    pub const SERIAL: u8 = 0x20; // honors PROTO_GET/SET + SERIAL_SIGNAL
     pub const REBOOT: u8 = 0x40; // honors REBOOT
     pub const PWM: u8 = 0x80; // honors OUTPUT_PWM on at least one output
 }
@@ -81,7 +81,13 @@ pub mod sig {
     pub const BREAK: u8 = 0x04;
 }
 
-// SERIAL_GET/SET parity byte.
+// PROTO flags byte (PROTO_GET/SET).
+#[allow(dead_code)]
+pub mod proto {
+    pub const FWD: u8 = 0x01; // forward this interface's RX to the host
+}
+
+// PROTO opt1 / UART parity byte.
 #[allow(dead_code)]
 pub mod parity {
     pub const NONE: u8 = 0;

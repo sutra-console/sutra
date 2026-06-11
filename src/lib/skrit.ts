@@ -15,8 +15,8 @@ export const MSG = {
   INPUT_DESC: 0x14,
   INPUT_GET: 0x15,
   OUTPUT_PULSE: 0x16,
-  SERIAL_GET: 0x17,
-  SERIAL_SET: 0x18,
+  PROTO_GET: 0x17,
+  PROTO_SET: 0x18,
   SERIAL_SIGNAL: 0x19,
   OUTPUT_PWM: 0x1a,
   OUTPUT_RGB: 0x1b,
@@ -218,12 +218,52 @@ export function hexToRgb(hex: string): Rgb | null {
   return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
 }
 
-/** Reconfigure the target DATA UART (baud + optional data bits / parity / stop). */
-export const serialSet = (baud: number, dataBits = 8, parity = PARITY.NONE, stopBits = 1) =>
-  sendCmd(MSG.SERIAL_SET, [
-    baud & 0xff, (baud >> 8) & 0xff, (baud >> 16) & 0xff, (baud >> 24) & 0xff,
-    dataBits, parity, stopBits,
+/** PROTO flags byte (PROTO_GET/SET). */
+export const PROTO = { FWD: 0x01 } as const;
+
+export interface ProtoParams {
+  idx: number;
+  flags: number; // bit0 = forward this interface's RX to the host
+  value: number; // medium's primary param (uart baud · i2c clock · 802.15.4 channel)
+  opt0: number; // uart: data_bits
+  opt1: number; // uart: parity
+  opt2: number; // uart: stop_bits
+}
+
+/** Configure a bridged interface's link params (PROTO_SET). idx selects the
+ *  interface; the rest is interpreted by the DATA kind. */
+export const protoSet = (
+  idx: number,
+  value: number,
+  { flags = PROTO.FWD, opt0 = 0, opt1 = 0, opt2 = 0 } = {},
+) =>
+  sendCmd(MSG.PROTO_SET, [
+    idx & 0xff, flags & 0xff,
+    value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >> 24) & 0xff,
+    opt0 & 0xff, opt1 & 0xff, opt2 & 0xff,
   ]);
+
+/** Read a bridged interface's link params (PROTO_GET). */
+export async function protoGet(idx = 0): Promise<ProtoParams> {
+  const b = (await sendCmd(MSG.PROTO_GET, [idx])).body; // [st, idx, flags, value(4), opt0, opt1, opt2]
+  return {
+    idx: b[1] ?? 0,
+    flags: b[2] ?? 0,
+    value: (b[3] | (b[4] << 8) | (b[5] << 16) | (b[6] << 24)) >>> 0,
+    opt0: b[7] ?? 0,
+    opt1: b[8] ?? 0,
+    opt2: b[9] ?? 0,
+  };
+}
+
+/** Reconfigure the target DATA UART over the wire (PROTO_SET; keeps forwarding on). */
+export const serialSet = (baud: number, dataBits = 8, parity = PARITY.NONE, stopBits = 1) =>
+  protoSet(0, baud, { opt0: dataBits, opt1: parity, opt2: stopBits });
+
+/** Pin the 802.15.4 sniffer's channel (11–26; 0 = promiscuous/auto-hop). */
+export const setIeee154Channel = (channel: number) => protoSet(0, channel);
+/** Read the 802.15.4 sniffer's current channel. */
+export const getIeee154Channel = async () => (await protoGet(0)).value;
 
 /** Drive DATA modem/break lines. mask/value are OR-combinations of SIG.*. */
 export const serialSignal = (mask: number, value: number) =>

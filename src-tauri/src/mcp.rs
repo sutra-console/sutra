@@ -15,7 +15,7 @@ use rmcp::{
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{cap, msg, parity, pincap, reboot, sig};
+use crate::protocol::{cap, msg, parity, pincap, proto, reboot, sig};
 use crate::serial::{self, Shared};
 
 #[derive(Clone)]
@@ -980,12 +980,16 @@ impl SutraTools {
             Some("even") => parity::EVEN,
             _ => parity::NONE,
         };
+        // PROTO_SET: idx(1), flags(1), value(4 LE), opt0..2. UART => value=baud,
+        // opt0=data_bits, opt1=parity, opt2=stop_bits; keep forwarding on.
         let body = vec![
+            0u8,        // idx
+            proto::FWD, // flags: keep RX forwarded
             (baud & 0xFF) as u8, ((baud >> 8) & 0xFF) as u8,
             ((baud >> 16) & 0xFF) as u8, ((baud >> 24) & 0xFF) as u8,
             data_bits.unwrap_or(8), parc, stop_bits.unwrap_or(1),
         ];
-        match self.cmd(msg::SERIAL_SET, body).await {
+        match self.cmd(msg::PROTO_SET, body).await {
             Ok(r) => status_text(&r, &format!("DATA UART set to {baud} baud")),
             Err(e) => format!("error: {e}"),
         }

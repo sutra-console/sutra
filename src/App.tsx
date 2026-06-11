@@ -81,6 +81,8 @@ import {
   rgbToHex,
   saveBlePcap,
   saveIeee154Pcap,
+  setIeee154Channel,
+  getIeee154Channel,
   wifiStatus,
   wsDiscover,
   type DiscoveredDuta,
@@ -241,6 +243,7 @@ export default function App() {
   const [bleTotal, setBleTotal] = useState(0); // total received (the buffer is capped)
   const [ieee154Frames, setIeee154Frames] = useState<Ieee154Frame[]>([]); // decoded 802.15.4 frames (last 2000)
   const [ieee154Total, setIeee154Total] = useState(0); // total received (the buffer is capped)
+  const [ch154, setCh154] = useState(0); // 802.15.4 sniffer channel (0 = auto-hop, 11..26 = pinned)
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
   const [i2cDefs, setI2cDefs] = useState<I2cDef[]>([]); // i2c device definitions from .sutra/i2c
   const [i2cPresent, setI2cPresent] = useState<Set<number>>(new Set()); // addresses seen in the last scan
@@ -604,6 +607,24 @@ export default function App() {
     };
   }, [dataDesc?.kind]);
 
+  // Read the 802.15.4 sniffer's current channel when its viewer becomes active.
+  useEffect(() => {
+    if (dataDesc?.kind === DATA_KIND.IEEE802154 && connected) {
+      getIeee154Channel().then(setCh154).catch(() => {});
+    }
+  }, [dataDesc?.kind, connected]);
+
+  /** Pin the 802.15.4 sniffer to a channel (0 = auto-hop). */
+  async function applyChannel(ch: number) {
+    try {
+      await setIeee154Channel(ch);
+      setCh154(ch);
+      setStatus(ch ? `802.15.4 channel ${ch}` : "802.15.4: auto-hop (11–26)");
+    } catch (e) {
+      setStatus(`channel set failed: ${e}`);
+    }
+  }
+
   /** Choose the workspace folder (.sutra/ for macros + captures). */
   async function chooseWorkspace() {
     try {
@@ -883,7 +904,11 @@ export default function App() {
           <PopoverTrigger asChild>
             <Button variant="outline" size="sm" className="gap-1.5">
               <Settings2 className="size-3.5" />
-              {connected ? `${dataPort ?? selectedPort} @ ${baud}` : "serial"}
+              {!connected
+                ? "serial"
+                : dataDesc?.kind === DATA_KIND.IEEE802154
+                  ? `802.15.4 · ${ch154 ? `ch ${ch154}` : "hop"}`
+                  : `${dataPort ?? selectedPort} @ ${baud}`}
               {connected && (
                 <span className={cn("size-1.5 rounded-full", linkOnline ? "bg-success" : "bg-destructive")} />
               )}
@@ -893,53 +918,82 @@ export default function App() {
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
                 <Settings2 className="size-4" />
-                <span className="text-sm font-semibold">Serial: DATA</span>
+                <span className="text-sm font-semibold">
+                  {dataDesc?.kind === DATA_KIND.IEEE802154 ? "802.15.4 radio" : "Serial: DATA"}
+                </span>
                 {dataPort && (
                   <Badge variant="secondary" className="ml-auto">{dataPort}</Badge>
                 )}
               </div>
-              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                Baud
-                <Select value={String(baud)} onValueChange={(v) => setBaud(+v)}>
-                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {BAUDS.map((b) => (<SelectItem key={b} value={String(b)}>{b}</SelectItem>))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                Parity
-                <Select value={parity} onValueChange={(v) => setParity(v as any)} disabled={parityLocked}>
-                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">none</SelectItem>
-                    <SelectItem value="odd">odd</SelectItem>
-                    <SelectItem value="even">even</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                Stop bits
-                <Select value={String(stopBits)} onValueChange={(v) => setStopBits(+v)} disabled={stopLocked}>
-                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="1">1</SelectItem>
-                    <SelectItem value="2">2</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <Button size="sm" variant="secondary" disabled={!connected} onClick={applySerial}>
-                Apply &amp; reconnect DATA
-              </Button>
-              <p className="text-[10px] leading-tight text-muted-foreground">
-                {!connected
-                  ? "Applied on connect. On a Duta only baud reaches the UART (8N1); on a generic adapter all settings apply."
-                  : hasCmd
-                    ? caps & CAP.PARITY
-                      ? "Baud + parity reach the UART; stop bits fixed at 1."
-                      : "Duta is 8N1, so only baud reaches the wire (build firmware with PARITY_SUPPORT for parity)."
-                    : "Applied to the serial adapter (real baud/parity/stop)."}
-              </p>
+              {dataDesc?.kind === DATA_KIND.IEEE802154 ? (
+                <>
+                  {/* The bridged medium is a radio, not a UART — so this slot configures
+                      the 802.15.4 channel (PROTO_SET) instead of baud/parity/stop. */}
+                  <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    Channel
+                    <Select value={String(ch154)} onValueChange={(v) => applyChannel(+v)} disabled={!connected}>
+                      <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="0">Auto-hop (11–26)</SelectItem>
+                        {Array.from({ length: 16 }, (_, i) => 11 + i).map((c) => (
+                          <SelectItem key={c} value={String(c)}>
+                            {c} · {2405 + (c - 11) * 5} MHz
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <p className="text-[10px] leading-tight text-muted-foreground">
+                    Pin a channel to follow one network, or Auto-hop to scan 11–26 for traffic
+                    (sticking where it appears). Applies immediately.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    Baud
+                    <Select value={String(baud)} onValueChange={(v) => setBaud(+v)}>
+                      <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {BAUDS.map((b) => (<SelectItem key={b} value={String(b)}>{b}</SelectItem>))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    Parity
+                    <Select value={parity} onValueChange={(v) => setParity(v as any)} disabled={parityLocked}>
+                      <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">none</SelectItem>
+                        <SelectItem value="odd">odd</SelectItem>
+                        <SelectItem value="even">even</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    Stop bits
+                    <Select value={String(stopBits)} onValueChange={(v) => setStopBits(+v)} disabled={stopLocked}>
+                      <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1">1</SelectItem>
+                        <SelectItem value="2">2</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button size="sm" variant="secondary" disabled={!connected} onClick={applySerial}>
+                    Apply &amp; reconnect DATA
+                  </Button>
+                  <p className="text-[10px] leading-tight text-muted-foreground">
+                    {!connected
+                      ? "Applied on connect. On a Duta only baud reaches the UART (8N1); on a generic adapter all settings apply."
+                      : hasCmd
+                        ? caps & CAP.PARITY
+                          ? "Baud + parity reach the UART; stop bits fixed at 1."
+                          : "Duta is 8N1, so only baud reaches the wire (build firmware with PARITY_SUPPORT for parity)."
+                        : "Applied to the serial adapter (real baud/parity/stop)."}
+                  </p>
+                </>
+              )}
             </div>
           </PopoverContent>
         </Popover>

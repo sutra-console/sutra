@@ -105,8 +105,8 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x14` | `INPUT_DESC` | `index(1)` | `index(1)`, `type(1)`, `name…` (type 0=digital, 1=analog) |
 | `0x15` | `INPUT_GET` | `index(1)` | `index(1)`, `value(2)` (digital 0/1, analog 0-1023) |
 | `0x16` | `OUTPUT_PULSE` | `index(1)`, `ms(2)` | (none) | drive output on, restore after `ms` (a momentary button for reset/power lines). |
-| `0x17` | `SERIAL_GET` | (none) | `baud(4)`, `data_bits(1)`, `parity(1)`, `stop_bits(1)`, the DATA-UART config. |
-| `0x18` | `SERIAL_SET` | `baud(4)`, `data_bits(1)`, `parity(1)`, `stop_bits(1)` | (none) | reconfigure DATA UART (works even on a muxed link where USB line-coding isn't available). Needs `CAP_SERIAL`. |
+| `0x17` | `PROTO_GET` | `idx(1)` | `idx(1)`, `flags(1)`, `value(4)`, `opt0(1)`, `opt1(1)`, `opt2(1)` — interface `idx`'s link params, interpreted by the DATA kind (see below). |
+| `0x18` | `PROTO_SET` | `idx(1)`, `flags(1)`, `value(4)`, `opt0(1)`, `opt1(1)`, `opt2(1)` | (none) | configure interface `idx`; takes effect immediately (works even on a muxed link where USB line-coding isn't available). Needs `CAP_SERIAL`. |
 | `0x19` | `SERIAL_SIGNAL` | `mask(1)`, `value(1)` | (none) | drive DATA modem/break lines. bit0=DTR, bit1=RTS, bit2=BREAK. Lets a host sequence ESP32 / AVR bootloader entry. Needs `CAP_SERIAL`. |
 | `0x1A` | `OUTPUT_PWM` | `index(1)`[, `duty(2)`] | `index(1)`, `duty(2)` | with `duty` (0-1023) = set the output's PWM duty; without = read it back. Needs `CAP_PWM`; non-PWM outputs answer `0x03`. A PWM output still honors `OUTPUT_SET` (0 = duty 0, 1 = full). |
 | `0x1B` | `OUTPUT_RGB` | `index(1)`[, [`pixel(1)`,] `r(1)`, `g(1)`, `b(1)`] | `index(1)`, `count(1)`, `r(1)`, `g(1)`, `b(1)` | addressable-LED color. Body **1** = read; **4** = set all pixels; **5** = set one `pixel`. Response carries the strip's pixel `count` and pixel 0's color. Only `OUTPUT_DESC` type 2 (rgb); others answer `0x03`. Still honors `OUTPUT_SET` (0 = off, 1 = white). |
@@ -396,6 +396,31 @@ ts_ms(4 LE) · channel(1, 11..26) · rssi(1, signed dBm) · lqi(1) · flags(1) �
 each record as `LINKTYPE_IEEE802_15_4_TAP`, so Wireshark's native 802.15.4 stack
 decodes Zigbee/Thread/6LoWPAN with no dissector from us. It's a single radio, so
 802.15.4 and BLE sniffing are separate sessions (one mode at a time).
+
+**Channel** is configured through `PROTO_GET`/`PROTO_SET` (the generic link-param
+messages — see below): `value` holds the 802.15.4 channel (11–26 to pin one,
+**0 = promiscuous/auto-hop** across 11–26, sticking where traffic appears);
+`opt0..2` are unused. So `PROTO_SET idx=0, value=15` pins channel 15.
+
+## Link parameters (`PROTO_GET` / `PROTO_SET`)
+
+A device configures the bridged medium's link parameters through one generic pair
+of messages, interpreted by the DATA kind. `idx` selects the interface (0 on a
+single-interface device; reserved for a future device that bridges several at
+once). `flags` carries per-interface options — **bit0 (`SKRIT_PROTO_FWD`) =
+forward this interface's RX to the host**; clear it to stop the device piping an
+interface you don't need (the CMD link still works; macros' `EXPECT` still sees
+the data). `value` (4 LE) is the medium's primary parameter; `opt0..2` are
+medium-specific:
+
+| DATA kind | `value` | `opt0` | `opt1` | `opt2` |
+|-----------|---------|--------|--------|--------|
+| uart | baud | data_bits | parity (`SKRIT_PAR_*`) | stop_bits |
+| i2c | clock (Hz) | — | — | — |
+| ieee802154 | channel (11–26; 0 = promiscuous/hop) | — | — | — |
+
+Unsupported on a device without `CAP_SERIAL`. `SERIAL_SIGNAL` (0x19, DTR/RTS/break)
+stays UART-specific. The capability bit is still named `CAP_SERIAL` for back-compat.
 
 ## WiFi provisioning (network-bridge devices)
 
