@@ -46,6 +46,8 @@ pub mod msg {
     pub const EE_WRITE: u8 = 0x31;
     pub const CFG_GET: u8 = 0x40;
     pub const CFG_SET: u8 = 0x41;
+    pub const I2C_SCAN: u8 = 0x60;
+    pub const I2C_XFER: u8 = 0x61;
     // Async device->host events (0x50..0x5F): RESP bit clear, SEQ=0.
     pub const EVENT_LOG: u8 = 0x50;
     pub const EVENT_INPUT: u8 = 0x51;

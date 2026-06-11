@@ -194,6 +194,24 @@ pub struct SetIoConfigArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct I2cTransferArgs {
+    /// 7-bit I2C address (0-127).
+    pub addr: u8,
+    /// Bytes to write, as hex (e.g. "01 AF"); empty/omitted for read-only.
+    #[serde(default)]
+    pub write_hex: String,
+    /// Number of bytes to read after the write (0 for write-only).
+    #[serde(default)]
+    pub read_len: u8,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetDataKindArgs {
+    /// The bridged medium: "uart" (console) or "i2c" (master + transaction records).
+    pub kind: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConfigureWifiArgs {
     /// The WiFi network name to join.
     pub ssid: String,
@@ -221,7 +239,8 @@ impl SutraTools {
             for n in [
                 "get_outputs", "set_output", "device_info", "pulse_output", "set_pwm",
                 "set_pwm_config", "set_rgb", "list_inputs", "read_input", "describe_device",
-                "describe_pins", "get_io_config", "set_io_config",
+                "describe_pins", "get_io_config", "set_io_config", "set_data_kind",
+                "i2c_scan", "i2c_transfer",
             ] {
                 router.remove_route(n);
             }
@@ -468,6 +487,78 @@ impl SutraTools {
             s.params.parity,
             s.params.stop_bits
         )
+    }
+
+    #[tool(
+        description = "Switch the Duta's bridged DATA medium: 'uart' (console) or 'i2c' (master mode — then use i2c_scan / i2c_transfer). Persisted on-device."
+    )]
+    async fn set_data_kind(
+        &self,
+        Parameters(SetDataKindArgs { kind }): Parameters<SetDataKindArgs>,
+    ) -> String {
+        let k = match kind.to_ascii_lowercase().as_str() {
+            "uart" => 0u8,
+            "i2c" => 6u8,
+            _ => return "kind must be 'uart' or 'i2c'".into(),
+        };
+        match self.cmd(msg::CFG_SET, vec![0x14, k]).await {
+            Ok(r) if r.status == Some(0) => format!("DATA kind is now {kind}"),
+            Ok(r) => format!("device returned status 0x{:02x} (no i2c support?)", r.status.unwrap_or(0)),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Scan the I2C bus (DATA kind must be 'i2c' — see set_data_kind). Returns the 7-bit addresses that ACKed."
+    )]
+    async fn i2c_scan(&self) -> String {
+        match self.cmd(msg::I2C_SCAN, vec![]).await {
+            Ok(r) if r.status == Some(0) => {
+                let bitmap = r.body.get(1..17).unwrap_or(&[]);
+                let found: Vec<String> = (0u8..128)
+                    .filter(|a| bitmap.get((a >> 3) as usize).is_some_and(|b| b & (1 << (a & 7)) != 0))
+                    .map(|a| format!("0x{a:02X}"))
+                    .collect();
+                if found.is_empty() { "(no devices ACKed)".into() } else { found.join(", ") }
+            }
+            Ok(r) => format!("status 0x{:02x} — is the DATA kind 'i2c'?", r.status.unwrap_or(0)),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "I2C master transfer: write `write_hex` bytes to `addr`, then read `read_len` bytes (either phase may be empty). NAK -> not-found. The transfer also lands in the DATA transaction log. DATA kind must be 'i2c'."
+    )]
+    async fn i2c_transfer(
+        &self,
+        Parameters(I2cTransferArgs { addr, write_hex, read_len }): Parameters<I2cTransferArgs>,
+    ) -> String {
+        let mut w: Vec<u8> = Vec::new();
+        for tok in write_hex.split_whitespace() {
+            match u8::from_str_radix(tok.trim_start_matches("0x"), 16) {
+                Ok(b) => w.push(b),
+                Err(_) => return format!("bad hex byte: {tok}"),
+            }
+        }
+        if w.len() > 200 || read_len > 200 || addr > 0x7F {
+            return "addr <= 0x7F; write/read <= 200 bytes".into();
+        }
+        let mut body = vec![addr, w.len() as u8];
+        body.extend_from_slice(&w);
+        body.push(read_len);
+        match self.cmd(msg::I2C_XFER, body).await {
+            Ok(r) if r.status == Some(0) => {
+                let read = r.body.get(2..).unwrap_or(&[]);
+                if read.is_empty() {
+                    "ok (write acknowledged)".into()
+                } else {
+                    format!("read: {}", read.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "))
+                }
+            }
+            Ok(r) if r.status == Some(0x05) => format!("NAK — no device at 0x{addr:02X}"),
+            Ok(r) => format!("status 0x{:02x}", r.status.unwrap_or(0)),
+            Err(e) => format!("error: {e}"),
+        }
     }
 
     #[tool(

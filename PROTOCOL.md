@@ -125,7 +125,9 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x30` | `EE_READ` | `addr(2)`, `n(1)` | `bytes…` |
 | `0x31` | `EE_WRITE` | `addr(2)`, `bytes…` | (none) |
 | `0x40` | `CFG_GET` | `key(1)` | `key(1)`, `value…` | device key/value config. Defined keys: `0x10` WiFi SSID (rw), `0x11` WiFi password (write-only — reads back `"*"` when one is stored, never the secret), `0x12` WiFi status (read-only: `state(1)` + detail string), `0x13` DATA pins (read-only: `tx(2,LE)` + `rx(2,LE)`, −1 = none — the bridge UART's pins, reserved from provisioning). Unknown key → `0x05 not-found`; a device with no config answers `0x07 unsupported`. |
-| `0x41` | `CFG_SET` | `key(1)`, `value…` | — | set a config key (validated + persisted by the device). See *WiFi provisioning*. |
+| `0x41` | `CFG_SET` | `key(1)`, `value…` | — | set a config key (validated + persisted by the device). See *WiFi provisioning*. Key `0x14` (DATA kind, rw) switches the bridged medium (uart ↔ i2c) on devices that support it. |
+| `0x60` | `I2C_SCAN` | (none) | `bitmap(16)` | probe all 7-bit addresses; bit `a&7` of byte `a>>3` set ⇒ address `a` ACKed. Needs DATA kind `i2c`. |
+| `0x61` | `I2C_XFER` | `addr(1)`, `wlen(1)`, `w…`, `rlen(1)` | `addr(1)`, `r…` | master transfer: write `w` then read `rlen` (either phase may be empty). NAK → status `0x05`. The transfer is also emitted as a DATA record. |
 
 Multi-byte integers are **little-endian** (matches SDCC and `x86`/`arm` hosts).
 
@@ -339,6 +341,26 @@ target. So a network device requires authentication:
 (accepts runtime IO provisioning, see below). USB/BLE devices leave the auth bits 0. Run a
 network bridge over `wss://` so the password and console aren't on the wire in the clear;
 the default-password gate is a usability backstop, not a substitute for TLS.
+
+## I²C — the first typed DATA stream
+
+A device whose bridge supports I²C advertises it via `CFG_GET 0x14` and switches
+media with `CFG_SET 0x14 <kind>` (persisted; `DATA_DESC` reflects the active
+kind). While kind = `i2c`:
+
+- The host drives the bus as **master** over CMD: `I2C_SCAN` (address bitmap)
+  and `I2C_XFER` (write-then-read, Bus-Pirate-style).
+- Every transfer is **also emitted on the DATA channel** as one record per mux
+  frame — the mux framing *is* the record framing:
+
+  ```
+  ts_ms(4 LE) · addr(1) · flags(1) · wlen(1) · w-bytes · rlen(1) · r-bytes
+  flags: bit0 = had a read phase · bit1 = NAK / failed
+  ```
+
+  so captures (Sutra's transaction log, `sutra-extcap` → Wireshark) see the bus
+  activity regardless of which link triggered it. The UART console is paused
+  while i2c is active; switch back with `CFG_SET 0x14 0x00` (uart).
 
 ## WiFi provisioning (network-bridge devices)
 

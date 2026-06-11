@@ -22,6 +22,7 @@ import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { ConfigureDevice } from "@/components/ConfigureDevice";
+import { I2cPanel } from "@/components/I2cPanel";
 import { NetworkConfig } from "@/components/NetworkConfig";
 import {
   ContextMenu,
@@ -45,9 +46,15 @@ import {
   connState,
   outputToggle,
   outputsBitmap,
+  CFG,
+  cfgGet,
   dataPins,
+  decodeI2cRecord,
   getInfo,
   getIoConfig,
+  onData,
+  setDataKind,
+  type I2cRecord,
   getDeviceName,
   getControls,
   getDataDesc,
@@ -215,6 +222,8 @@ export default function App() {
   const [hasWifi, setHasWifi] = useState(false); // device answers the WiFi CFG keys
   const [ioPins, setIoPins] = useState<Record<number, number>>({}); // output index -> GPIO (tooltips)
   const [dataSrcPins, setDataSrcPins] = useState<{ tx: number; rx: number } | null>(null); // Duta pins the bridged UART enters on
+  const [hasKindSwitch, setHasKindSwitch] = useState(false); // device supports CFG DATA_KIND
+  const [i2cRecords, setI2cRecords] = useState<I2cRecord[]>([]); // decoded i2c DATA records
   const [macros, setMacros] = useState<MacroRec[]>([]);
   const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
@@ -477,6 +486,7 @@ export default function App() {
       .catch(() => {});
     getDataDesc().then(setDataDesc).catch(() => setDataDesc(null)); // UART if unsupported
     dataPins().then(setDataSrcPins).catch(() => setDataSrcPins(null)); // which Duta pins the source rides
+    cfgGet(CFG.DATA_KIND).then(() => setHasKindSwitch(true)).catch(() => setHasKindSwitch(false));
     wifiStatus().then(() => setHasWifi(true)).catch(() => setHasWifi(false));
     try {
       const cs = await getControls();
@@ -515,6 +525,30 @@ export default function App() {
     setDataSrcPins(null);
     setIoPins({});
     setCaps(0);
+  }
+
+  // While the DATA kind is i2c, decode DATA frames into transaction records
+  // (the Terminal is unmounted then, so this is the only DATA consumer).
+  useEffect(() => {
+    if (dataDesc?.kind !== DATA_KIND.I2C) return;
+    let unlisten: (() => void) | undefined;
+    onData((bytes) => {
+      const rec = decodeI2cRecord(bytes);
+      if (rec) setI2cRecords((rs) => [...rs.slice(-499), rec]);
+    }).then((u) => (unlisten = u));
+    return () => unlisten?.();
+  }, [dataDesc?.kind]);
+
+  /** Switch the bridged medium and refresh what the device reports. */
+  async function switchDataKind(kind: number) {
+    try {
+      await setDataKind(kind);
+      setI2cRecords([]);
+      getDataDesc().then(setDataDesc).catch(() => {});
+      setStatus(kind === DATA_KIND.I2C ? "DATA: I2C master" : "DATA: UART console");
+    } catch (e) {
+      setStatus(`kind switch failed: ${e}`);
+    }
   }
 
   /** Right-click → copy a control's state as a runnable macro command. */
@@ -922,10 +956,25 @@ export default function App() {
                   {dataSrcPins.rx >= 0 ? `GPIO${dataSrcPins.rx}` : "—"}
                 </span>
               )}
-              {dataDesc && dataDesc.kind !== DATA_KIND.UART && (
+              {dataDesc && dataDesc.kind !== DATA_KIND.UART && dataDesc.kind !== DATA_KIND.I2C && (
                 <Badge variant="outline" className="text-[10px] font-normal">
                   raw {dataDesc.name} stream · typed viewer coming
                 </Badge>
+              )}
+              {hasKindSwitch && connected && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 text-[10px]"
+                  title="Switch the bridged medium"
+                  onClick={() =>
+                    switchDataKind(
+                      dataDesc?.kind === DATA_KIND.I2C ? DATA_KIND.UART : DATA_KIND.I2C,
+                    )
+                  }
+                >
+                  {dataDesc?.kind === DATA_KIND.I2C ? "→ UART" : "→ I²C"}
+                </Button>
               )}
             </CardTitle>
             <span className="text-xs text-muted-foreground">
@@ -934,7 +983,15 @@ export default function App() {
             </span>
           </CardHeader>
           <CardContent className="min-h-0 flex-1 bg-[#0a0a0b] p-2">
-            <Terminal ref={terminalRef} connected={connected} />
+            {dataDesc?.kind === DATA_KIND.I2C ? (
+              <I2cPanel
+                records={i2cRecords}
+                disabled={!connected || !hasCmd}
+                onClear={() => setI2cRecords([])}
+              />
+            ) : (
+              <Terminal ref={terminalRef} connected={connected} />
+            )}
           </CardContent>
         </Card>
 

@@ -34,6 +34,8 @@ export const MSG = {
   MACRO_RUN: 0x27,
   CFG_GET: 0x40,
   CFG_SET: 0x41,
+  I2C_SCAN: 0x60,
+  I2C_XFER: 0x61,
   EVENT_LOG: 0x50,
   EVENT_INPUT: 0x51,
 } as const;
@@ -345,7 +347,13 @@ export async function resetIoConfig(): Promise<void> {
 }
 
 // ---- key-value config (CFG_GET/CFG_SET) + WiFi provisioning ----
-export const CFG = { WIFI_SSID: 0x10, WIFI_PASS: 0x11, WIFI_STATUS: 0x12, DATA_PINS: 0x13 } as const;
+export const CFG = {
+  WIFI_SSID: 0x10,
+  WIFI_PASS: 0x11,
+  WIFI_STATUS: 0x12,
+  DATA_PINS: 0x13,
+  DATA_KIND: 0x14,
+} as const;
 /** WIFI_STATUS state byte. */
 export const WIFI = { OFF: 0, CONNECTING: 1, CONNECTED: 2, PORTAL: 3, FAILED: 4 } as const;
 export const WS_PORT = 9555;
@@ -379,6 +387,58 @@ export async function dataPins(): Promise<{ tx: number; rx: number }> {
     return n >= 0x8000 ? n - 0x10000 : n;
   };
   return { tx: s16(v[0] ?? 0xff, v[1] ?? 0xff), rx: s16(v[2] ?? 0xff, v[3] ?? 0xff) };
+}
+
+// ---- I2C (DATA kind i2c) ----
+/** Switch the bridged medium (DATA_KIND.UART <-> DATA_KIND.I2C); persisted on-device. */
+export async function setDataKind(kind: number): Promise<void> {
+  const resp = await sendCmd(MSG.CFG_SET, [CFG.DATA_KIND, kind]);
+  if (resp.status !== 0) throw new Error(`kind switch: status 0x${(resp.status ?? 0).toString(16)}`);
+}
+
+/** Probe all 7-bit addresses; returns the ones that ACKed. */
+export async function i2cScan(): Promise<number[]> {
+  const resp = await sendCmd(MSG.I2C_SCAN);
+  if (resp.status !== 0) throw new Error(`scan: status 0x${(resp.status ?? 0).toString(16)}`);
+  const bitmap = resp.body.slice(1); // [status, bitmap(16)]
+  const found: number[] = [];
+  for (let a = 0; a < 128; a++) if ((bitmap[a >> 3] ?? 0) & (1 << (a & 7))) found.push(a);
+  return found;
+}
+
+/** Master transfer: write `w`, then read `rlen` bytes (either may be empty). */
+export async function i2cXfer(addr: number, w: number[], rlen: number): Promise<number[]> {
+  const resp = await sendCmd(MSG.I2C_XFER, [addr, w.length, ...w, rlen]);
+  if (resp.status !== 0) throw new Error(`xfer: status 0x${(resp.status ?? 0).toString(16)}`);
+  return resp.body.slice(2); // [status, addr, r...]
+}
+
+/** One decoded i2c DATA record (one mux DATA frame = one record). */
+export interface I2cRecord {
+  ts: number; // device millis
+  addr: number;
+  read: boolean;
+  nak: boolean;
+  w: number[];
+  r: number[];
+}
+/** Decode an i2c DATA-channel record; null if the payload is malformed. */
+export function decodeI2cRecord(p: number[] | Uint8Array): I2cRecord | null {
+  const b = Array.from(p);
+  if (b.length < 8) return null;
+  const wlen = b[6] ?? 0;
+  const rlenAt = 7 + wlen;
+  if (b.length < rlenAt + 1) return null;
+  const rlen = b[rlenAt] ?? 0;
+  if (b.length < rlenAt + 1 + rlen) return null;
+  return {
+    ts: (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0,
+    addr: b[4],
+    read: !!(b[5] & 1),
+    nak: !!(b[5] & 2),
+    w: b.slice(7, 7 + wlen),
+    r: b.slice(rlenAt + 1, rlenAt + 1 + rlen),
+  };
 }
 
 /** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */

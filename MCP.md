@@ -24,6 +24,9 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `describe_pins` | none | the provisioning menu: GPIOs that can take an IO role, with supported roles + cautions (provision-capable devices) |
 | `get_io_config` | none | the current IO table (role + pin + name per output) |
 | `set_io_config` | `outputs?` / `reset?` | re-provision the IO table at runtime (or revert to default); persists, applies after `reboot_device` |
+| `set_data_kind` | `kind` | switch the bridged medium: `uart` (console) or `i2c` (master) |
+| `i2c_scan` | none | probe the I2C bus; returns the addresses that ACKed (kind `i2c`) |
+| `i2c_transfer` | `addr`, `write_hex?`, `read_len?` | master write-then-read; NAK → not-found (kind `i2c`) |
 | `list_inputs` | none | inputs with current values (digital/analog) |
 | `read_input` | `index` | read one input value |
 | `set_baud` | `baud`, `data_bits?`, `parity?`, `stop_bits?` | reconfigure the **target** DATA UART (over CMD) |
