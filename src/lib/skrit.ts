@@ -134,9 +134,23 @@ export interface DecodedRow {
 /** Is Wireshark's tshark available for in-app decoding? (optional path override) */
 export const tsharkAvailable = (tsharkPath?: string) =>
   invoke<boolean>("tshark_available", { tsharkPath: tsharkPath || null });
-/** Dissect raw ieee802154 records with tshark (rtshark) → per-packet decode rows. */
+/** Dissect raw ieee802154 records with tshark (rtshark) → per-packet decode rows.
+ *  Uses the workspace's saved Zigbee keys for decryption. */
 export const dissectIeee154 = (records: number[][], tsharkPath?: string) =>
   invoke<DecodedRow[]>("dissect_ieee154", { records, tsharkPath: tsharkPath || null });
+
+export interface ZigbeeKey {
+  key: string; // 32 hex chars (16-byte network/TC key)
+  label: string;
+}
+export interface WorkspaceKeys {
+  zigbee: ZigbeeKey[];
+}
+/** Read the workspace credential store (Zigbee keys, …) from .sutra/keys.json. */
+export const getWorkspaceKeys = () => invoke<WorkspaceKeys>("get_workspace_keys");
+/** Persist the workspace credential store. Needs a workspace selected. */
+export const setWorkspaceKeys = (keys: WorkspaceKeys) =>
+  invoke<void>("set_workspace_keys", { keys });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });

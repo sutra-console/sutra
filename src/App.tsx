@@ -85,6 +85,9 @@ import {
   getIeee154Channel,
   tsharkAvailable,
   dissectIeee154,
+  getWorkspaceKeys,
+  setWorkspaceKeys,
+  type ZigbeeKey,
   wifiStatus,
   wsDiscover,
   type DiscoveredDuta,
@@ -249,6 +252,9 @@ export default function App() {
   const [ieee154Total, setIeee154Total] = useState(0); // total received (the buffer is capped)
   const [ch154, setCh154] = useState(0); // 802.15.4 sniffer channel (0 = auto-hop, 11..26 = pinned)
   const [tsharkOk, setTsharkOk] = useState(false); // Wireshark tshark present (enables in-app decode)
+  const [zbKeys, setZbKeys] = useState<ZigbeeKey[]>([]); // workspace Zigbee decryption keys
+  const [draftKey, setDraftKey] = useState("");
+  const [draftKeyLabel, setDraftKeyLabel] = useState("");
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
   const [i2cDefs, setI2cDefs] = useState<I2cDef[]>([]); // i2c device definitions from .sutra/i2c
   const [i2cPresent, setI2cPresent] = useState<Set<number>>(new Set()); // addresses seen in the last scan
@@ -624,6 +630,30 @@ export default function App() {
   useEffect(() => {
     tsharkAvailable(settings.tsharkPath).then(setTsharkOk).catch(() => setTsharkOk(false));
   }, [settings.tsharkPath]);
+
+  // Load the workspace's saved Zigbee decryption keys (reload when it changes).
+  useEffect(() => {
+    getWorkspaceKeys().then((k) => setZbKeys(k.zigbee ?? [])).catch(() => setZbKeys([]));
+  }, [workspace]);
+
+  async function saveZbKeys(next: ZigbeeKey[]) {
+    setZbKeys(next);
+    try {
+      await setWorkspaceKeys({ zigbee: next });
+    } catch (e) {
+      setStatus(`save key failed: ${e}`);
+    }
+  }
+  function addZbKey() {
+    const key = draftKey.replace(/[^0-9a-fA-F]/g, "");
+    if (key.length !== 32) {
+      setStatus("Zigbee key must be 32 hex chars (16 bytes)");
+      return;
+    }
+    saveZbKeys([...zbKeys, { key, label: draftKeyLabel.trim() || `key ${zbKeys.length + 1}` }]);
+    setDraftKey("");
+    setDraftKeyLabel("");
+  }
 
   /** Dissect the current 802.15.4 capture with tshark (Zigbee/Thread/Matter). */
   const decodeIeee154Capture = () =>
@@ -1764,6 +1794,40 @@ export default function App() {
                   spellCheck={false}
                   onChange={(e) => setSetting("tsharkPath", e.target.value)}
                 />
+              </div>
+
+              {/* Zigbee network keys — saved in the workspace (.sutra/keys.json),
+                  fed to tshark to decrypt NWK/APS so frames decode to real ZCL
+                  commands instead of "Command". */}
+              <div className="mt-1">
+                <div className="text-sm">Zigbee keys</div>
+                <div className="text-[11px] text-muted-foreground">
+                  Saved in the workspace. Decrypts your network so frames show the actual
+                  command, not just "Command".
+                  {!workspace && <span className="text-destructive"> Select a workspace to save keys.</span>}
+                </div>
+              </div>
+              {zbKeys.map((k, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-xs">
+                    <span className="text-muted-foreground">{k.label}</span>{" "}
+                    <span className="font-mono">{k.key.slice(0, 8)}…</span>
+                  </span>
+                  <Button variant="ghost" size="icon" className="size-7 text-muted-foreground"
+                    title="Remove key" onClick={() => saveZbKeys(zbKeys.filter((_, j) => j !== i))}>
+                    <Trash2 />
+                  </Button>
+                </div>
+              ))}
+              <div className="flex items-center gap-1">
+                <Input className="h-8 w-24 text-xs" placeholder="label"
+                  value={draftKeyLabel} onChange={(e) => setDraftKeyLabel(e.target.value)} />
+                <Input className="h-8 min-w-0 flex-1 font-mono text-xs" placeholder="network key (32 hex)"
+                  value={draftKey} spellCheck={false} onChange={(e) => setDraftKey(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && addZbKey()} />
+                <Button size="sm" className="h-8" disabled={!workspace} onClick={addZbKey} title="Add key">
+                  <Plus />
+                </Button>
               </div>
             </div>
 
