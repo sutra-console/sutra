@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth, Globe,
-  Radio, Activity, Terminal as TerminalIcon,
+  Radio, Activity, Terminal as TerminalIcon, FolderOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -71,7 +71,10 @@ import {
   outputPwmGet,
   pwmConfigGet,
   pwmConfigSet,
+  getWorkspace,
+  pickWorkspace,
   rgbToHex,
+  saveBlePcap,
   wifiStatus,
   wsDiscover,
   type DiscoveredDuta,
@@ -229,6 +232,7 @@ export default function App() {
   const [hasKindSwitch, setHasKindSwitch] = useState(false); // device supports CFG DATA_KIND
   const [i2cRecords, setI2cRecords] = useState<I2cRecord[]>([]); // decoded i2c DATA records
   const [blePackets, setBlePackets] = useState<BleSniffPacket[]>([]); // decoded ble-sniff records
+  const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
   const [macros, setMacros] = useState<MacroRec[]>([]);
   const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
@@ -286,6 +290,7 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.add("dark");
     refreshPorts();
+    getWorkspace().then(setWorkspace).catch(() => {});
     macrosGet().then(setMacros).catch(() => {});
     syncConnState(); // adopt a connection the backend already holds (after a reload)
 
@@ -552,6 +557,33 @@ export default function App() {
     return () => unlisten?.();
   }, [dataDesc?.kind]);
 
+  /** Choose the workspace folder (.sutra/ for macros + captures). */
+  async function chooseWorkspace() {
+    try {
+      const path = await pickWorkspace();
+      if (path) {
+        setWorkspace(path);
+        macrosGet().then(setMacros).catch(() => {}); // store re-pointed into .sutra
+        setStatus(`workspace: ${path}`);
+      }
+    } catch (e) {
+      setStatus(`workspace failed: ${e}`);
+    }
+  }
+
+  /** Save the current BLE capture as a pcap (into the workspace, else a dialog). */
+  async function saveSniffPcap() {
+    const records = blePackets.map((p) => p.raw);
+    if (!records.length) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    try {
+      const path = await saveBlePcap(`ble-${stamp}`, records);
+      setStatus(`saved ${records.length} packets → ${path}`);
+    } catch (e) {
+      setStatus(`pcap save failed: ${e}`);
+    }
+  }
+
   /** Switch the bridged medium and refresh what the device reports. */
   async function switchDataKind(kind: number) {
     try {
@@ -732,6 +764,18 @@ export default function App() {
           {!connected ? "offline" : linkOnline ? "online" : "target offline"}
         </Badge>
         {deviceName && <span className="text-xs text-muted-foreground">· {deviceName}</span>}
+
+        {/* workspace folder (macros + captures land in its .sutra/) */}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="ml-1 h-7 max-w-[14rem] gap-1.5 text-muted-foreground"
+          title={workspace ? `Workspace: ${workspace}\nMacros + captures save to .sutra/` : "Choose a workspace folder (.sutra/ for macros + captures)"}
+          onClick={chooseWorkspace}
+        >
+          <FolderOpen className="size-3.5 shrink-0" />
+          <span className="truncate">{workspace ? workspace.split(/[/\\]/).pop() : "No workspace"}</span>
+        </Button>
 
         {/* MCP settings popover */}
         <Popover>
@@ -993,7 +1037,11 @@ export default function App() {
             {dataDesc?.kind === DATA_KIND.I2C ? (
               <I2cPanel records={i2cRecords} disabled={!connected || !hasCmd} onClear={() => setI2cRecords([])} />
             ) : dataDesc?.kind === DATA_KIND.BLE_SNIFF ? (
-              <BleSnifferPanel packets={blePackets} onClear={() => setBlePackets([])} />
+              <BleSnifferPanel
+                packets={blePackets}
+                onClear={() => setBlePackets([])}
+                onSavePcap={saveSniffPcap}
+              />
             ) : (
               <Terminal ref={terminalRef} connected={connected} />
             )}

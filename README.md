@@ -41,6 +41,10 @@ drives any plain COM port.
 - **MCP server**: per-tool toggles; lets an LLM read the console, run/author
   macros (run-by-name only), drive outputs (incl. PWM config + RGB), provision IO,
   and manage the connection.
+- **Workspace** — pick a project folder (header, top-left) and Sutra keeps a
+  `.sutra/` directory inside it: macros (`macros.json`) and capture exports
+  (`captures/*.pcap`) live there, so a project's automation and recordings travel
+  with the folder. Without one, macros fall back to the app data dir.
 - **Wireshark integration**: the bundled `sutra-extcap` binary turns every Duta
   into a live Wireshark capture interface — USB-attached ones (probed + listed by
   name) and network ones (mDNS-discovered, auth-gated) alike, with the DATA stream

@@ -1,7 +1,7 @@
 // BLE sniffer view — the typed viewer for DATA kind ble-sniff. Two modes:
 // a "Devices" table (grouped by advertiser address — what's nearby) and a live
 // "Packets" stream. Fed by decoded sniff records from the DATA channel.
-import { Radio, Trash2 } from "lucide-react";
+import { Download, Radio, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -36,9 +36,11 @@ interface Device {
 export function BleSnifferPanel({
   packets,
   onClear,
+  onSavePcap,
 }: {
   packets: BleSniffPacket[];
   onClear: () => void;
+  onSavePcap: () => void;
 }) {
   const [mode, setMode] = useState<"devices" | "packets">("devices");
   const logEnd = useRef<HTMLDivElement | null>(null);
@@ -88,7 +90,11 @@ export function BleSnifferPanel({
         </div>
         <Badge variant="secondary" className="gap-1"><Radio className="size-3" /> {devList.length} devices</Badge>
         <span className="text-xs text-muted-foreground">{packets.length} packets</span>
-        <Button variant="ghost" size="sm" className="ml-auto h-7 gap-1 text-muted-foreground" onClick={onClear}>
+        <Button variant="outline" size="sm" className="ml-auto h-7 gap-1" disabled={!packets.length}
+          title="Save the capture as a pcap (opens in Wireshark)" onClick={onSavePcap}>
+          <Download className="size-3" /> Save .pcap
+        </Button>
+        <Button variant="ghost" size="sm" className="h-7 gap-1 text-muted-foreground" onClick={onClear}>
           <Trash2 className="size-3" /> Clear
         </Button>
       </div>

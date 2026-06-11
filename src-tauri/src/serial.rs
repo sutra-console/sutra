@@ -859,6 +859,19 @@ pub fn init_macros(shared: &Arc<Shared>, app: AppHandle, path: std::path::PathBu
     *shared.macros_path.lock().unwrap() = Some(path);
 }
 
+/// Re-point the macro store at a new path (workspace change). If the new file
+/// exists, its macros replace the in-memory set; otherwise the current set is
+/// migrated to it. Persists + notifies the UI either way.
+pub fn relocate_macros(shared: &Arc<Shared>, path: std::path::PathBuf) {
+    if let Ok(data) = std::fs::read(&path) {
+        if let Ok(list) = serde_json::from_slice::<Vec<MacroRec>>(&data) {
+            *shared.macros.lock().unwrap() = list;
+        }
+    }
+    *shared.macros_path.lock().unwrap() = Some(path);
+    persist(shared); // writes the (possibly migrated) set + emits sutra://macros
+}
+
 fn persist(shared: &Arc<Shared>) {
     let list = shared.macros.lock().unwrap().clone();
     if let Some(path) = shared.macros_path.lock().unwrap().clone() {

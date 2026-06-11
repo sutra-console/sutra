@@ -113,6 +113,15 @@ export interface DiscoveredDuta {
 /** Browse the LAN for Dutas advertising `_skrit._tcp` (mDNS); ~2.5s scan. */
 export const wsDiscover = (timeoutMs?: number) =>
   invoke<DiscoveredDuta[]>("ws_discover", { timeoutMs });
+
+// ---- workspace (a folder with a .sutra/ for macros + captures) ----
+/** The current workspace folder, or null if none is selected. */
+export const getWorkspace = () => invoke<string | null>("get_workspace");
+/** Open a folder picker and adopt it as the workspace; returns the path or null. */
+export const pickWorkspace = () => invoke<string | null>("pick_workspace");
+/** Save ble-sniff records as a pcap (workspace captures/ or a save dialog). */
+export const saveBlePcap = (name: string, records: number[][]) =>
+  invoke<string>("save_ble_pcap", { name, records });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });
@@ -475,6 +484,7 @@ export interface BleSniffPacket {
   name: string; // local name from AD, if any
   company: string; // manufacturer-data company, if any
   payloadHex: string; // raw AdvData (after AdvA) as hex
+  raw: number[]; // the original record bytes (for pcap export)
 }
 
 const macStr = (b: number[]) =>
@@ -517,7 +527,7 @@ export function decodeBleSniff(p: number[] | Uint8Array): BleSniffPacket | null 
     i += 1 + len;
   }
   const payloadHex = payload.map((x) => x.toString(16).padStart(2, "0").toUpperCase()).join(" ");
-  return { ts, channel, rssi, type, addr, name, company, payloadHex };
+  return { ts, channel, rssi, type, addr, name, company, payloadHex, raw: b };
 }
 
 /** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */

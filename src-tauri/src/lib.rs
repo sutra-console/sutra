@@ -2,6 +2,7 @@ mod ble;
 mod mcp;
 pub mod protocol;
 pub mod serial;
+mod workspace;
 pub mod ws;
 
 use std::sync::{Arc, Mutex};
@@ -212,6 +213,30 @@ fn macro_delete(state: tauri::State<AppState>, name: String) {
     serial::macro_delete(&state.shared, &name);
 }
 
+// ---- workspace (a folder with a .sutra/ for macros + captures) ----
+#[tauri::command]
+fn get_workspace(app: tauri::AppHandle) -> Option<String> {
+    workspace::current(&app).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Open a folder picker; on selection, adopt it as the workspace and re-point
+/// the macro store into its .sutra/ (loading existing macros or migrating).
+#[tauri::command]
+fn pick_workspace(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Option<String>, String> {
+    let picked = workspace::pick(&app)?;
+    if picked.is_some() {
+        serial::relocate_macros(&state.shared, workspace::macros_path(&app));
+    }
+    Ok(picked)
+}
+
+/// Save raw ble-sniff records as a pcap (into the workspace's captures/, or via
+/// a save dialog if no workspace). Returns the written path.
+#[tauri::command]
+fn save_ble_pcap(app: tauri::AppHandle, name: String, records: Vec<Vec<u8>>) -> Result<String, String> {
+    workspace::save_ble_pcap(&app, &name, records)
+}
+
 #[tauri::command]
 fn macros_set(state: tauri::State<AppState>, macros: Vec<MacroRec>) {
     serial::macros_set(&state.shared, macros);
@@ -276,11 +301,9 @@ pub fn run() {
         .manage(AppState::default())
         .setup(|app| {
             let state = app.state::<AppState>();
-            let dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            serial::init_macros(&state.shared, app.handle().clone(), dir.join("macros.json"));
+            // macros live in the workspace's .sutra/ if one is selected, else app data
+            let path = workspace::macros_path(app.handle());
+            serial::init_macros(&state.shared, app.handle().clone(), path);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -307,6 +330,9 @@ pub fn run() {
             macro_upsert,
             macro_delete,
             macros_set,
+            get_workspace,
+            pick_workspace,
+            save_ble_pcap,
             export_set,
             import_set,
             mcp_start,
