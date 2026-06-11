@@ -233,7 +233,8 @@ export default function App() {
   const [dataSrcPins, setDataSrcPins] = useState<{ tx: number; rx: number } | null>(null); // Duta pins the bridged UART enters on
   const [hasKindSwitch, setHasKindSwitch] = useState(false); // device supports CFG DATA_KIND
   const [i2cRecords, setI2cRecords] = useState<I2cRecord[]>([]); // decoded i2c DATA records
-  const [blePackets, setBlePackets] = useState<BleSniffPacket[]>([]); // decoded ble-sniff records
+  const [blePackets, setBlePackets] = useState<BleSniffPacket[]>([]); // decoded ble-sniff records (last 2000)
+  const [bleTotal, setBleTotal] = useState(0); // total received (the buffer is capped)
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
   const [i2cDefs, setI2cDefs] = useState<I2cDef[]>([]); // i2c device definitions from .sutra/i2c
   const [i2cPresent, setI2cPresent] = useState<Set<number>>(new Set()); // addresses seen in the last scan
@@ -541,6 +542,7 @@ export default function App() {
     setIoPins({});
     setI2cRecords([]);
     setBlePackets([]);
+    setBleTotal(0);
     setCaps(0);
   }
 
@@ -567,6 +569,7 @@ export default function App() {
       if (kind === DATA_KIND.BLE_SNIFF && bleBuf.length) {
         const chunk = bleBuf.splice(0);
         setBlePackets((ps) => [...ps, ...chunk].slice(-2000));
+        setBleTotal((t) => t + chunk.length);
       } else if (kind === DATA_KIND.I2C && i2cBuf.length) {
         const chunk = i2cBuf.splice(0);
         setI2cRecords((rs) => [...rs, ...chunk].slice(-500));
@@ -1068,7 +1071,8 @@ export default function App() {
             ) : dataDesc?.kind === DATA_KIND.BLE_SNIFF ? (
               <BleSnifferPanel
                 packets={blePackets}
-                onClear={() => setBlePackets([])}
+                total={bleTotal}
+                onClear={() => { setBlePackets([]); setBleTotal(0); }}
                 onSavePcap={saveSniffPcap}
               />
             ) : (

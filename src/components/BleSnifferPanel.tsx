@@ -35,14 +35,17 @@ interface Device {
 
 export function BleSnifferPanel({
   packets,
+  total,
   onClear,
   onSavePcap,
 }: {
   packets: BleSniffPacket[];
+  total: number; // total received (the packets buffer is capped at ~2000)
   onClear: () => void;
   onSavePcap: () => void;
 }) {
   const [mode, setMode] = useState<"devices" | "packets">("devices");
+  const [group, setGroup] = useState(true); // collapse identical packets to the latest
   // sort the devices table by a stable key (default: address) so rows don't jump
   // around as packets stream in. Clicking a header toggles the key/direction.
   const [sort, setSort] = useState<{ key: "addr" | "name" | "rssi" | "count"; dir: 1 | -1 }>({
@@ -57,11 +60,11 @@ export function BleSnifferPanel({
   // user is already near the bottom, so scrolling up to inspect stays put.
   // (scrollIntoView would yank every ancestor and pin the whole layout.)
   useEffect(() => {
-    if (mode !== "packets") return;
+    if (mode !== "packets" || group) return; // grouped rows update in place — don't chase
     const el = scrollRef.current;
     if (!el) return;
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight;
-  }, [packets.length, mode]);
+  }, [packets.length, mode, group]);
 
   // group into devices (newest RSSI/name win; keep packet count + channels) —
   // only recompute when packets change, not on every sort/select re-render.
@@ -133,6 +136,24 @@ export function BleSnifferPanel({
   const shownPackets = selected.size
     ? packets.filter((p) => selected.has(p.addr))
     : packets;
+  // Packets view rows: collapse identical content (addr·type·AdvData) to the
+  // latest occurrence with a count, or the raw tail.
+  const packetRows: { p: BleSniffPacket; n: number }[] = group
+    ? (() => {
+        const m = new Map<string, { p: BleSniffPacket; n: number }>();
+        for (const p of shownPackets) {
+          const k = `${p.addr}|${p.type}|${p.payloadHex}`;
+          const e = m.get(k);
+          if (e) {
+            e.n++;
+            e.p = p;
+          } else {
+            m.set(k, { p, n: 1 });
+          }
+        }
+        return [...m.values()];
+      })()
+    : shownPackets.slice(-300).map((p) => ({ p, n: 1 }));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 text-foreground">
@@ -147,7 +168,15 @@ export function BleSnifferPanel({
           ))}
         </div>
         <Badge variant="secondary" className="gap-1"><Radio className="size-3" /> {devList.length} devices</Badge>
-        <span className="text-xs text-muted-foreground">{packets.length} packets</span>
+        <span className="text-xs text-muted-foreground">{total.toLocaleString()} packets</span>
+        {mode === "packets" && (
+          <button type="button"
+            className={`rounded border px-2 py-0.5 text-[11px] ${group ? "bg-accent" : "hover:bg-accent/50"}`}
+            title="Collapse identical packets to the latest, with a count"
+            onClick={() => setGroup((g) => !g)}>
+            group identical
+          </button>
+        )}
         {selected.size > 0 && (
           <button type="button"
             className="inline-flex items-center gap-1 rounded border border-primary/60 px-1.5 py-0.5 text-[11px] text-primary hover:bg-accent"
@@ -200,6 +229,7 @@ export function BleSnifferPanel({
           <table className="w-full text-left font-mono text-xs">
             <thead className="sticky top-0 bg-background text-muted-foreground">
               <tr>
+                {group && <th className="px-2 py-1 font-normal">#</th>}
                 <th className="px-2 py-1 font-normal">Ch</th>
                 <th className="px-2 py-1 font-normal">RSSI</th>
                 <th className="px-2 py-1 font-normal">Type</th>
@@ -208,8 +238,9 @@ export function BleSnifferPanel({
               </tr>
             </thead>
             <tbody>
-              {shownPackets.slice(-300).map((p, i) => (
-                <tr key={i} className="border-t">
+              {packetRows.map(({ p, n }, i) => (
+                <tr key={group ? `${p.addr}|${p.type}|${p.payloadHex}` : i} className="border-t">
+                  {group && <td className="px-2 py-0.5 tabular-nums text-muted-foreground">{n}</td>}
                   <td className="px-2 py-0.5 text-muted-foreground">{p.channel}</td>
                   <td className="px-2 py-0.5 tabular-nums">{p.rssi}</td>
                   <td className="px-2 py-0.5 text-muted-foreground">{p.type}</td>
