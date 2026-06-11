@@ -46,6 +46,7 @@ import {
   outputToggle,
   outputsBitmap,
   getInfo,
+  getIoConfig,
   getDeviceName,
   getControls,
   getDataDesc,
@@ -211,6 +212,7 @@ export default function App() {
   const [provision, setProvision] = useState(false); // device accepts runtime IO provisioning
   const [configOpen, setConfigOpen] = useState(false);
   const [hasWifi, setHasWifi] = useState(false); // device answers the WiFi CFG keys
+  const [ioPins, setIoPins] = useState<Record<number, number>>({}); // output index -> GPIO (tooltips)
   const [macros, setMacros] = useState<MacroRec[]>([]);
   const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
@@ -461,6 +463,14 @@ export default function App() {
       .then((i) => {
         setCaps(i.caps);
         setProvision((i.flags & FLAG.PROVISION) !== 0);
+        if (i.flags & FLAG.PROVISION) {
+          // the IO table carries each output's pin — surface it in tooltips
+          getIoConfig()
+            .then((rows) => setIoPins(Object.fromEntries(rows.map((r, idx) => [idx, r.pin]))))
+            .catch(() => setIoPins({}));
+        } else {
+          setIoPins({});
+        }
       })
       .catch(() => {});
     getDataDesc().then(setDataDesc).catch(() => setDataDesc(null)); // UART if unsupported
@@ -961,6 +971,7 @@ export default function App() {
                                   disabled={!connected || !hasCmd}
                                   onClick={() => toggle(c.index)}
                                   className="flex h-auto flex-col py-2"
+                                  title={ioPins[c.index] != null ? `${c.name} · GPIO${ioPins[c.index]}` : c.name}
                                 >
                                   <span className={on ? "" : "text-muted-foreground"}>{c.name}</span>
                                   <span className="text-[10px]">{on ? "ON" : "OFF"}</span>
@@ -985,7 +996,12 @@ export default function App() {
                       <ContextMenuTrigger asChild>
                       <div className="flex flex-col gap-1">
                         <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium">{c.name}</span>
+                          <span
+                            className="text-xs font-medium"
+                            title={ioPins[c.index] != null ? `${c.name} · GPIO${ioPins[c.index]}` : c.name}
+                          >
+                            {c.name}
+                          </span>
                           {c.type === CTRL.PWM ? (
                             <div className="flex items-center gap-1.5">
                               <span className="text-[10px] text-muted-foreground">

@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="assets/logo.png" alt="Sutra" width="160">
+</div>
+
 # Sutra
 
 **Sutra** is the *thread*: a desktop app (Tauri + React) that connects you, and
