@@ -48,6 +48,7 @@ export function Ieee154Panel({
   const [decFilter, setDecFilter] = useState(""); // free-text filter on protocol/summary
   const [hideNoise, setHideNoise] = useState(true); // hide Ack / Data Request / Link Status chatter
   const [live, setLive] = useState(false); // auto re-decode as frames arrive
+  const [decErr, setDecErr] = useState(""); // last decode error (shown, not thrown)
   // keep the latest onDecode + frame count in refs so the live interval (set up
   // once) always decodes the CURRENT capture, not a stale closure.
   const onDecodeRef = useRef(onDecode);
@@ -57,11 +58,14 @@ export function Ieee154Panel({
   const lastDecodedAt = useRef(0);
 
   async function runDecode() {
-    if (!onDecodeRef.current) return;
+    if (!onDecodeRef.current || decoding) return;
     setDecoding(true);
     try {
       lastDecodedAt.current = framesCount.current;
       setDecoded(await onDecodeRef.current());
+      setDecErr("");
+    } catch (e) {
+      setDecErr(String(e)); // surface, never throw (an uncaught reject under live = noise)
     } finally {
       setDecoding(false);
     }
@@ -178,12 +182,14 @@ export function Ieee154Panel({
 
   // Decoded view: hide mesh/MAC chatter and/or free-text match on protocol/info.
   const noiseRe = /\back\b|data request|link status|beacon request|poll/i;
-  const shownDecoded = decoded.filter((d) => {
-    if (hideNoise && noiseRe.test(d.summary)) return false;
-    if (decFilter && !`${d.protocol} ${d.summary}`.toLowerCase().includes(decFilter.toLowerCase()))
-      return false;
-    return true;
-  });
+  const shownDecoded = decoded
+    .filter((d) => {
+      if (hideNoise && noiseRe.test(d.summary)) return false;
+      if (decFilter && !`${d.protocol} ${d.summary}`.toLowerCase().includes(decFilter.toLowerCase()))
+        return false;
+      return true;
+    })
+    .slice(-600); // cap rendered rows so a big buffer (esp. under live) can't freeze the UI
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 text-foreground">
@@ -380,7 +386,10 @@ export function Ieee154Panel({
             </p>
           </div>
         )}
-        {mode === "decoded" && canDecode && !decoded.length && (
+        {mode === "decoded" && decErr && (
+          <p className="px-2 py-2 text-center text-[11px] text-destructive">decode error: {decErr}</p>
+        )}
+        {mode === "decoded" && canDecode && !decoded.length && !decErr && (
           <p className="px-2 py-6 text-center text-xs text-muted-foreground">
             {decoding
               ? "Dissecting with Wireshark…"
