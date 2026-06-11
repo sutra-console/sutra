@@ -485,6 +485,12 @@ export default function App() {
   }
 
   async function loadDevice() {
+    // Fresh session: clear any capture left over from the previous connection
+    // (we keep it on screen across a disconnect; a new connect starts clean).
+    setBlePackets([]);
+    setBleTotal(0);
+    setI2cRecords([]);
+    setI2cPresent(new Set());
     getDeviceName().then(setDeviceName).catch(() => {});
     getInfo()
       .then((i) => {
@@ -530,6 +536,11 @@ export default function App() {
     refreshOutputs();
   }
 
+  // Clear live *device* state on disconnect. Deliberately KEEPS the DATA view
+  // (dataDesc) and any captured records (ble/i2c) so a sniff/I²C session stays
+  // on screen to review and save — and, crucially, so the Terminal does NOT
+  // remount and render the tail of an in-flight sniff stream as UTF-8 garbage.
+  // The capture buffers are freshened at connect time (loadDevice) instead.
   function clearDevice() {
     setDeviceName("");
     setControls([]);
@@ -537,12 +548,8 @@ export default function App() {
     setPwmVals({});
     setPwmCfg({});
     setRgbVals({});
-    setDataDesc(null);
     setDataSrcPins(null);
     setIoPins({});
-    setI2cRecords([]);
-    setBlePackets([]);
-    setBleTotal(0);
     setCaps(0);
   }
 
