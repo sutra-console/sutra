@@ -43,6 +43,12 @@ export function BleSnifferPanel({
   onSavePcap: () => void;
 }) {
   const [mode, setMode] = useState<"devices" | "packets">("devices");
+  // sort the devices table by a stable key (default: address) so rows don't jump
+  // around as packets stream in. Clicking a header toggles the key/direction.
+  const [sort, setSort] = useState<{ key: "addr" | "name" | "rssi" | "count"; dir: 1 | -1 }>({
+    key: "addr",
+    dir: 1,
+  });
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // Sticky-follow: keep the packet stream pinned to the bottom ONLY while the
@@ -80,7 +86,19 @@ export function BleSnifferPanel({
       });
     }
   });
-  const devList = [...devices.values()].sort((a, b) => b.last - a.last);
+  const devList = [...devices.values()].sort((a, b) => {
+    let c: number;
+    switch (sort.key) {
+      case "name": c = (a.name || a.addr).localeCompare(b.name || b.addr); break;
+      case "rssi": c = a.rssi - b.rssi; break;
+      case "count": c = a.count - b.count; break;
+      default: c = a.addr.localeCompare(b.addr); break; // stable
+    }
+    return (c || a.addr.localeCompare(b.addr)) * sort.dir; // addr tiebreak keeps order stable
+  });
+  const toggleSort = (key: typeof sort.key) =>
+    setSort((s) => (s.key === key ? { key, dir: (s.dir * -1) as 1 | -1 } : { key, dir: 1 }));
+  const arrow = (key: typeof sort.key) => (sort.key === key ? (sort.dir === 1 ? " ▲" : " ▼") : "");
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 text-foreground">
@@ -110,13 +128,13 @@ export function BleSnifferPanel({
           <table className="w-full text-left font-mono text-xs">
             <thead className="sticky top-0 bg-background text-muted-foreground">
               <tr>
-                <th className="px-2 py-1 font-normal">Address</th>
-                <th className="px-2 py-1 font-normal">Name</th>
+                <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("addr")}>Address{arrow("addr")}</th>
+                <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("name")}>Name{arrow("name")}</th>
                 <th className="px-2 py-1 font-normal">Company</th>
                 <th className="px-2 py-1 font-normal">Type</th>
-                <th className="px-2 py-1 font-normal">RSSI</th>
+                <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("rssi")}>RSSI{arrow("rssi")}</th>
                 <th className="px-2 py-1 font-normal">Ch</th>
-                <th className="px-2 py-1 font-normal">#</th>
+                <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("count")}>#{arrow("count")}</th>
               </tr>
             </thead>
             <tbody>
