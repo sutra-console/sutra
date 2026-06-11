@@ -20,19 +20,27 @@ Copy the binary into Wireshark's **Personal Extcap path**
 
 ## Use
 
-1. Get a Duta on your network (captive portal or Sutra's **Network** button) —
-   it advertises `_skrit._tcp` over mDNS.
-2. Open Wireshark: each discovered Duta is listed as `Duta: <name> — <ip>`.
-3. The interface's gear icon sets the **device password** (default `duta`) —
-   the session is auth-gated like every skrit network transport.
-4. Start the capture. Each chunk of console bytes arrives as one timestamped
-   packet (classic pcap, `LINKTYPE_USER0`).
+Interfaces come from **both transports**:
+
+- **USB** — plugged-in Dutas are probed (mux PING + name) and listed as
+  `Duta: <name> — COMxx (USB)`. No password needed (USB isn't session-gated).
+  Serial is exclusive: a port Sutra currently holds is skipped — disconnect in
+  Sutra first, or capture that device over WiFi instead.
+- **WiFi** — Dutas advertising `_skrit._tcp` (captive portal or Sutra's
+  **Network** button gets them online) are listed as `Duta: <name> — <ip>
+  (WiFi)`. The gear icon sets the **device password** (default `duta`).
+
+Start the capture: each chunk of console bytes arrives as one timestamped
+packet (classic pcap, `LINKTYPE_USER0`). The same physical board can appear
+twice — once per transport; the WiFi one coexists with a Sutra USB session
+(the console is teed to every link), so you can drive the target from Sutra
+while Wireshark captures.
 
 ## How it works
 
 ```
-Wireshark ── runs ──> sutra-extcap ── ws://<duta>:9555/ (AUTH) ──> Duta
-     ^                      │
+Wireshark ── runs ──> sutra-extcap ──┬── COMxx (USB, DTR-only discipline) ──> Duta
+     ^                      │        └── ws://<duta>:9555/ (AUTH) ──────────> Duta
      └── pcap over fifo <───┘   (DATA mux channel -> one packet per chunk)
 ```
 
@@ -46,7 +54,7 @@ Wireshark ── runs ──> sutra-extcap ── ws://<duta>:9555/ (AUTH) ─�
 
 ## v1 scope & the path forward
 
-- **Today**: WebSocket Dutas; the raw UART console as `USER0` packets
+- **Today**: USB and WebSocket Dutas; the raw UART console as `USER0` packets
   (chunk-per-packet — boundaries are transport reads, not protocol framing).
 - **Next** (with typed DATA streams): real link types per kind — SocketCAN for
   `can`, `LINKTYPE_NORDIC_BLE` for the sniffer, I²C transaction records — and a
