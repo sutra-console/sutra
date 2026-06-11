@@ -22,6 +22,7 @@ import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { ConfigureDevice } from "@/components/ConfigureDevice";
+import { NetworkConfig } from "@/components/NetworkConfig";
 import { Slider } from "@/components/ui/slider";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import {
@@ -51,6 +52,7 @@ import {
   outputPwmGet,
   pwmConfigGet,
   pwmConfigSet,
+  wifiStatus,
   type PwmConfig,
   outputRgb,
   outputRgbGet,
@@ -197,6 +199,7 @@ export default function App() {
   const [caps, setCaps] = useState(0); // device capability bits (Duta only)
   const [provision, setProvision] = useState(false); // device accepts runtime IO provisioning
   const [configOpen, setConfigOpen] = useState(false);
+  const [hasWifi, setHasWifi] = useState(false); // device answers the WiFi CFG keys
   const [macros, setMacros] = useState<MacroRec[]>([]);
   const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
@@ -450,6 +453,7 @@ export default function App() {
       })
       .catch(() => {});
     getDataDesc().then(setDataDesc).catch(() => setDataDesc(null)); // UART if unsupported
+    wifiStatus().then(() => setHasWifi(true)).catch(() => setHasWifi(false));
     try {
       const cs = await getControls();
       setControls(cs);
@@ -893,6 +897,14 @@ export default function App() {
             <CardHeader className="flex-row items-center py-3">
               <CardTitle>Controls</CardTitle>
               <div className="ml-auto flex items-center gap-2">
+                {hasWifi && connected && (
+                  <NetworkConfig
+                    onConnectWs={(url) => {
+                      setWsUrl(url);
+                      setWsOpen(true);
+                    }}
+                  />
+                )}
                 {provision && connected && (
                   <Button
                     variant="outline"

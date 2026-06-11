@@ -1,0 +1,135 @@
+// Network (WiFi) provisioning popover — shown for devices that answer the WiFi
+// CFG keys. Reads the live status (off / connecting / connected+IP / portal /
+// failed), takes SSID + password over the current CMD link, and once the device
+// reports an IP offers a one-click jump to the WebSocket connect dialog.
+import { Globe, RefreshCw, Wifi } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { WIFI, WS_PORT, type WifiStatus, wifiConfigure, wifiStatus } from "@/lib/skrit";
+
+const STATE_LABEL: Record<number, string> = {
+  [WIFI.OFF]: "off — no network configured",
+  [WIFI.CONNECTING]: "joining",
+  [WIFI.CONNECTED]: "connected",
+  [WIFI.PORTAL]: "setup portal active",
+  [WIFI.FAILED]: "join failed",
+};
+
+export function NetworkConfig({
+  disabled,
+  onConnectWs,
+}: {
+  disabled?: boolean;
+  /** Open the app's WebSocket dialog pre-filled with this device's URL. */
+  onConnectWs: (url: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState<WifiStatus | null>(null);
+  const [ssid, setSsid] = useState("");
+  const [pass, setPass] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const poll = useRef<number | null>(null);
+
+  async function refresh() {
+    try {
+      setStatus(await wifiStatus());
+      setErr(null);
+    } catch (e) {
+      setStatus(null);
+      setErr(String(e));
+    }
+  }
+
+  // Poll while open (joins resolve within seconds).
+  useEffect(() => {
+    if (!open) {
+      if (poll.current) window.clearInterval(poll.current);
+      poll.current = null;
+      return;
+    }
+    refresh();
+    poll.current = window.setInterval(refresh, 2000);
+    return () => {
+      if (poll.current) window.clearInterval(poll.current);
+      poll.current = null;
+    };
+  }, [open]);
+
+  async function apply() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await wifiConfigure(ssid.trim(), pass);
+      await refresh();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const connectedIp = status?.state === WIFI.CONNECTED ? status.detail : null;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="h-7 gap-1.5" disabled={disabled}
+          title="WiFi setup (network bridge)">
+          <Wifi className="size-3.5" /> Network
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-72" align="end">
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-medium">WiFi</span>
+            <button type="button" className="text-muted-foreground hover:text-foreground"
+              title="Refresh" onClick={refresh}>
+              <RefreshCw className="size-3" />
+            </button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {status
+              ? <>
+                  {STATE_LABEL[status.state] ?? `state ${status.state}`}
+                  {status.detail && <> · <span className="font-mono">{status.detail}</span></>}
+                </>
+              : err
+                ? "this device has no WiFi config"
+                : "reading…"}
+          </p>
+
+          {connectedIp && (
+            <Button size="sm" className="gap-1.5"
+              onClick={() => { setOpen(false); onConnectWs(`ws://${connectedIp}:${WS_PORT}/`); }}>
+              <Globe className="size-3.5" /> Connect over WebSocket
+            </Button>
+          )}
+
+          <label className="text-xs">
+            SSID
+            <Input className="mt-1 h-8" value={ssid} onChange={(e) => setSsid(e.target.value)}
+              placeholder={status?.state === WIFI.CONNECTED ? "change network…" : "network name"} />
+          </label>
+          <label className="text-xs">
+            Password
+            <Input className="mt-1 h-8" type="password" value={pass}
+              onChange={(e) => setPass(e.target.value)} />
+          </label>
+          <Button size="sm" onClick={apply} disabled={busy || !ssid.trim()}>
+            {busy ? "Applying…" : "Join network"}
+          </Button>
+          {status?.state === WIFI.PORTAL && (
+            <p className="text-[10px] text-muted-foreground">
+              Or join the <span className="font-mono">{status.detail}</span> hotspot from a phone —
+              the setup page opens automatically.
+            </p>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}

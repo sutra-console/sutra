@@ -193,6 +193,15 @@ pub struct SetIoConfigArgs {
     pub reset: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConfigureWifiArgs {
+    /// The WiFi network name to join.
+    pub ssid: String,
+    /// The network password (empty for an open network).
+    #[serde(default)]
+    pub password: String,
+}
+
 #[tool_router]
 impl SutraTools {
     pub fn new(shared: Arc<Shared>) -> Self {
@@ -229,6 +238,7 @@ impl SutraTools {
             for n in [
                 "list_serial_ports", "connect_duta", "connect_port", "disconnect_port",
                 "set_serial", "connection_status", "set_baud", "serial_signal", "reboot_device",
+                "wifi_status", "configure_wifi",
             ] {
                 router.remove_route(n);
             }
@@ -458,6 +468,59 @@ impl SutraTools {
             s.params.parity,
             s.params.stop_bits
         )
+    }
+
+    #[tool(
+        description = "Read the connected Duta's WiFi state: off / connecting / connected (with its IP — connect via ws://<ip>:9555/) / setup-portal / failed. Only on WiFi-capable devices (ESP32)."
+    )]
+    async fn wifi_status(&self) -> String {
+        match self.cmd(msg::CFG_GET, vec![0x12]).await {
+            Ok(r) if r.status == Some(0) => {
+                let state = r.body.get(2).copied().unwrap_or(0);
+                let detail = String::from_utf8_lossy(r.body.get(3..).unwrap_or(&[])).into_owned();
+                let name = match state {
+                    0 => "off (no network configured)",
+                    1 => "connecting",
+                    2 => "connected",
+                    3 => "setup portal active",
+                    4 => "join failed",
+                    _ => "unknown",
+                };
+                if state == 2 {
+                    format!("wifi: connected, ip={detail} — WebSocket bridge at ws://{detail}:9555/")
+                } else if detail.is_empty() {
+                    format!("wifi: {name}")
+                } else {
+                    format!("wifi: {name} ({detail})")
+                }
+            }
+            Ok(_) => "(device has no WiFi config)".into(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Provision the connected Duta's WiFi over the current link: it saves the credentials, joins the network, and serves its WebSocket bridge at ws://<ip>:9555/. Poll wifi_status for the result/IP. ESP32 devices only."
+    )]
+    async fn configure_wifi(
+        &self,
+        Parameters(ConfigureWifiArgs { ssid, password }): Parameters<ConfigureWifiArgs>,
+    ) -> String {
+        // password first, then SSID — the SSID write triggers the join
+        let mut body = vec![0x11u8];
+        body.extend_from_slice(password.as_bytes());
+        if let Err(e) = self.cmd(msg::CFG_SET, body).await {
+            return format!("error: {e}");
+        }
+        let mut body = vec![0x10u8];
+        body.extend_from_slice(ssid.as_bytes());
+        match self.cmd(msg::CFG_SET, body).await {
+            Ok(r) if r.status == Some(0) => {
+                format!("joining '{ssid}' — poll wifi_status for the IP")
+            }
+            Ok(r) => format!("device returned status 0x{:02x}", r.status.unwrap_or(0)),
+            Err(e) => format!("error: {e}"),
+        }
     }
 
     #[tool(

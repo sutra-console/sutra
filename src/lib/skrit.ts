@@ -32,6 +32,8 @@ export const MSG = {
   MACRO_WRITE_END: 0x25,
   MACRO_DELETE: 0x26,
   MACRO_RUN: 0x27,
+  CFG_GET: 0x40,
+  CFG_SET: 0x41,
   EVENT_LOG: 0x50,
   EVENT_INPUT: 0x51,
 } as const;
@@ -329,6 +331,39 @@ export async function setIoConfig(rows: IoRow[]): Promise<number | null> {
 export async function resetIoConfig(): Promise<void> {
   const resp = await sendCmd(MSG.CONFIG_SET, [PINCAP.CONFIG_RESET]);
   if (resp.status !== 0) throw new Error(`reset failed (status 0x${(resp.status ?? 0).toString(16)})`);
+}
+
+// ---- key-value config (CFG_GET/CFG_SET) + WiFi provisioning ----
+export const CFG = { WIFI_SSID: 0x10, WIFI_PASS: 0x11, WIFI_STATUS: 0x12 } as const;
+/** WIFI_STATUS state byte. */
+export const WIFI = { OFF: 0, CONNECTING: 1, CONNECTED: 2, PORTAL: 3, FAILED: 4 } as const;
+export const WS_PORT = 9555;
+
+/** Read a config key's raw value bytes (throws on unsupported/not-found). */
+export async function cfgGet(key: number): Promise<number[]> {
+  const resp = await sendCmd(MSG.CFG_GET, [key]);
+  if (resp.status !== 0) throw new Error(`cfg 0x${key.toString(16)}: status 0x${(resp.status ?? 0).toString(16)}`);
+  return resp.body.slice(2); // [status, key, value...]
+}
+/** Set a config key to a UTF-8 string value. */
+export async function cfgSetStr(key: number, value: string): Promise<void> {
+  const resp = await sendCmd(MSG.CFG_SET, [key, ...Array.from(new TextEncoder().encode(value))]);
+  if (resp.status !== 0) throw new Error(`cfg set 0x${key.toString(16)}: status 0x${(resp.status ?? 0).toString(16)}`);
+}
+
+export interface WifiStatus {
+  state: number; // WIFI.*
+  detail: string; // IP when connected · AP name in portal · SSID otherwise
+}
+/** Read the device's WiFi state (state byte + detail string). */
+export async function wifiStatus(): Promise<WifiStatus> {
+  const v = await cfgGet(CFG.WIFI_STATUS);
+  return { state: v[0] ?? 0, detail: dec.decode(Uint8Array.from(v.slice(1))) };
+}
+/** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */
+export async function wifiConfigure(ssid: string, password: string): Promise<void> {
+  await cfgSetStr(CFG.WIFI_PASS, password);
+  await cfgSetStr(CFG.WIFI_SSID, ssid);
 }
 
 // ---- self-describe ----

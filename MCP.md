@@ -35,6 +35,8 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `list_serial_ports` | none | enumerate serial ports (Duta tagged) |
 | `connect_duta` | none | auto-detect + connect a Duta (**dual-CDC or single-port muxed**) |
 | `connect_port` | `port`, `baud?`, `parity?`, `stop_bits?` | connect any serial port as a console |
+| `wifi_status` | — | the Duta's WiFi state (off / connecting / connected + IP / portal / failed) |
+| `configure_wifi` | `ssid`, `password?` | provision the Duta's WiFi over the current link; it joins + serves `ws://<ip>:9555/` |
 | `disconnect_port` | none | disconnect |
 | `set_serial` | `baud`, `parity?`, `stop_bits?` | change the host-side DATA serial params |
 | `connection_status` | none | current port/baud/Duta status |

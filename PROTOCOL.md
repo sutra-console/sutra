@@ -124,8 +124,8 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x27` | `MACRO_RUN` | `id(1)` | (none) | device runs the stored **skrit-mc** program through its VM (see *Macro bytecode*) |
 | `0x30` | `EE_READ` | `addr(2)`, `n(1)` | `bytes…` |
 | `0x31` | `EE_WRITE` | `addr(2)`, `bytes…` | (none) |
-| `0x40` | `CFG_GET` | `key(1)` | `value…` (e.g. default DATA baud) |
-| `0x41` | `CFG_SET` | `key(1)`, `value…` | (none) |
+| `0x40` | `CFG_GET` | `key(1)` | `key(1)`, `value…` | device key/value config. Defined keys: `0x10` WiFi SSID (rw), `0x11` WiFi password (write-only — reads back `"*"` when one is stored, never the secret), `0x12` WiFi status (read-only: `state(1)` + detail string). Unknown key → `0x05 not-found`; a device with no config answers `0x07 unsupported`. |
+| `0x41` | `CFG_SET` | `key(1)`, `value…` | — | set a config key (validated + persisted by the device). See *WiFi provisioning*. |
 
 Multi-byte integers are **little-endian** (matches SDCC and `x86`/`arm` hosts).
 
@@ -339,6 +339,25 @@ target. So a network device requires authentication:
 (accepts runtime IO provisioning, see below). USB/BLE devices leave the auth bits 0. Run a
 network bridge over `wss://` so the password and console aren't on the wire in the clear;
 the default-password gate is a usability backstop, not a substitute for TLS.
+
+## WiFi provisioning (network-bridge devices)
+
+A device with a WiFi radio (ESP32 family) can run the **WebSocket transport
+itself** — `ws://<device-ip>:9555/`, the skrit-mux stream over WS binary frames,
+auth-gated like any network transport. Two ways to give it a network:
+
+- **Over the CMD link (Sutra)**: `CFG_SET 0x10 <ssid>` + `CFG_SET 0x11 <password>`
+  over USB/BLE; the device persists the credentials and joins. Poll
+  `CFG_GET 0x12` (status): `state(1)` = 0 off · 1 connecting · 2 **connected**
+  (detail = the IP to point `ws://` at) · 3 portal · 4 failed. Setting an empty
+  SSID forgets the network. The password never reads back (`0x11` GET → `"*"`).
+- **Captive portal**: with no stored credentials (or after repeated join
+  failures) the device raises a `Duta-…` access point with a captive config
+  page — join it from a phone, pick the network, done. While the portal is up,
+  `CFG_GET 0x12` reports state 3 + the AP name.
+
+The USB CMD link stays fully usable alongside the WebSocket session — the
+device serves both, and the DATA console is teed to every authenticated link.
 
 ## Provisioning
 
