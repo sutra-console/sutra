@@ -499,8 +499,11 @@ pub fn probe_is_mux(name: &str) -> bool {
         return false;
     }
     let _ = port.flush();
-    matches!(read_mux_response(&mut port, 400),
-             Some(f) if f.typ == (msg::PING | crate::protocol::RESP_FLAG))
+    let ok = matches!(read_mux_response(&mut port, 400),
+             Some(f) if f.typ == (msg::PING | crate::protocol::RESP_FLAG));
+    // park the lines so the close can't form the ESP32 USJ reset pattern
+    let _ = port.write_data_terminal_ready(false);
+    ok
 }
 
 fn spawn_mux_reader(
@@ -574,8 +577,10 @@ pub fn connect_muxed(shared: &Arc<Shared>, app: AppHandle, name: &str) -> Result
     disconnect(shared);
     let params = shared.params.lock().unwrap().clone();
     let mut port = open_data(name, &params)?;
+    // DTR only — NEVER raise RTS on a muxed board: the ESP32 USB-Serial/JTAG
+    // turns DTR/RTS edge patterns into chip reset / download-mode entry
+    // (rst:0x15), bricking the session until a reflash. Hardware-verified.
     let _ = port.write_data_terminal_ready(true);
-    let _ = port.write_request_to_send(true);
 
     let reader = port.try_clone().map_err(|e| format!("clone port: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -667,8 +672,17 @@ pub fn disconnect(shared: &Arc<Shared>) {
     if let Some(mut conn) = shared.conn.lock().unwrap().take() {
         conn.stop.store(true, Ordering::Relaxed);
         let reader = conn.reader.take();
-        drop(conn.cmd);
-        drop(conn.data_writer);
+        // Park DTR/RTS low BEFORE closing: the OS-defined line order on close
+        // otherwise forms the ESP32 USB-Serial/JTAG reset/download pattern.
+        if let Some(mut c) = conn.cmd {
+            let _ = c.write_request_to_send(false);
+            let _ = c.write_data_terminal_ready(false);
+            drop(c);
+        }
+        let mut dw = conn.data_writer;
+        let _ = dw.write_request_to_send(false);
+        let _ = dw.write_data_terminal_ready(false);
+        drop(dw);
         // Join outside any lock: the OS only frees the port once the reader's
         // cloned handle drops (read timeout 50ms; worst case its 750ms retry nap).
         if let Some(h) = reader {
