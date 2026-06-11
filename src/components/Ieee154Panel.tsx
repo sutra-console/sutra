@@ -156,10 +156,10 @@ export function Ieee154Panel({
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 text-foreground">
       <div className="flex items-center gap-2">
         <div className="flex overflow-hidden rounded border text-xs">
-          {(["nodes", "packets", ...(canDecode ? (["decoded"] as const) : [])] as const).map((m) => (
+          {(["nodes", "packets", "decoded"] as const).map((m) => (
             <button key={m} type="button"
               className={`px-2.5 py-1 capitalize ${mode === m ? "bg-accent" : "hover:bg-accent/50"}`}
-              onClick={() => { setMode(m); if (m === "decoded" && !decoded.length) runDecode(); }}>
+              onClick={() => { setMode(m); if (m === "decoded" && canDecode && !decoded.length) runDecode(); }}>
               {m}
             </button>
           ))}
@@ -174,7 +174,7 @@ export function Ieee154Panel({
             group identical
           </button>
         )}
-        {mode === "decoded" && (
+        {mode === "decoded" && canDecode && (
           <button type="button"
             className="rounded border px-2 py-0.5 text-[11px] hover:bg-accent/50 disabled:opacity-50"
             title="Re-run Wireshark dissection on the current capture"
@@ -307,14 +307,32 @@ export function Ieee154Panel({
             </tbody>
           </table>
         )}
-        {frames.length === 0 && (
+        {frames.length === 0 && mode !== "decoded" && (
           <p className="px-2 py-6 text-center text-xs text-muted-foreground">
             Listening for IEEE 802.15.4 frames… Zigbee/Thread traffic on channels 11–26 will appear here.
           </p>
         )}
-        {mode === "decoded" && frames.length > 0 && !decoded.length && (
+        {mode === "decoded" && !canDecode && (
+          <div className="px-4 py-8 text-center text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">Packet decoding needs Wireshark</p>
+            <p className="mt-1">
+              Zigbee / Thread / Matter dissection is handled by Wireshark's <code>tshark</code>.
+              Install Wireshark, then (if it isn't auto-detected) set its path in{" "}
+              <span className="text-foreground">Settings ▸ Packet decode</span>.
+            </p>
+            <p className="mt-1">
+              Capture, Save&nbsp;.pcap, the Nodes/Packets views, and the{" "}
+              <code>sutra-extcap</code> → Wireshark workflow all work without it.
+            </p>
+          </div>
+        )}
+        {mode === "decoded" && canDecode && !decoded.length && (
           <p className="px-2 py-6 text-center text-xs text-muted-foreground">
-            {decoding ? "Dissecting with Wireshark…" : "Hit ↻ decode to dissect the capture."}
+            {decoding
+              ? "Dissecting with Wireshark…"
+              : frames.length === 0
+                ? "Capture some 802.15.4 frames, then ↻ decode."
+                : "Hit ↻ decode to dissect the capture."}
           </p>
         )}
         {frames.length > 0 && mode === "packets" && shown.length === 0 && (
