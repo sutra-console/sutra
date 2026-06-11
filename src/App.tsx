@@ -53,6 +53,8 @@ import {
   pwmConfigGet,
   pwmConfigSet,
   wifiStatus,
+  wsDiscover,
+  type DiscoveredDuta,
   type PwmConfig,
   outputRgb,
   outputRgbGet,
@@ -163,6 +165,8 @@ export default function App() {
   const [wsOpen, setWsOpen] = useState(false); // network (WebSocket) dialog
   const [wsUrl, setWsUrl] = useState("ws://127.0.0.1:9555/");
   const [wsPassword, setWsPassword] = useState("duta");
+  const [wsFound, setWsFound] = useState<DiscoveredDuta[]>([]); // mDNS scan results
+  const [wsScanning, setWsScanning] = useState(false);
   const [wsConnecting, setWsConnecting] = useState(false);
   const [hasCmd, setHasCmd] = useState(false);
   const [selectedPort, setSelectedPort] = useState("auto");
@@ -1209,6 +1213,34 @@ export default function App() {
             </DialogTitle>
           </DialogHeader>
           <div className="flex flex-col gap-2 py-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">
+                {wsScanning
+                  ? "scanning the LAN…"
+                  : wsFound.length
+                    ? "Dutas on your network:"
+                    : "no Dutas discovered (mDNS)"}
+              </span>
+              <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" disabled={wsScanning}
+                onClick={async () => {
+                  setWsScanning(true);
+                  try { setWsFound(await wsDiscover()); } catch { setWsFound([]); }
+                  setWsScanning(false);
+                }}>
+                Scan
+              </Button>
+            </div>
+            {wsFound.map((d) => (
+              <button key={d.url} type="button"
+                className={cn(
+                  "flex items-center justify-between rounded border px-2 py-1.5 text-left text-xs hover:bg-accent",
+                  wsUrl === d.url && "border-primary",
+                )}
+                onClick={() => setWsUrl(d.url)}>
+                <span className="font-medium">{d.name}</span>
+                <span className="font-mono text-muted-foreground">{d.ip}:{d.port}</span>
+              </button>
+            ))}
             <Input
               placeholder="ws://host:port/"
               value={wsUrl}

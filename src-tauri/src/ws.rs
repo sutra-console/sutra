@@ -171,3 +171,57 @@ pub fn disconnect(shared: &Arc<Shared>) {
     // Dropping the sender closes the write channel, which ends the read/write task.
     *shared.ws_slot() = None;
 }
+
+// ---- LAN auto-discovery (mDNS/DNS-SD) ---------------------------------------
+// Dutas advertise `_skrit._tcp` once they join WiFi (TXT: name, vendor); browse
+// the service type for a few seconds and return everything that resolved.
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoveredDuta {
+    pub name: String, // device name from TXT (falls back to the instance name)
+    pub vendor: String,
+    pub host: String, // duta-xxxx.local.
+    pub ip: String,
+    pub port: u16,
+    pub url: String, // ready-to-connect ws://ip:port/
+}
+
+pub fn discover(timeout_ms: u64) -> Result<Vec<DiscoveredDuta>, String> {
+    use mdns_sd::{ServiceDaemon, ServiceEvent};
+    let daemon = ServiceDaemon::new().map_err(|e| format!("mdns: {e}"))?;
+    let rx = daemon.browse("_skrit._tcp.local.").map_err(|e| format!("mdns browse: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut found: Vec<DiscoveredDuta> = Vec::new();
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(ServiceEvent::ServiceResolved(info)) => {
+                let ip = match info.get_addresses().iter().find(|a| a.is_ipv4()) {
+                    Some(a) => a.to_string(),
+                    None => continue,
+                };
+                let port = info.get_port();
+                let txt = |k: &str| {
+                    info.get_property_val_str(k).map(str::to_string).unwrap_or_default()
+                };
+                let mut name = txt("name");
+                if name.is_empty() {
+                    name = info.get_fullname().split('.').next().unwrap_or("Duta").to_string();
+                }
+                if !found.iter().any(|d| d.ip == ip && d.port == port) {
+                    found.push(DiscoveredDuta {
+                        name,
+                        vendor: txt("vendor"),
+                        host: info.get_hostname().to_string(),
+                        ip: ip.clone(),
+                        port,
+                        url: format!("ws://{ip}:{port}/"),
+                    });
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break, // timeout
+        }
+    }
+    let _ = daemon.shutdown();
+    Ok(found)
+}

@@ -359,6 +359,12 @@ auth-gated like any network transport. Two ways to give it a network:
 The USB CMD link stays fully usable alongside the WebSocket session — the
 device serves both, and the DATA console is teed to every authenticated link.
 
+**Discovery (mDNS/DNS-SD).** Once joined, the device advertises
+**`_skrit._tcp`** on its WS port with TXT records `name` (the device name) and
+`vendor`, under hostname `duta-xxxx.local`. Hosts browse that service type to
+auto-discover every Duta on the LAN — no IPs to type. Discovery is *finding*,
+not *trusting*: the session is still auth-gated (`AUTH`).
+
 ## Provisioning
 
 A board's IO is a compiled-default table (`OUTPUT_DESC` self-describes it), but a device may

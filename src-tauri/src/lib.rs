@@ -88,6 +88,12 @@ fn ble_connect(
     tauri::async_runtime::block_on(ble::connect(state.shared.clone(), app, id))
 }
 
+/// Browse the LAN for Dutas advertising _skrit._tcp (mDNS); blocks ~timeout_ms.
+#[tauri::command]
+fn ws_discover(timeout_ms: Option<u64>) -> Result<Vec<ws::DiscoveredDuta>, String> {
+    ws::discover(timeout_ms.unwrap_or(2500))
+}
+
 /// Connect a Duta over the network (WebSocket), authenticating with `password`.
 #[tauri::command]
 fn ws_connect(
@@ -285,6 +291,7 @@ pub fn run() {
             connect_muxed,
             ble_scan,
             ble_connect,
+            ws_discover,
             ws_connect,
             disconnect,
             conn_state,

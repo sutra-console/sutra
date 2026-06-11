@@ -100,6 +100,17 @@ export interface WsConnectResult {
 /** Connect a Duta over the network (WebSocket), authenticating with `password`. */
 export const wsConnect = (url: string, password: string) =>
   invoke<WsConnectResult>("ws_connect", { url, password });
+export interface DiscoveredDuta {
+  name: string;
+  vendor: string;
+  host: string;
+  ip: string;
+  port: number;
+  url: string; // ready-to-connect ws://ip:port/
+}
+/** Browse the LAN for Dutas advertising `_skrit._tcp` (mDNS); ~2.5s scan. */
+export const wsDiscover = (timeoutMs?: number) =>
+  invoke<DiscoveredDuta[]>("ws_discover", { timeoutMs });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });

@@ -238,7 +238,7 @@ impl SutraTools {
             for n in [
                 "list_serial_ports", "connect_duta", "connect_port", "disconnect_port",
                 "set_serial", "connection_status", "set_baud", "serial_signal", "reboot_device",
-                "wifi_status", "configure_wifi",
+                "wifi_status", "configure_wifi", "discover_network_dutas",
             ] {
                 router.remove_route(n);
             }
@@ -468,6 +468,22 @@ impl SutraTools {
             s.params.parity,
             s.params.stop_bits
         )
+    }
+
+    #[tool(
+        description = "Browse the LAN (mDNS) for Dutas advertising their WebSocket bridge. Returns name + ws:// URL per device; connect with the device password (default 'duta'). Takes ~2.5s."
+    )]
+    async fn discover_network_dutas(&self) -> String {
+        match tokio::task::spawn_blocking(|| crate::ws::discover(2500)).await {
+            Ok(Ok(list)) if list.is_empty() => "(no Dutas found on the LAN)".into(),
+            Ok(Ok(list)) => list
+                .iter()
+                .map(|d| format!("{} ({}) — {}", d.name, d.host.trim_end_matches('.'), d.url))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Ok(Err(e)) => format!("error: {e}"),
+            Err(e) => format!("error: {e}"),
+        }
     }
 
     #[tool(
