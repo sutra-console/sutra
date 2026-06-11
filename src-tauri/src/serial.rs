@@ -388,7 +388,13 @@ fn spawn_data_reader(
                         online = false;
                         let _ = app.emit("sutra://link", false);
                     }
-                    std::thread::sleep(Duration::from_millis(750));
+                    // nap before retrying, but wake promptly on stop (snappy disconnect)
+                    for _ in 0..15 {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                     let name = match shared.data_name.lock().unwrap().clone() {
                         Some(n) => n,
                         None => break,
@@ -544,7 +550,14 @@ fn spawn_mux_reader(
                         online = false;
                         let _ = app.emit("sutra://link", false);
                     }
-                    std::thread::sleep(Duration::from_millis(750));
+                    // nap before retrying, but wake promptly on stop so disconnect
+                    // doesn't block joining us for the whole retry interval.
+                    for _ in 0..15 {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                     let name = match shared.data_name.lock().unwrap().clone() {
                         Some(n) => n,
                         None => break,
@@ -669,7 +682,12 @@ pub fn disconnect(shared: &Arc<Shared>) {
     // the port by name, and a zombie holding the handle breaks the next connect.
     *shared.data_name.lock().unwrap() = None;
     *shared.cmd_name.lock().unwrap() = None;
-    if let Some(mut conn) = shared.conn.lock().unwrap().take() {
+    // Take the connection out as a STATEMENT so the conn mutex guard is dropped
+    // here — NOT held across the join() below. (In edition 2021 an `if let`
+    // scrutinee's temporaries live for the whole block; holding the lock while
+    // joining deadlocks the reader thread, which locks conn in its reopen path.)
+    let taken = shared.conn.lock().unwrap().take();
+    if let Some(mut conn) = taken {
         conn.stop.store(true, Ordering::Relaxed);
         let reader = conn.reader.take();
         // Park DTR/RTS low BEFORE closing: the OS-defined line order on close
