@@ -1106,7 +1106,10 @@ export default function App() {
               )}
             </div>
           </CardHeader>
-          <CardContent className="min-h-0 flex-1 bg-[#0a0a0b] p-2">
+          {/* flex flex-col so the panel child's flex-1/min-h-0 actually
+              constrains its height — otherwise a tall list (802.15.4 grouped)
+              overflows with no scroll instead of scrolling internally. */}
+          <CardContent className="flex min-h-0 flex-1 flex-col bg-[#0a0a0b] p-2">
             {dataDesc?.kind === DATA_KIND.I2C ? (
               <I2cPanel
                 records={i2cRecords}
