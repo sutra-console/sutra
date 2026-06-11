@@ -362,6 +362,22 @@ kind). While kind = `i2c`:
   activity regardless of which link triggered it. The UART console is paused
   while i2c is active; switch back with `CFG_SET 0x14 0x00` (uart).
 
+## BLE sniffer (`DATA = ble-sniff`)
+
+A device with an nRF radio can advertise `DATA_DESC kind = 4` and stream captured
+**BLE advertising** packets. Each captured PDU is one DATA record (one mux frame):
+
+```
+ts_ms(4 LE) · channel(1) · rssi(1, magnitude in -dBm) · access-address(4 LE) · pdu_len(1) · pdu…
+```
+
+`channel` is the advertising channel (37/38/39); `access-address` is the fixed
+advertising AA (`0x8E89BED6`); `pdu` is the on-air advertising PDU (the 2-byte
+header + payload), de-whitened and CRC-checked by the radio (bad-CRC captures are
+dropped). v1 is advertising-only — connection following and data channels are
+future work. Records flow to every link, so Sutra's packet viewer and
+`sutra-extcap` → Wireshark both see the same capture.
+
 ## WiFi provisioning (network-bridge devices)
 
 A device with a WiFi radio (ESP32 family) can run the **WebSocket transport

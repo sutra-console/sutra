@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth, Globe,
+  Radio, Activity, Terminal as TerminalIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ import { MacroHelp } from "@/components/MacroHelp";
 import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
+import { BleSnifferPanel } from "@/components/BleSnifferPanel";
 import { ConfigureDevice } from "@/components/ConfigureDevice";
 import { I2cPanel } from "@/components/I2cPanel";
 import { NetworkConfig } from "@/components/NetworkConfig";
@@ -49,11 +51,13 @@ import {
   CFG,
   cfgGet,
   dataPins,
+  decodeBleSniff,
   decodeI2cRecord,
   getInfo,
   getIoConfig,
   onData,
   setDataKind,
+  type BleSniffPacket,
   type I2cRecord,
   getDeviceName,
   getControls,
@@ -224,6 +228,7 @@ export default function App() {
   const [dataSrcPins, setDataSrcPins] = useState<{ tx: number; rx: number } | null>(null); // Duta pins the bridged UART enters on
   const [hasKindSwitch, setHasKindSwitch] = useState(false); // device supports CFG DATA_KIND
   const [i2cRecords, setI2cRecords] = useState<I2cRecord[]>([]); // decoded i2c DATA records
+  const [blePackets, setBlePackets] = useState<BleSniffPacket[]>([]); // decoded ble-sniff records
   const [macros, setMacros] = useState<MacroRec[]>([]);
   const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
@@ -524,17 +529,25 @@ export default function App() {
     setDataDesc(null);
     setDataSrcPins(null);
     setIoPins({});
+    setI2cRecords([]);
+    setBlePackets([]);
     setCaps(0);
   }
 
-  // While the DATA kind is i2c, decode DATA frames into transaction records
-  // (the Terminal is unmounted then, so this is the only DATA consumer).
+  // For typed DATA kinds the Terminal is unmounted, so App is the only DATA
+  // consumer — decode the records into the matching view's state.
   useEffect(() => {
-    if (dataDesc?.kind !== DATA_KIND.I2C) return;
+    const kind = dataDesc?.kind;
+    if (kind !== DATA_KIND.I2C && kind !== DATA_KIND.BLE_SNIFF) return;
     let unlisten: (() => void) | undefined;
     onData((bytes) => {
-      const rec = decodeI2cRecord(bytes);
-      if (rec) setI2cRecords((rs) => [...rs.slice(-499), rec]);
+      if (kind === DATA_KIND.I2C) {
+        const rec = decodeI2cRecord(bytes);
+        if (rec) setI2cRecords((rs) => [...rs.slice(-499), rec]);
+      } else {
+        const pkt = decodeBleSniff(bytes);
+        if (pkt) setBlePackets((ps) => [...ps.slice(-1999), pkt]);
+      }
     }).then((u) => (unlisten = u));
     return () => unlisten?.();
   }, [dataDesc?.kind]);
@@ -940,55 +953,47 @@ export default function App() {
 
       <div className="flex min-h-0 flex-1 gap-3 p-3">
         <Card className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <CardHeader className="flex-row items-center justify-between border-b py-2">
-            <CardTitle
-              className="flex items-center gap-2"
-              title={
-                dataSrcPins
-                  ? `bridged ${dataDesc?.name ?? "UART"} — into the Duta on TX GPIO${dataSrcPins.tx} · RX GPIO${dataSrcPins.rx}`
-                  : undefined
-              }
-            >
-              Console: {dataDesc ? dataDesc.name : "DATA"}
-              {dataSrcPins && (
-                <span className="font-mono text-[10px] font-normal text-muted-foreground">
-                  TX {dataSrcPins.tx >= 0 ? `GPIO${dataSrcPins.tx}` : "—"} · RX{" "}
-                  {dataSrcPins.rx >= 0 ? `GPIO${dataSrcPins.rx}` : "—"}
+          {/* tab strip above the viewport: one tab per main view (the active
+              DATA stream, typed by kind). Ready for more streams/captures. */}
+          <CardHeader className="flex-row items-center gap-2 border-b py-0 pl-2 pr-3">
+            <div className="flex items-center self-end">
+              {(() => {
+                const kind = dataDesc?.kind ?? DATA_KIND.UART;
+                const Icon = kind === DATA_KIND.BLE_SNIFF ? Radio : kind === DATA_KIND.I2C ? Activity : TerminalIcon;
+                const label = kind === DATA_KIND.BLE_SNIFF ? "BLE sniffer" : kind === DATA_KIND.I2C ? "I²C" : "Console";
+                return (
+                  <div className="flex items-center gap-1.5 border-b-2 border-primary px-2 py-2 text-sm font-medium">
+                    <Icon className="size-3.5" /> {label}
+                  </div>
+                );
+              })()}
+            </div>
+            <div className="ml-auto flex items-center gap-2 self-center">
+              {dataSrcPins && dataDesc?.kind === DATA_KIND.UART && (
+                <span className="font-mono text-[10px] text-muted-foreground"
+                  title={`bridged into the Duta on TX GPIO${dataSrcPins.tx} · RX GPIO${dataSrcPins.rx}`}>
+                  TX {dataSrcPins.tx >= 0 ? `GPIO${dataSrcPins.tx}` : "—"} · RX {dataSrcPins.rx >= 0 ? `GPIO${dataSrcPins.rx}` : "—"}
                 </span>
               )}
-              {dataDesc && dataDesc.kind !== DATA_KIND.UART && dataDesc.kind !== DATA_KIND.I2C && (
-                <Badge variant="outline" className="text-[10px] font-normal">
-                  raw {dataDesc.name} stream · typed viewer coming
-                </Badge>
-              )}
               {hasKindSwitch && connected && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-6 px-2 text-[10px]"
+                <Button variant="outline" size="sm" className="h-6 px-2 text-[10px]"
                   title="Switch the bridged medium"
-                  onClick={() =>
-                    switchDataKind(
-                      dataDesc?.kind === DATA_KIND.I2C ? DATA_KIND.UART : DATA_KIND.I2C,
-                    )
-                  }
-                >
+                  onClick={() => switchDataKind(dataDesc?.kind === DATA_KIND.I2C ? DATA_KIND.UART : DATA_KIND.I2C)}>
                   {dataDesc?.kind === DATA_KIND.I2C ? "→ UART" : "→ I²C"}
                 </Button>
               )}
-            </CardTitle>
-            <span className="text-xs text-muted-foreground">
-              {baud} 8{parity[0].toUpperCase()}
-              {stopBits}
-            </span>
+              {dataDesc?.kind === DATA_KIND.UART && (
+                <span className="text-xs text-muted-foreground">
+                  {baud} 8{parity[0].toUpperCase()}{stopBits}
+                </span>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="min-h-0 flex-1 bg-[#0a0a0b] p-2">
             {dataDesc?.kind === DATA_KIND.I2C ? (
-              <I2cPanel
-                records={i2cRecords}
-                disabled={!connected || !hasCmd}
-                onClear={() => setI2cRecords([])}
-              />
+              <I2cPanel records={i2cRecords} disabled={!connected || !hasCmd} onClear={() => setI2cRecords([])} />
+            ) : dataDesc?.kind === DATA_KIND.BLE_SNIFF ? (
+              <BleSnifferPanel packets={blePackets} onClear={() => setBlePackets([])} />
             ) : (
               <Terminal ref={terminalRef} connected={connected} />
             )}

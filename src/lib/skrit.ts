@@ -441,6 +441,85 @@ export function decodeI2cRecord(p: number[] | Uint8Array): I2cRecord | null {
   };
 }
 
+// ---- BLE sniffer (DATA kind ble-sniff) ----
+const BLE_PDU_TYPE: Record<number, string> = {
+  0: "ADV_IND",
+  1: "ADV_DIRECT_IND",
+  2: "ADV_NONCONN_IND",
+  3: "SCAN_REQ",
+  4: "SCAN_RSP",
+  5: "CONNECT_IND",
+  6: "ADV_SCAN_IND",
+  7: "ADV_EXT_IND",
+};
+// A few common Bluetooth SIG company IDs (manufacturer-data, little-endian).
+const BLE_COMPANY: Record<number, string> = {
+  0x004c: "Apple",
+  0x0006: "Microsoft",
+  0x00e0: "Google",
+  0x0075: "Samsung",
+  0x0059: "Nordic",
+  0x000f: "Broadcom",
+  0x0001: "Ericsson",
+  0x00d2: "Bose",
+  0x0157: "Anhui Huami",
+  0x0171: "Amazon",
+};
+
+export interface BleSniffPacket {
+  ts: number; // device millis
+  channel: number; // 37/38/39
+  rssi: number; // negative dBm
+  type: string; // PDU type name
+  addr: string; // AdvA as a MAC string (or "" if none)
+  name: string; // local name from AD, if any
+  company: string; // manufacturer-data company, if any
+  payloadHex: string; // raw AdvData (after AdvA) as hex
+}
+
+const macStr = (b: number[]) =>
+  b.map((x) => x.toString(16).padStart(2, "0").toUpperCase()).reverse().join(":");
+
+/** Decode one ble-sniff DATA record: ts·ch·rssi·aa·len·pdu. Null if malformed. */
+export function decodeBleSniff(p: number[] | Uint8Array): BleSniffPacket | null {
+  const b = Array.from(p);
+  if (b.length < 11) return null;
+  const ts = (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
+  const channel = b[4];
+  const rssi = -b[5];
+  const pduLen = b[10];
+  const pdu = b.slice(11, 11 + pduLen);
+  if (pdu.length < 2) return null;
+  const type = BLE_PDU_TYPE[pdu[0] & 0x0f] ?? `0x${(pdu[0] & 0x0f).toString(16)}`;
+  let addr = "";
+  let payload: number[] = [];
+  // PDU types that carry AdvA(6) + AdvData
+  if ([0, 2, 4, 6, 7].includes(pdu[0] & 0x0f) && pdu.length >= 8) {
+    addr = macStr(pdu.slice(2, 8));
+    payload = pdu.slice(8);
+  } else {
+    payload = pdu.slice(2);
+  }
+  // walk the AD structures
+  let name = "";
+  let company = "";
+  for (let i = 0; i + 1 < payload.length; ) {
+    const len = payload[i];
+    if (len === 0 || i + 1 + len > payload.length + 1) break;
+    const adType = payload[i + 1];
+    const data = payload.slice(i + 2, i + 1 + len);
+    if (adType === 0x08 || adType === 0x09) {
+      name = new TextDecoder().decode(Uint8Array.from(data));
+    } else if (adType === 0xff && data.length >= 2) {
+      const cid = data[0] | (data[1] << 8);
+      company = BLE_COMPANY[cid] ?? `0x${cid.toString(16).padStart(4, "0")}`;
+    }
+    i += 1 + len;
+  }
+  const payloadHex = payload.map((x) => x.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+  return { ts, channel, rssi, type, addr, name, company, payloadHex };
+}
+
 /** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */
 export async function wifiConfigure(ssid: string, password: string): Promise<void> {
   await cfgSetStr(CFG.WIFI_PASS, password);
