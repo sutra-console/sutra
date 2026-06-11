@@ -89,6 +89,7 @@ export const disconnect = () => invoke<void>("disconnect");
 export interface BleDevice {
   id: string;
   name: string;
+  rssi: number | null; // advertised signal (dBm); list is sorted strongest-first
 }
 /** Scan for Duta peripherals over Bluetooth LE (~3s). */
 export const bleScan = () => invoke<BleDevice[]>("ble_scan");

@@ -1674,6 +1674,10 @@ export default function App() {
               <Bluetooth className="size-4" /> Bluetooth devices
             </DialogTitle>
           </DialogHeader>
+          <p className="-mt-2 text-xs text-muted-foreground">
+            The link is encrypted — the first connection pairs the device (accept the
+            Windows pairing prompt if it appears). Strongest signal is listed first.
+          </p>
           <div className="flex flex-col gap-2 py-1">
             {bleScanning ? (
               <p className="text-xs text-muted-foreground">Scanning…</p>
@@ -1685,11 +1689,19 @@ export default function App() {
                   key={d.id}
                   variant="outline"
                   size="sm"
-                  className="justify-start"
+                  className="justify-start gap-2"
                   onClick={() => handleBleConnect(d)}
                 >
                   <Bluetooth className="size-3.5" />
-                  <span className="truncate">{d.name || d.id}</span>
+                  <span className="min-w-0 flex-1 truncate text-left">{d.name || d.id}</span>
+                  {d.rssi != null && (
+                    <span
+                      className="shrink-0 font-mono text-[11px] text-muted-foreground"
+                      title={`signal ${d.rssi} dBm`}
+                    >
+                      {d.rssi >= -60 ? "▮▮▮" : d.rssi >= -75 ? "▮▮▯" : d.rssi >= -88 ? "▮▯▯" : "▯▯▯"} {d.rssi}
+                    </span>
+                  )}
                 </Button>
               ))
             )}

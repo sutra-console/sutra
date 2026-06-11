@@ -303,7 +303,20 @@ no need to mux. The two roles map to two **GATT services**, and **`caps.muxed` i
 the DATA service's sibling.) The host subscribes to both TX characteristics (CCC), writes console
 keystrokes to DATA-RX and CMD frames to CMD-RX. A frame larger than the negotiated ATT
 MTU (minus 3) is split across notifications and reassembled by the `0x00` delimiters; BLE
-adds no framing of its own. Pair/bond per your security needs.
+adds no framing of its own.
+
+**Security.** The **RX (write) and CCC (subscribe) attributes require an encrypted link**,
+so a central must complete **LE Secure Connections** pairing (ECDH P-256) before it can
+drive the device or receive notifications — the air link is never plaintext. A device with
+no display/keyboard uses **Just Works** pairing (encrypted, passively secure under LESC);
+one with input could raise this to passkey/numeric-compare. Bonds are persisted, so a paired
+host reconnects without re-pairing. This is the BLE equivalent of a network transport's
+`AUTH`: physical/link-layer access *is* the credential, so `INFO.flags AUTH_REQUIRED` stays 0.
+
+**Naming.** The device advertises a per-unit name `Duta-XXXX` (from its BLE address) plus
+the skrit CMD UUID in the scan response, so multiple Dutas are distinguishable and a central
+can filter by the CMD service. **Backpressure:** device→host notifications are queued and
+drained as controller buffers free, so a console/CMD burst is never dropped mid-frame.
 
 > Discovery: the app scans for the **CMD service UUID** (the skrit identifier) and a
 > `Duta`-prefixed name. nRF52840 is the reference (Zephyr + the in-tree BT stack); see
@@ -401,6 +414,13 @@ decodes Zigbee/Thread/6LoWPAN with no dissector from us. It's a single radio, so
 messages — see below): `value` holds the 802.15.4 channel (11–26 to pin one,
 **0 = promiscuous/auto-hop** across 11–26, sticking where traffic appears);
 `opt0..2` are unused. So `PROTO_SET idx=0, value=15` pins channel 15.
+
+**Injection (TX).** The DATA channel is bidirectional: a host **write** to the
+DATA channel is a MAC frame to **transmit** on the current channel. The host
+supplies the on-air MAC frame *without* the FCS — the radio appends it. The
+device drops back to RX after sending. (Inject on a network you control; a frame
+built with another node's source address + a high frame counter can desync that
+node's anti-replay state until it rejoins.)
 
 ## Link parameters (`PROTO_GET` / `PROTO_SET`)
 

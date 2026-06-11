@@ -36,6 +36,7 @@ const WRITE_CHUNK: usize = 180; // stay under a typical negotiated ATT MTU
 pub struct BleDevice {
     pub id: String,
     pub name: String,
+    pub rssi: Option<i16>, // advertised signal strength (dBm), strongest first in the list
 }
 
 /// Live BLE connection: the peripheral plus the two write characteristics.
@@ -79,12 +80,56 @@ pub async fn scan(secs: u64) -> Result<Vec<BleDevice>, String> {
     tokio::time::sleep(Duration::from_secs(secs)).await;
     let mut out = Vec::new();
     for p in adapter.peripherals().await.map_err(|e| e.to_string())? {
-        if let Some(name) = is_duta(&p).await {
-            out.push(BleDevice { id: p.id().to_string(), name });
+        if let Some(props) = p.properties().await.ok().flatten() {
+            let name = props.local_name.clone().unwrap_or_default();
+            if props.services.contains(&CMD_SVC) || name.starts_with("Duta") {
+                out.push(BleDevice { id: p.id().to_string(), name, rssi: props.rssi });
+            }
         }
     }
     let _ = adapter.stop_scan().await;
+    out.sort_by(|a, b| b.rssi.unwrap_or(i16::MIN).cmp(&a.rssi.unwrap_or(i16::MIN))); // strongest first
     Ok(out)
+}
+
+/// Pump the GATT notification stream into the console + response matcher until it
+/// ends (the peripheral disconnected). DATA-TX -> console, CMD-TX -> response matcher.
+async fn pump_notifications(
+    p: &Peripheral,
+    shared: &Arc<Shared>,
+    app: &AppHandle,
+    tx: &std::sync::mpsc::Sender<Frame>,
+) {
+    let mut stream = match p.notifications().await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut reader = FrameReader::new();
+    while let Some(n) = stream.next().await {
+        if n.uuid == DATA_TX {
+            shared.push_console(&n.value);
+            let _ = app.emit("sutra://data", n.value);
+        } else if n.uuid == CMD_TX {
+            for f in reader.push(&n.value).into_iter().flatten() {
+                if is_event(f.typ) {
+                    let _ = app.emit("sutra://event", (f.typ, f.body));
+                } else {
+                    let _ = tx.send(f);
+                }
+            }
+        }
+    }
+}
+
+/// After a reconnect, re-discover + re-subscribe and return the fresh RX write
+/// characteristics so the link's stored handles stay valid.
+async fn resubscribe(p: &Peripheral) -> Result<(Characteristic, Characteristic), String> {
+    p.discover_services().await.map_err(|e| e.to_string())?;
+    let chars = p.characteristics();
+    let find = |u: Uuid| chars.iter().find(|c| c.uuid == u).cloned().ok_or_else(|| format!("missing {u}"));
+    p.subscribe(&find(DATA_TX)?).await.map_err(|e| e.to_string())?;
+    p.subscribe(&find(CMD_TX)?).await.map_err(|e| e.to_string())?;
+    Ok((find(DATA_RX)?, find(CMD_RX)?))
 }
 
 /// Connect to a scanned device by id, discover the DATA + CMD services, and wire
@@ -119,36 +164,57 @@ pub async fn connect(shared: Arc<Shared>, app: AppHandle, id: String) -> Result<
     let cmd_rx = find(CMD_RX)?;
     let cmd_tx = find(CMD_TX)?;
 
-    peripheral.subscribe(&data_tx).await.map_err(|e| format!("subscribe DATA: {e}"))?;
-    peripheral.subscribe(&cmd_tx).await.map_err(|e| format!("subscribe CMD: {e}"))?;
+    // Subscribing touches the encrypted CCC, which triggers BLE pairing. btleplug
+    // has no pairing API, so on Windows it's OS-mediated (a pairing prompt / the
+    // bond from Settings) — surface that if it fails rather than a raw GATT error.
+    const PAIR_HINT: &str = "the Duta requires BLE pairing — accept the Windows pairing \
+        prompt (or pair it in Settings ▸ Bluetooth), then reconnect";
+    peripheral.subscribe(&data_tx).await.map_err(|e| format!("{PAIR_HINT} (DATA: {e})"))?;
+    peripheral.subscribe(&cmd_tx).await.map_err(|e| format!("{PAIR_HINT} (CMD: {e})"))?;
 
     // Route notifications: DATA-TX -> console, CMD-TX -> response matcher (mux_rx).
+    // The task loops so an *unexpected* drop auto-reconnects (the bond means no
+    // re-pairing); a user disconnect drops the link slot, which stops the loop.
     let (tx, rx) = std::sync::mpsc::channel::<Frame>();
     let notif = peripheral.clone();
     let s2 = shared.clone();
     let a2 = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut stream = match notif.notifications().await {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let mut reader = FrameReader::new();
-        while let Some(n) = stream.next().await {
-            if n.uuid == DATA_TX {
-                s2.push_console(&n.value);
-                let _ = a2.emit("sutra://data", n.value);
-            } else if n.uuid == CMD_TX {
-                for f in reader.push(&n.value).into_iter().flatten() {
-                    if is_event(f.typ) {
-                        let _ = a2.emit("sutra://event", (f.typ, f.body));
-                    } else {
-                        let _ = tx.send(f);
+        loop {
+            pump_notifications(&notif, &s2, &a2, &tx).await;
+            // Stream closed. If our slot no longer holds this peripheral, the user
+            // disconnected (or switched links) — stop. Otherwise try to reconnect.
+            let ours = { s2.ble_slot().as_ref().map(|l| l.peripheral.id()) } == Some(notif.id());
+            if !ours {
+                break;
+            }
+            let _ = a2.emit("sutra://link", false); // dropped — show offline while retrying
+            let mut back = false;
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let ours = { s2.ble_slot().as_ref().map(|l| l.peripheral.id()) } == Some(notif.id());
+                if !ours {
+                    return; // user disconnected during the retry window
+                }
+                if notif.connect().await.is_ok() {
+                    if let Ok((drx, crx)) = resubscribe(&notif).await {
+                        if let Some(link) = s2.ble_slot().as_mut() {
+                            link.data_rx = drx; // refresh handles after re-discovery
+                            link.cmd_rx = crx;
+                        }
+                        back = true;
+                        break;
                     }
                 }
             }
+            if back {
+                let _ = a2.emit("sutra://link", true);
+            } else {
+                let _ = s2.ble_slot().take();
+                let _ = a2.emit("sutra://link", false);
+                break;
+            }
         }
-        // The notification stream ended: the peripheral disconnected.
-        let _ = a2.emit("sutra://link", false);
     });
 
     let name = is_duta(&peripheral).await.unwrap_or_else(|| "Duta BLE".into());
