@@ -16,6 +16,14 @@ import {
 import { type DecodedRow, type Ieee154Frame } from "@/lib/skrit";
 
 const copyText = (s: string) => navigator.clipboard?.writeText(s).catch(() => {});
+// The on-air MAC frame from a captured record (ts·ch·rssi·lqi·flags·len·psdu),
+// minus the FCS — what you'd inject to replay it (the radio re-appends the FCS).
+const frameMac = (f: Ieee154Frame): number[] => {
+  const len = f.raw[8] ?? 0;
+  return f.raw.slice(9, 9 + Math.max(0, len - 2));
+};
+const parseHex = (s: string): number[] =>
+  (s.replace(/0x/gi, "").match(/[0-9a-fA-F]{2}/g) ?? []).map((b) => parseInt(b, 16));
 const fieldsText = (d: DecodedRow) => d.fields.map(([k, v]) => `${k}=${v}`).join("\n");
 const rowText = (d: DecodedRow) => {
   const f = d.fields.map(([k, v]) => `${k}=${v}`).join(" ");
@@ -46,6 +54,7 @@ export function Ieee154Panel({
   onSavePcap,
   canDecode,
   onDecode,
+  onInject,
 }: {
   frames: Ieee154Frame[];
   total: number; // total received (the frames buffer is capped)
@@ -53,6 +62,7 @@ export function Ieee154Panel({
   onSavePcap: () => void;
   canDecode?: boolean; // Wireshark/tshark present
   onDecode?: () => Promise<DecodedRow[]>; // dissect the current capture
+  onInject?: (mac: number[]) => void; // transmit a MAC frame (no FCS); undefined if not connected
 }) {
   const [mode, setMode] = useState<"nodes" | "packets" | "decoded">("nodes");
   const [decoded, setDecoded] = useState<DecodedRow[]>([]);
@@ -63,6 +73,7 @@ export function Ieee154Panel({
   const [live, setLive] = useState(false); // auto re-decode as frames arrive
   const [decErr, setDecErr] = useState(""); // last decode error (shown, not thrown)
   const [ctxRow, setCtxRow] = useState<DecodedRow | null>(null); // right-clicked decoded row
+  const [injectHex, setInjectHex] = useState(""); // a MAC frame to transmit, as hex
   // keep the latest onDecode + frame count in refs so the live interval (set up
   // once) always decodes the CURRENT capture, not a stale closure.
   const onDecodeRef = useRef(onDecode);
@@ -269,6 +280,28 @@ export function Ieee154Panel({
             filter: {selected.size} · clear <X className="size-3" />
           </button>
         )}
+        {onInject && (
+          <span className="flex items-center gap-1" title="Transmit a MAC frame (hex, no FCS) on the current channel">
+            <input
+              className="h-6 w-44 rounded border bg-transparent px-2 font-mono text-[11px] outline-none focus:border-primary"
+              placeholder="inject hex…"
+              value={injectHex}
+              spellCheck={false}
+              onChange={(e) => setInjectHex(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                const b = parseHex(injectHex);
+                if (b.length) onInject(b);
+              }}
+            />
+            <button type="button"
+              className="rounded border px-2 py-0.5 text-[11px] hover:bg-accent/50 disabled:opacity-50"
+              disabled={!parseHex(injectHex).length}
+              onClick={() => { const b = parseHex(injectHex); if (b.length) onInject(b); }}>
+              inject
+            </button>
+          </span>
+        )}
         <Button variant="outline" size="sm" className="ml-auto h-7 gap-1" disabled={!frames.length}
           title="Save the capture as a pcap (opens in Wireshark)" onClick={onSavePcap}>
           <Download className="size-3" /> Save .pcap
@@ -408,6 +441,16 @@ export function Ieee154Panel({
               <ContextMenuItem disabled={!ctxRow} onSelect={() => ctxRow && setDecFilter(ctxRow.protocol)}>
                 Filter to “{ctxRow?.protocol}”
               </ContextMenuItem>
+              {onInject && (
+                <ContextMenuItem
+                  disabled={!ctxRow}
+                  onSelect={() => {
+                    const f = ctxRow && frames[ctxRow.num - 1];
+                    if (f) onInject(frameMac(f));
+                  }}>
+                  Replay frame (TX)
+                </ContextMenuItem>
+              )}
             </ContextMenuContent>
           </ContextMenu>
         )}

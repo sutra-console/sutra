@@ -85,6 +85,7 @@ import {
   getIeee154Channel,
   tsharkAvailable,
   dissectIeee154,
+  dataWrite,
   getWorkspaceKeys,
   setWorkspaceKeys,
   type ZigbeeKey,
@@ -669,6 +670,16 @@ export default function App() {
   /** Dissect the current 802.15.4 capture with tshark (Zigbee/Thread/Matter). */
   const decodeIeee154Capture = () =>
     dissectIeee154(ieee154Frames.map((f) => f.raw), settings.tsharkPath);
+
+  /** Inject an 802.15.4 MAC frame (no FCS — the radio appends it) over the air. */
+  async function injectIeee154(mac: number[]) {
+    try {
+      await dataWrite(mac);
+      setStatus(`injected ${mac.length}-byte frame`);
+    } catch (e) {
+      setStatus(`inject failed: ${e}`);
+    }
+  }
 
   /** Pin the 802.15.4 sniffer to a channel (0 = auto-hop). */
   async function applyChannel(ch: number) {
@@ -1290,6 +1301,7 @@ export default function App() {
                 onSavePcap={saveIeee154}
                 canDecode={tsharkOk}
                 onDecode={decodeIeee154Capture}
+                onInject={connected ? injectIeee154 : undefined}
               />
             ) : (
               <Terminal ref={terminalRef} connected={connected} />
