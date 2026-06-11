@@ -43,10 +43,16 @@ export function BleSnifferPanel({
   onSavePcap: () => void;
 }) {
   const [mode, setMode] = useState<"devices" | "packets">("devices");
-  const logEnd = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
+  // Sticky-follow: keep the packet stream pinned to the bottom ONLY while the
+  // user is already near the bottom, so scrolling up to inspect stays put.
+  // (scrollIntoView would yank every ancestor and pin the whole layout.)
   useEffect(() => {
-    if (mode === "packets") logEnd.current?.scrollIntoView({ block: "nearest" });
+    if (mode !== "packets") return;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight;
   }, [packets.length, mode]);
 
   // group into devices (newest RSSI/name win; keep packet count + channels)
@@ -99,7 +105,7 @@ export function BleSnifferPanel({
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto rounded border">
+      <div ref={scrollRef} className="min-h-0 min-w-0 flex-1 overflow-auto rounded border">
         {mode === "devices" ? (
           <table className="w-full text-left font-mono text-xs">
             <thead className="sticky top-0 bg-background text-muted-foreground">
@@ -145,7 +151,7 @@ export function BleSnifferPanel({
                   <td className="px-2 py-0.5 tabular-nums">{p.rssi}</td>
                   <td className="px-2 py-0.5 text-muted-foreground">{p.type}</td>
                   <td className="px-2 py-0.5">{p.addr || "—"}</td>
-                  <td className="px-2 py-0.5 text-muted-foreground">{p.payloadHex}</td>
+                  <td className="whitespace-nowrap px-2 py-0.5 text-muted-foreground">{p.payloadHex}</td>
                 </tr>
               ))}
             </tbody>
@@ -156,7 +162,6 @@ export function BleSnifferPanel({
             Listening for BLE advertising… nearby devices will appear here.
           </p>
         )}
-        <div ref={logEnd} />
       </div>
     </div>
   );

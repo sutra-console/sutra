@@ -141,10 +141,13 @@ export function I2cPanel({
   const [writeHex, setWriteHex] = useState("");
   const [readLen, setReadLen] = useState("0");
   const [err, setErr] = useState<string | null>(null);
-  const logEnd = useRef<HTMLDivElement | null>(null);
+  const logRef = useRef<HTMLDivElement | null>(null);
 
+  // sticky-follow the log only when already near the bottom (don't yank ancestors)
   useEffect(() => {
-    if (mode === "log") logEnd.current?.scrollIntoView({ block: "nearest" });
+    if (mode !== "log") return;
+    const el = logRef.current;
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight;
   }, [records.length, mode]);
 
   async function scan() {
@@ -251,7 +254,7 @@ export function I2cPanel({
           </div>
         </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto rounded border">
+        <div ref={logRef} className="min-h-0 min-w-0 flex-1 overflow-auto rounded border">
           <table className="w-full text-left font-mono text-xs">
             <thead className="sticky top-0 bg-background text-muted-foreground">
               <tr>
@@ -284,7 +287,6 @@ export function I2cPanel({
               )}
             </tbody>
           </table>
-          <div ref={logEnd} />
         </div>
       )}
     </div>
