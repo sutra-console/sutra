@@ -1,7 +1,7 @@
 // BLE sniffer view — the typed viewer for DATA kind ble-sniff. Two modes:
 // a "Devices" table (grouped by advertiser address — what's nearby) and a live
 // "Packets" stream. Fed by decoded sniff records from the DATA channel.
-import { Download, Radio, Trash2 } from "lucide-react";
+import { Download, Radio, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +49,7 @@ export function BleSnifferPanel({
     key: "addr",
     dir: 1,
   });
+  const [selected, setSelected] = useState<Set<string>>(new Set()); // device addrs filtering Packets
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // Sticky-follow: keep the packet stream pinned to the bottom ONLY while the
@@ -100,6 +101,17 @@ export function BleSnifferPanel({
     setSort((s) => (s.key === key ? { key, dir: (s.dir * -1) as 1 | -1 } : { key, dir: 1 }));
   const arrow = (key: typeof sort.key) => (sort.key === key ? (sort.dir === 1 ? " ▲" : " ▼") : "");
 
+  // select devices (in the Devices table) to filter the Packets stream to them
+  const toggleSelect = (addr: string) =>
+    setSelected((s) => {
+      const n = new Set(s);
+      n.has(addr) ? n.delete(addr) : n.add(addr);
+      return n;
+    });
+  const shownPackets = selected.size
+    ? packets.filter((p) => selected.has(p.addr))
+    : packets;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 text-foreground">
       <div className="flex items-center gap-2">
@@ -114,6 +126,14 @@ export function BleSnifferPanel({
         </div>
         <Badge variant="secondary" className="gap-1"><Radio className="size-3" /> {devList.length} devices</Badge>
         <span className="text-xs text-muted-foreground">{packets.length} packets</span>
+        {selected.size > 0 && (
+          <button type="button"
+            className="inline-flex items-center gap-1 rounded border border-primary/60 px-1.5 py-0.5 text-[11px] text-primary hover:bg-accent"
+            title="Packets are filtered to the selected devices — click to clear"
+            onClick={() => { setSelected(new Set()); }}>
+            filter: {selected.size} · clear <X className="size-3" />
+          </button>
+        )}
         <Button variant="outline" size="sm" className="ml-auto h-7 gap-1" disabled={!packets.length}
           title="Save the capture as a pcap (opens in Wireshark)" onClick={onSavePcap}>
           <Download className="size-3" /> Save .pcap
@@ -139,7 +159,10 @@ export function BleSnifferPanel({
             </thead>
             <tbody>
               {devList.map((d) => (
-                <tr key={d.addr || d.type} className="border-t">
+                <tr key={d.addr || d.type}
+                  className={`cursor-pointer border-t ${selected.has(d.addr) ? "bg-primary/15" : "hover:bg-accent/40"}`}
+                  title="Click to filter the Packets view to this device"
+                  onClick={() => d.addr && toggleSelect(d.addr)}>
                   <td className="px-2 py-0.5">{d.addr || <span className="text-muted-foreground">—</span>}</td>
                   <td className="px-2 py-0.5 font-sans">{d.name || <span className="text-muted-foreground">·</span>}</td>
                   <td className="px-2 py-0.5 font-sans">{d.company || <span className="text-muted-foreground">·</span>}</td>
@@ -163,7 +186,7 @@ export function BleSnifferPanel({
               </tr>
             </thead>
             <tbody>
-              {packets.slice(-300).map((p, i) => (
+              {shownPackets.slice(-300).map((p, i) => (
                 <tr key={i} className="border-t">
                   <td className="px-2 py-0.5 text-muted-foreground">{p.channel}</td>
                   <td className="px-2 py-0.5 tabular-nums">{p.rssi}</td>
@@ -178,6 +201,11 @@ export function BleSnifferPanel({
         {packets.length === 0 && (
           <p className="px-2 py-6 text-center text-xs text-muted-foreground">
             Listening for BLE advertising… nearby devices will appear here.
+          </p>
+        )}
+        {packets.length > 0 && mode === "packets" && shownPackets.length === 0 && (
+          <p className="px-2 py-6 text-center text-xs text-muted-foreground">
+            No packets from the selected device(s) yet.
           </p>
         )}
       </div>
