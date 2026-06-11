@@ -27,6 +27,13 @@ Transport: **streamable HTTP** at `http://127.0.0.1:<port>/mcp` (localhost only)
 | `set_data_kind` | `kind` | switch the bridged medium: `uart` (console) or `i2c` (master) |
 | `i2c_scan` | none | probe the I2C bus; returns the addresses that ACKed (kind `i2c`) |
 | `i2c_transfer` | `addr`, `write_hex?`, `read_len?` | master write-then-read; NAK → not-found (kind `i2c`) |
+
+> **I²C device definitions.** The app's I²C view can render live controls
+> (number/toggle/slider/enum/button) from JSON files in a workspace's
+> `.sutra/i2c/` — one per device: `{ name, addr, registers: [{ name, reg, bytes,
+> access, control, min, max, options }] }`. Each register reads/writes via
+> `i2c_transfer`, and the transaction log is annotated with the matching
+> `device·register` names. Picking a workspace seeds an `example.json`.
 | `list_inputs` | none | inputs with current values (digital/analog) |
 | `read_input` | `index` | read one input value |
 | `set_baud` | `baud`, `data_bits?`, `parity?`, `stop_bits?` | reconfigure the **target** DATA UART (over CMD) |

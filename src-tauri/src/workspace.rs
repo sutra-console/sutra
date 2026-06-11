@@ -51,7 +51,54 @@ fn set(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
     }
     std::fs::write(&marker, path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
     let _ = std::fs::create_dir_all(path.join(".sutra").join("captures"));
+    seed_i2c_example(&path.join(".sutra").join("i2c"));
     Ok(path.to_path_buf())
+}
+
+// ---- I2C device definitions (.sutra/i2c/*.json) ----------------------------
+
+const I2C_EXAMPLE: &str = r#"{
+  "name": "Example device",
+  "addr": 60,
+  "registers": [
+    { "name": "Config",  "reg": 1,   "bytes": 1, "access": "rw", "control": "number", "desc": "8-bit config register" },
+    { "name": "Enable",  "reg": 2,   "bytes": 1, "access": "rw", "control": "toggle" },
+    { "name": "Level",   "reg": 3,   "bytes": 1, "access": "rw", "control": "slider", "min": 0, "max": 255 },
+    { "name": "Mode",    "reg": 4,   "bytes": 1, "access": "rw", "control": "enum",
+      "options": [ { "label": "Off", "value": 0 }, { "label": "Auto", "value": 1 }, { "label": "Manual", "value": 2 } ] },
+    { "name": "Reset",   "reg": 255, "bytes": 0, "access": "w",  "control": "button", "desc": "command, no value" }
+  ]
+}
+"#;
+
+/// Drop a starter def into an empty i2c/ dir so the controls view has something
+/// to show; the user edits/adds JSON files describing their real devices.
+fn seed_i2c_example(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let empty = std::fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+    if empty {
+        let _ = std::fs::write(dir.join("example.json"), I2C_EXAMPLE);
+    }
+}
+
+/// Every I2C device definition in `<ws>/.sutra/i2c/*.json` (raw JSON values).
+pub fn list_i2c_defs(app: &AppHandle) -> Vec<serde_json::Value> {
+    let Some(dot) = dot_sutra(app) else { return Vec::new() };
+    let dir = dot.join("i2c");
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            if e.path().extension().is_some_and(|x| x == "json") {
+                if let Some(v) = std::fs::read(e.path())
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---- pcap export -----------------------------------------------------------

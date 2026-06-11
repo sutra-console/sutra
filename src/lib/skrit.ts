@@ -415,6 +415,39 @@ export async function i2cScan(): Promise<number[]> {
   return found;
 }
 
+// ---- I2C device definitions (workspace .sutra/i2c/*.json) ----
+export interface I2cReg {
+  name: string;
+  reg: number; // register / command pointer byte
+  bytes?: number; // value width: 0 = command (no value), 1, 2 (default 1)
+  access?: "r" | "rw" | "w"; // default rw
+  control?: "number" | "toggle" | "slider" | "enum" | "button";
+  min?: number;
+  max?: number;
+  options?: { label: string; value: number }[];
+  desc?: string;
+}
+export interface I2cDef {
+  name: string;
+  addr: number; // 7-bit address
+  registers: I2cReg[];
+}
+/** Load the I2C device definitions from the workspace's .sutra/i2c/. */
+export const listI2cDefs = () => invoke<I2cDef[]>("list_i2c_defs");
+
+/** Read a def register's value (handles the byte width). */
+export async function i2cReadReg(addr: number, r: I2cReg): Promise<number> {
+  const n = r.bytes ?? 1;
+  const v = await i2cXfer(addr, [r.reg], n);
+  return n === 2 ? (v[0] ?? 0) | ((v[1] ?? 0) << 8) : (v[0] ?? 0);
+}
+/** Write a def register (or send a command when bytes=0). */
+export async function i2cWriteReg(addr: number, r: I2cReg, value: number): Promise<void> {
+  const n = r.bytes ?? 1;
+  const bytes = n === 0 ? [] : n === 2 ? [value & 0xff, (value >> 8) & 0xff] : [value & 0xff];
+  await i2cXfer(addr, [r.reg, ...bytes], 0);
+}
+
 /** Master transfer: write `w`, then read `rlen` bytes (either may be empty). */
 export async function i2cXfer(addr: number, w: number[], rlen: number): Promise<number[]> {
   const resp = await sendCmd(MSG.I2C_XFER, [addr, w.length, ...w, rlen]);

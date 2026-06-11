@@ -237,6 +237,12 @@ fn save_ble_pcap(app: tauri::AppHandle, name: String, records: Vec<Vec<u8>>) -> 
     workspace::save_ble_pcap(&app, &name, records)
 }
 
+/// The I2C device definitions in the workspace's .sutra/i2c/ (raw JSON).
+#[tauri::command]
+fn list_i2c_defs(app: tauri::AppHandle) -> Vec<serde_json::Value> {
+    workspace::list_i2c_defs(&app)
+}
+
 #[tauri::command]
 fn macros_set(state: tauri::State<AppState>, macros: Vec<MacroRec>) {
     serial::macros_set(&state.shared, macros);
@@ -333,6 +339,7 @@ pub fn run() {
             get_workspace,
             pick_workspace,
             save_ble_pcap,
+            list_i2c_defs,
             export_set,
             import_set,
             mcp_start,

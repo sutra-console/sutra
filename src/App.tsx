@@ -72,6 +72,8 @@ import {
   pwmConfigGet,
   pwmConfigSet,
   getWorkspace,
+  type I2cDef,
+  listI2cDefs,
   pickWorkspace,
   rgbToHex,
   saveBlePcap,
@@ -233,6 +235,8 @@ export default function App() {
   const [i2cRecords, setI2cRecords] = useState<I2cRecord[]>([]); // decoded i2c DATA records
   const [blePackets, setBlePackets] = useState<BleSniffPacket[]>([]); // decoded ble-sniff records
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
+  const [i2cDefs, setI2cDefs] = useState<I2cDef[]>([]); // i2c device definitions from .sutra/i2c
+  const [i2cPresent, setI2cPresent] = useState<Set<number>>(new Set()); // addresses seen in the last scan
   const [macros, setMacros] = useState<MacroRec[]>([]);
   const [runs, setRuns] = useState<MacroRunInfo[]>([]); // in-flight macro runs
 
@@ -291,6 +295,7 @@ export default function App() {
     document.documentElement.classList.add("dark");
     refreshPorts();
     getWorkspace().then(setWorkspace).catch(() => {});
+    listI2cDefs().then(setI2cDefs).catch(() => {});
     macrosGet().then(setMacros).catch(() => {});
     syncConnState(); // adopt a connection the backend already holds (after a reload)
 
@@ -564,6 +569,7 @@ export default function App() {
       if (path) {
         setWorkspace(path);
         macrosGet().then(setMacros).catch(() => {}); // store re-pointed into .sutra
+        listI2cDefs().then(setI2cDefs).catch(() => {}); // defs from the new .sutra/i2c
         setStatus(`workspace: ${path}`);
       }
     } catch (e) {
@@ -1035,7 +1041,14 @@ export default function App() {
           </CardHeader>
           <CardContent className="min-h-0 flex-1 bg-[#0a0a0b] p-2">
             {dataDesc?.kind === DATA_KIND.I2C ? (
-              <I2cPanel records={i2cRecords} disabled={!connected || !hasCmd} onClear={() => setI2cRecords([])} />
+              <I2cPanel
+                records={i2cRecords}
+                defs={i2cDefs}
+                present={i2cPresent}
+                disabled={!connected || !hasCmd}
+                onClear={() => setI2cRecords([])}
+                onScan={(found) => setI2cPresent(new Set(found))}
+              />
             ) : dataDesc?.kind === DATA_KIND.BLE_SNIFF ? (
               <BleSnifferPanel
                 packets={blePackets}
