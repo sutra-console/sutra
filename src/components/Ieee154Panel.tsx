@@ -158,9 +158,13 @@ export function Ieee154Panel({
     }
   }
   // selected nodes filter the Packets stream to frames with that src OR dst.
-  const shown = selected.size
-    ? frames.filter((f) => selected.has(f.src) || selected.has(f.dst))
-    : frames;
+  // Only compute in Packets mode — this group-map over the whole buffer ran on
+  // every render (incl. live re-decodes + 150ms frame flushes), which is what
+  // froze the UI under live decode.
+  const shown =
+    mode !== "packets" ? [] : selected.size
+      ? frames.filter((f) => selected.has(f.src) || selected.has(f.dst))
+      : frames;
   const packetRows: { f: Ieee154Frame; n: number }[] = group
     ? (() => {
         const m = new Map<string, { f: Ieee154Frame; n: number }>();
