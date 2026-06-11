@@ -83,6 +83,8 @@ import {
   saveIeee154Pcap,
   setIeee154Channel,
   getIeee154Channel,
+  tsharkAvailable,
+  dissectIeee154,
   wifiStatus,
   wsDiscover,
   type DiscoveredDuta,
@@ -244,6 +246,7 @@ export default function App() {
   const [ieee154Frames, setIeee154Frames] = useState<Ieee154Frame[]>([]); // decoded 802.15.4 frames (last 2000)
   const [ieee154Total, setIeee154Total] = useState(0); // total received (the buffer is capped)
   const [ch154, setCh154] = useState(0); // 802.15.4 sniffer channel (0 = auto-hop, 11..26 = pinned)
+  const [tsharkOk, setTsharkOk] = useState(false); // Wireshark tshark present (enables in-app decode)
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
   const [i2cDefs, setI2cDefs] = useState<I2cDef[]>([]); // i2c device definitions from .sutra/i2c
   const [i2cPresent, setI2cPresent] = useState<Set<number>>(new Set()); // addresses seen in the last scan
@@ -613,6 +616,14 @@ export default function App() {
       getIeee154Channel().then(setCh154).catch(() => {});
     }
   }, [dataDesc?.kind, connected]);
+
+  // Is Wireshark's tshark available? (enables in-app Zigbee/Thread/Matter decode)
+  useEffect(() => {
+    tsharkAvailable().then(setTsharkOk).catch(() => setTsharkOk(false));
+  }, []);
+
+  /** Dissect the current 802.15.4 capture with tshark (Zigbee/Thread/Matter). */
+  const decodeIeee154Capture = () => dissectIeee154(ieee154Frames.map((f) => f.raw));
 
   /** Pin the 802.15.4 sniffer to a channel (0 = auto-hop). */
   async function applyChannel(ch: number) {
@@ -1186,6 +1197,8 @@ export default function App() {
                 total={ieee154Total}
                 onClear={() => { setIeee154Frames([]); setIeee154Total(0); }}
                 onSavePcap={saveIeee154}
+                canDecode={tsharkOk}
+                onDecode={decodeIeee154Capture}
               />
             ) : (
               <Terminal ref={terminalRef} connected={connected} />

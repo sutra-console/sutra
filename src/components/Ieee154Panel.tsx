@@ -7,7 +7,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { type Ieee154Frame } from "@/lib/skrit";
+import { type DecodedRow, type Ieee154Frame } from "@/lib/skrit";
+
+// Color the protocol badge by upper-layer stack (from Wireshark's Protocol column).
+function protoColor(p: string): string {
+  if (/zigbee|zbee/i.test(p)) return "text-amber-400";
+  if (/thread|6lowpan|mle|coap|matter/i.test(p)) return "text-sky-400";
+  if (/ack|802\.15\.4|wpan/i.test(p)) return "text-muted-foreground";
+  return "text-emerald-400";
+}
 
 interface Node {
   addr: string;
@@ -23,13 +31,28 @@ export function Ieee154Panel({
   total,
   onClear,
   onSavePcap,
+  canDecode,
+  onDecode,
 }: {
   frames: Ieee154Frame[];
   total: number; // total received (the frames buffer is capped)
   onClear: () => void;
   onSavePcap: () => void;
+  canDecode?: boolean; // Wireshark/tshark present
+  onDecode?: () => Promise<DecodedRow[]>; // dissect the current capture
 }) {
-  const [mode, setMode] = useState<"nodes" | "packets">("nodes");
+  const [mode, setMode] = useState<"nodes" | "packets" | "decoded">("nodes");
+  const [decoded, setDecoded] = useState<DecodedRow[]>([]);
+  const [decoding, setDecoding] = useState(false);
+  async function runDecode() {
+    if (!onDecode) return;
+    setDecoding(true);
+    try {
+      setDecoded(await onDecode());
+    } finally {
+      setDecoding(false);
+    }
+  }
   const [group, setGroup] = useState(true); // collapse identical packets to the latest
   const [sort, setSort] = useState<{ key: "addr" | "rssi" | "count"; dir: 1 | -1 }>({
     key: "addr",
@@ -132,10 +155,10 @@ export function Ieee154Panel({
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 text-foreground">
       <div className="flex items-center gap-2">
         <div className="flex overflow-hidden rounded border text-xs">
-          {(["nodes", "packets"] as const).map((m) => (
+          {(["nodes", "packets", ...(canDecode ? (["decoded"] as const) : [])] as const).map((m) => (
             <button key={m} type="button"
               className={`px-2.5 py-1 capitalize ${mode === m ? "bg-accent" : "hover:bg-accent/50"}`}
-              onClick={() => setMode(m)}>
+              onClick={() => { setMode(m); if (m === "decoded" && !decoded.length) runDecode(); }}>
               {m}
             </button>
           ))}
@@ -148,6 +171,15 @@ export function Ieee154Panel({
             title="Collapse identical frames to the latest, with a count"
             onClick={() => setGroup((g) => !g)}>
             group identical
+          </button>
+        )}
+        {mode === "decoded" && (
+          <button type="button"
+            className="rounded border px-2 py-0.5 text-[11px] hover:bg-accent/50 disabled:opacity-50"
+            title="Re-run Wireshark dissection on the current capture"
+            disabled={decoding || !frames.length}
+            onClick={runDecode}>
+            {decoding ? "decoding…" : "↻ decode"}
           </button>
         )}
         {selected.size > 0 && (
@@ -194,7 +226,7 @@ export function Ieee154Panel({
               ))}
             </tbody>
           </table>
-        ) : (
+        ) : mode === "packets" ? (
           <table className="w-full text-left font-mono text-xs">
             <thead className="sticky top-0 bg-background text-muted-foreground">
               <tr>
@@ -221,10 +253,43 @@ export function Ieee154Panel({
               ))}
             </tbody>
           </table>
+        ) : (
+          // Decoded: Wireshark (tshark) dissection of the capture — the real
+          // upper-layer protocol (ZigBee/Thread/6LoWPAN/Matter) and a summary.
+          <table className="w-full text-left font-mono text-xs">
+            <thead className="sticky top-0 bg-background text-muted-foreground">
+              <tr>
+                <th className="px-2 py-1 font-normal">#</th>
+                <th className="px-2 py-1 font-normal">Ch</th>
+                <th className="px-2 py-1 font-normal">RSSI</th>
+                <th className="px-2 py-1 font-normal">Protocol</th>
+                <th className="px-2 py-1 font-normal">Info</th>
+              </tr>
+            </thead>
+            <tbody>
+              {decoded.map((d) => {
+                const f = frames[d.num - 1];
+                return (
+                  <tr key={d.num} className="border-t">
+                    <td className="px-2 py-0.5 tabular-nums text-muted-foreground">{d.num}</td>
+                    <td className="px-2 py-0.5 text-muted-foreground">{f?.channel ?? "—"}</td>
+                    <td className="px-2 py-0.5 tabular-nums">{f?.rssi ?? "—"}</td>
+                    <td className={`px-2 py-0.5 ${protoColor(d.protocol)}`}>{d.protocol}</td>
+                    <td className="whitespace-nowrap px-2 py-0.5">{d.info}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         )}
         {frames.length === 0 && (
           <p className="px-2 py-6 text-center text-xs text-muted-foreground">
             Listening for IEEE 802.15.4 frames… Zigbee/Thread traffic on channels 11–26 will appear here.
+          </p>
+        )}
+        {mode === "decoded" && frames.length > 0 && !decoded.length && (
+          <p className="px-2 py-6 text-center text-xs text-muted-foreground">
+            {decoding ? "Dissecting with Wireshark…" : "Hit ↻ decode to dissect the capture."}
           </p>
         )}
         {frames.length > 0 && mode === "packets" && shown.length === 0 && (

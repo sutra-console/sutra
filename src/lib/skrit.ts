@@ -124,6 +124,17 @@ export const saveBlePcap = (name: string, records: number[][]) =>
   invoke<string>("save_ble_pcap", { name, records });
 export const saveIeee154Pcap = (name: string, records: number[][]) =>
   invoke<string>("save_ieee154_pcap", { name, records });
+
+export interface DecodedRow {
+  num: number; // 1-based, maps to record index num-1
+  protocol: string; // Wireshark Protocol column (ZigBee, Thread, 6LoWPAN, …)
+  info: string; // Info column (human summary)
+}
+/** Is Wireshark's tshark available for in-app decoding? */
+export const tsharkAvailable = () => invoke<boolean>("tshark_available");
+/** Dissect raw ieee802154 records with tshark → per-packet Protocol/Info. */
+export const dissectIeee154 = (records: number[][]) =>
+  invoke<DecodedRow[]>("dissect_ieee154", { records });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });

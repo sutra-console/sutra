@@ -223,6 +223,90 @@ pub fn save_ieee154_pcap(app: &AppHandle, name: &str, records: Vec<Vec<u8>>) -> 
     Ok(path.to_string_lossy().into_owned())
 }
 
+// ---- tshark dissection -----------------------------------------------------
+// Thread / Zigbee / Matter are standard, fully-dissected protocols — we don't
+// reimplement them. Instead we shell out to Wireshark's `tshark` as a dissection
+// engine: build the same LINKTYPE_IEEE802_15_4_TAP pcap, let tshark decode the
+// whole stack, and consume the per-packet Protocol/Info columns.
+
+/// Find a `tshark` binary: PATH, then the usual install locations per-OS.
+fn tshark_path() -> Option<PathBuf> {
+    let candidates: &[&str] = if cfg!(windows) {
+        &[
+            r"C:\Program Files\Wireshark\tshark.exe",
+            r"C:\Program Files (x86)\Wireshark\tshark.exe",
+        ]
+    } else {
+        &[
+            "/usr/bin/tshark",
+            "/usr/local/bin/tshark",
+            "/opt/homebrew/bin/tshark",
+            "/Applications/Wireshark.app/Contents/MacOS/tshark",
+        ]
+    };
+    // PATH first (handles custom installs), then the known spots.
+    let exe = if cfg!(windows) { "tshark.exe" } else { "tshark" };
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let p = dir.join(exe);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    candidates.iter().map(PathBuf::from).find(|p| p.is_file())
+}
+
+#[derive(serde::Serialize)]
+pub struct DecodedRow {
+    pub num: u32,
+    pub protocol: String, // Wireshark's Protocol column (ZigBee, Thread, 6LoWPAN, …)
+    pub info: String,     // the Info column (human summary, incl. addresses)
+}
+
+/// Whether tshark is available (so the UI can offer/disable the Decode action).
+pub fn tshark_available() -> bool {
+    tshark_path().is_some()
+}
+
+/// Dissect raw ieee802154 records with tshark and return per-packet decode rows.
+/// One tshark run over a temp TAP pcap; rows map 1:1 to the input records by order.
+pub fn dissect_ieee154(records: Vec<Vec<u8>>) -> Result<Vec<DecodedRow>, String> {
+    if records.is_empty() {
+        return Ok(vec![]);
+    }
+    let tshark = tshark_path().ok_or("Wireshark (tshark) not found — install it to decode")?;
+    let bytes = ieee154_pcap(&records);
+    let tmp = std::env::temp_dir().join("sutra_dissect.pcap");
+    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+
+    let out = std::process::Command::new(&tshark)
+        .args([
+            "-r", &tmp.to_string_lossy(),
+            "-T", "fields",
+            "-e", "frame.number",
+            "-e", "_ws.col.Protocol",
+            "-e", "_ws.col.Info",
+            "-E", "separator=/t",
+        ])
+        .output()
+        .map_err(|e| format!("run tshark: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("tshark: {}", String::from_utf8_lossy(&out.stderr)));
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let mut it = line.splitn(3, '\t');
+        let num = it.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        let protocol = it.next().unwrap_or("").to_string();
+        let info = it.next().unwrap_or("").to_string();
+        rows.push(DecodedRow { num, protocol, info });
+    }
+    Ok(rows)
+}
+
 // ---- Tauri commands --------------------------------------------------------
 
 /// Open a folder picker and adopt the chosen folder as the workspace.

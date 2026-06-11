@@ -243,6 +243,18 @@ fn save_ieee154_pcap(app: tauri::AppHandle, name: String, records: Vec<Vec<u8>>)
     workspace::save_ieee154_pcap(&app, &name, records)
 }
 
+/// Is Wireshark's tshark available (gates the in-app decode action)?
+#[tauri::command]
+fn tshark_available() -> bool {
+    workspace::tshark_available()
+}
+
+/// Dissect raw ieee802154 records with tshark → per-packet Protocol/Info rows.
+#[tauri::command]
+fn dissect_ieee154(records: Vec<Vec<u8>>) -> Result<Vec<workspace::DecodedRow>, String> {
+    workspace::dissect_ieee154(records)
+}
+
 /// The I2C device definitions in the workspace's .sutra/i2c/ (raw JSON).
 #[tauri::command]
 fn list_i2c_defs(app: tauri::AppHandle) -> Vec<serde_json::Value> {
@@ -346,6 +358,8 @@ pub fn run() {
             pick_workspace,
             save_ble_pcap,
             save_ieee154_pcap,
+            tshark_available,
+            dissect_ieee154,
             list_i2c_defs,
             export_set,
             import_set,
