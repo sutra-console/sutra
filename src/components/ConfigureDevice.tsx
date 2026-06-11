@@ -17,7 +17,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import {
   CTRL, DUTA_ACTIVE_LOW, type IoRow, type PinCap, PINCAP,
-  getIoConfig, pinCaps, reboot, resetIoConfig, setIoConfig,
+  dataPins, getIoConfig, pinCaps, reboot, resetIoConfig, setIoConfig,
 } from "@/lib/skrit";
 
 const ROLE_LABEL: Record<number, string> = { [CTRL.IO]: "IO", [CTRL.PWM]: "PWM", [CTRL.RGB]: "RGB" };
@@ -39,6 +39,7 @@ export function ConfigureDevice({
 }) {
   const [pins, setPins] = useState<PinCap[]>([]);
   const [rows, setRows] = useState<IoRow[]>([]);
+  const [data, setData] = useState<{ tx: number; rx: number } | null>(null); // DATA UART pins (fixed)
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [badRow, setBadRow] = useState<number | null>(null);
@@ -58,6 +59,7 @@ export function ConfigureDevice({
       })
       .catch((e) => setNote(String(e)))
       .finally(() => setLoading(false));
+    dataPins().then(setData).catch(() => setData(null)); // older firmware: no key
   }, [open]);
 
   const capOf = (pin: number) => pins.find((p) => p.pin === pin);
@@ -139,6 +141,16 @@ export function ConfigureDevice({
               Assign a role and name to each pin. Only pins this board breaks out are listed;
               ⚠ marks a strapping pin or one that shares onboard hardware. Changes apply after a reboot.
             </p>
+
+            {data && (
+              <div className="flex items-center gap-2 rounded-md border border-dashed px-2 py-1.5 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">DATA UART</span>
+                <span className="font-mono">
+                  TX {data.tx >= 0 ? `GPIO${data.tx}` : "—"} · RX {data.rx >= 0 ? `GPIO${data.rx}` : "—"}
+                </span>
+                <span className="ml-auto">fixed — the bridged console</span>
+              </div>
+            )}
 
             <div className="flex flex-col gap-2">
               {rows.map((row, i) => {

@@ -124,7 +124,7 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x27` | `MACRO_RUN` | `id(1)` | (none) | device runs the stored **skrit-mc** program through its VM (see *Macro bytecode*) |
 | `0x30` | `EE_READ` | `addr(2)`, `n(1)` | `bytes…` |
 | `0x31` | `EE_WRITE` | `addr(2)`, `bytes…` | (none) |
-| `0x40` | `CFG_GET` | `key(1)` | `key(1)`, `value…` | device key/value config. Defined keys: `0x10` WiFi SSID (rw), `0x11` WiFi password (write-only — reads back `"*"` when one is stored, never the secret), `0x12` WiFi status (read-only: `state(1)` + detail string). Unknown key → `0x05 not-found`; a device with no config answers `0x07 unsupported`. |
+| `0x40` | `CFG_GET` | `key(1)` | `key(1)`, `value…` | device key/value config. Defined keys: `0x10` WiFi SSID (rw), `0x11` WiFi password (write-only — reads back `"*"` when one is stored, never the secret), `0x12` WiFi status (read-only: `state(1)` + detail string), `0x13` DATA pins (read-only: `tx(2,LE)` + `rx(2,LE)`, −1 = none — the bridge UART's pins, reserved from provisioning). Unknown key → `0x05 not-found`; a device with no config answers `0x07 unsupported`. |
 | `0x41` | `CFG_SET` | `key(1)`, `value…` | — | set a config key (validated + persisted by the device). See *WiFi provisioning*. |
 
 Multi-byte integers are **little-endian** (matches SDCC and `x86`/`arm` hosts).

@@ -23,6 +23,12 @@ import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { ConfigureDevice } from "@/components/ConfigureDevice";
 import { NetworkConfig } from "@/components/NetworkConfig";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { Slider } from "@/components/ui/slider";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import {
@@ -52,6 +58,7 @@ import {
   outputPwmGet,
   pwmConfigGet,
   pwmConfigSet,
+  rgbToHex,
   wifiStatus,
   wsDiscover,
   type DiscoveredDuta,
@@ -495,6 +502,14 @@ export default function App() {
     setCaps(0);
   }
 
+  /** Right-click → copy a control's state as a runnable macro command. */
+  function copyMacroCmd(cmd: string) {
+    navigator.clipboard.writeText(cmd).then(
+      () => setStatus(`copied: ${cmd}`),
+      () => setStatus("copy failed"),
+    );
+  }
+
   async function toggle(index: number) {
     try {
       const r = await outputToggle(index); // resp body: [status, bitmap]
@@ -898,9 +913,9 @@ export default function App() {
         <div className="flex w-80 shrink-0 flex-col gap-3 overflow-y-auto">
           {/* controls: self-described by the device */}
           <Card>
-            <CardHeader className="flex-row items-center py-3">
+            <CardHeader className="flex-row flex-wrap items-center gap-y-1.5 py-3">
               <CardTitle>Controls</CardTitle>
-              <div className="ml-auto flex items-center gap-2">
+              <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
                 {hasWifi && connected && (
                   <NetworkConfig
                     onConnectWs={(url) => {
@@ -921,8 +936,8 @@ export default function App() {
                   </Button>
                 )}
                 {deviceName && (
-                  <Badge variant="secondary" className="max-w-[10rem] truncate">
-                    {deviceName}
+                  <Badge variant="secondary" className="min-w-0 max-w-[9rem]" title={deviceName}>
+                    <span className="truncate">{deviceName}</span>
                   </Badge>
                 )}
               </div>
@@ -938,17 +953,25 @@ export default function App() {
                         .map((c) => {
                           const on = !!(outBitmap & (1 << c.index));
                           return (
-                            <Button
-                              key={c.index}
-                              variant={on ? "default" : "outline"}
-                              size="sm"
-                              disabled={!connected || !hasCmd}
-                              onClick={() => toggle(c.index)}
-                              className="flex h-auto flex-col py-2"
-                            >
-                              <span className={on ? "" : "text-muted-foreground"}>{c.name}</span>
-                              <span className="text-[10px]">{on ? "ON" : "OFF"}</span>
-                            </Button>
+                            <ContextMenu key={c.index}>
+                              <ContextMenuTrigger asChild>
+                                <Button
+                                  variant={on ? "default" : "outline"}
+                                  size="sm"
+                                  disabled={!connected || !hasCmd}
+                                  onClick={() => toggle(c.index)}
+                                  className="flex h-auto flex-col py-2"
+                                >
+                                  <span className={on ? "" : "text-muted-foreground"}>{c.name}</span>
+                                  <span className="text-[10px]">{on ? "ON" : "OFF"}</span>
+                                </Button>
+                              </ContextMenuTrigger>
+                              <ContextMenuContent>
+                                <ContextMenuItem onSelect={() => copyMacroCmd(`SET ${c.name} ${on ? 1 : 0}`)}>
+                                  <Copy className="size-3" /> Copy as macro command
+                                </ContextMenuItem>
+                              </ContextMenuContent>
+                            </ContextMenu>
                           );
                         })}
                     </div>
@@ -958,7 +981,9 @@ export default function App() {
                   {controls
                     .filter((c) => c.type === CTRL.PWM || c.type === CTRL.RGB)
                     .map((c) => (
-                      <div key={c.index} className="flex flex-col gap-1">
+                      <ContextMenu key={c.index}>
+                      <ContextMenuTrigger asChild>
+                      <div className="flex flex-col gap-1">
                         <div className="flex items-center justify-between">
                           <span className="text-xs font-medium">{c.name}</span>
                           {c.type === CTRL.PWM ? (
@@ -992,6 +1017,21 @@ export default function App() {
                           />
                         )}
                       </div>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        <ContextMenuItem
+                          onSelect={() =>
+                            copyMacroCmd(
+                              c.type === CTRL.PWM
+                                ? `SET ${c.name} ${pwmVals[c.index] ?? 0}`
+                                : `RGB ${c.name} ${rgbToHex(rgbVals[c.index]?.[0] ?? { r: 0, g: 0, b: 0 })}`,
+                            )
+                          }
+                        >
+                          <Copy className="size-3" /> Copy as macro command
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                      </ContextMenu>
                     ))}
                 </div>
               ) : (

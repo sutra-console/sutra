@@ -1023,7 +1023,8 @@ enum Step {
     Else,
     End,
     Call(String),         // $Name: run another macro inline
-    SetOut(String, bool), // SET <name|index> <0|1>: drive an output over CMD
+    SetOut(String, u16),       // SET <name|index> <0|1|duty>: 0/1 = digital, 2..1023 = PWM duty
+    SetRgb(String, u8, u8, u8), // RGB <name|index> <#RRGGBB>: fill an addressable output
     WaitIo(String, Cmp, i64), // WAITIO <name> <op> <value>: wait on an input
 }
 
@@ -1210,11 +1211,32 @@ fn parse_macro(s: &str) -> Vec<Step> {
             "RUN" | "SMARTWAIT" | "DO" => vec![Step::Run(rest.to_string())],
             "WAITOK" => vec![Step::WaitOk],
             "SET" => match rest.trim().rsplit_once(char::is_whitespace) {
-                // last token = value, everything before = target name (allows spaces)
-                Some((name, val)) => vec![Step::SetOut(
-                    name.trim().to_string(),
-                    matches!(val.trim().to_ascii_lowercase().as_str(), "1" | "on" | "true" | "high"),
-                )],
+                // last token = value, everything before = target name (allows spaces).
+                // 0/off and 1/on are digital; a number 2..1023 is a PWM duty.
+                Some((name, val)) => {
+                    let v = match val.trim().to_ascii_lowercase().as_str() {
+                        "1" | "on" | "true" | "high" => 1u16,
+                        "0" | "off" | "false" | "low" => 0u16,
+                        n => n.parse::<u16>().unwrap_or(0).min(1023),
+                    };
+                    vec![Step::SetOut(name.trim().to_string(), v)]
+                }
+                None => vec![],
+            },
+            "RGB" => match rest.trim().rsplit_once(char::is_whitespace) {
+                // last token = #RRGGBB (hash optional), before = output name
+                Some((name, hex)) => {
+                    let h = hex.trim().trim_start_matches('#');
+                    match (h.len() == 6, u32::from_str_radix(h, 16)) {
+                        (true, Ok(v)) => vec![Step::SetRgb(
+                            name.trim().to_string(),
+                            (v >> 16) as u8,
+                            (v >> 8) as u8,
+                            v as u8,
+                        )],
+                        _ => vec![],
+                    }
+                }
                 None => vec![],
             },
             "WAITIO" => {
@@ -1588,7 +1610,33 @@ fn run_steps(ctx: &MacroCtx, steps: &[Step], depth: u32) {
                     out_names.iter().position(|nm| norm_name(nm) == want).map(|p| p as u8)
                 };
                 if let Some(i) = idx {
-                    let _ = send_cmd(shared, crate::protocol::msg::OUTPUT_SET, vec![i, *val as u8]);
+                    if *val > 1 {
+                        // PWM duty (the device rescales 0..1023 to its resolution)
+                        let _ = send_cmd(
+                            shared,
+                            crate::protocol::msg::OUTPUT_PWM,
+                            vec![i, (*val & 0xFF) as u8, (*val >> 8) as u8],
+                        );
+                    } else {
+                        let _ =
+                            send_cmd(shared, crate::protocol::msg::OUTPUT_SET, vec![i, *val as u8]);
+                    }
+                }
+            }
+            Step::SetRgb(target, r, g, b) => {
+                let idx = if let Ok(i) = target.parse::<u8>() {
+                    Some(i)
+                } else {
+                    if !out_loaded {
+                        out_names = load_output_names(shared);
+                        out_loaded = true;
+                    }
+                    let want = norm_name(target);
+                    out_names.iter().position(|nm| norm_name(nm) == want).map(|p| p as u8)
+                };
+                if let Some(i) = idx {
+                    // 4-byte body = fill the whole strip
+                    let _ = send_cmd(shared, crate::protocol::msg::OUTPUT_RGB, vec![i, *r, *g, *b]);
                 }
             }
             Step::WaitIo(name, cmp, threshold) => {

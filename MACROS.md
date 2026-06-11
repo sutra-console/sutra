@@ -37,7 +37,8 @@ One command per line. A line with no command keyword is **typed verbatim + Enter
 | `WAITOK` | abort the macro if the last `RUN`/`WAITFOR` failed |
 | `IF OK` / `IF FAIL` … `ELSE` … `END` | branch on the last outcome |
 | `TIMEOUT <ms>` | wait timeout for `WAITFOR`/`RUN` (default 10000) |
-| `SET <name\|index> <0\|1>` | drive an output by name (`SET Relay1 0`); needs a CMD link |
+| `SET <name\|index> <0\|1\|duty>` | drive an output by name (`SET Relay1 0`); a value 2–1023 sets a PWM duty (`SET Aux LED 512`); needs a CMD link |
+| `RGB <name\|index> <#RRGGBB>` | fill an addressable output's color (`RGB RGB LED #FF8800`); needs a CMD link |
 | `WAITIO <name> <op> <value>` | wait until an input passes (`WAITIO LDR > 124`); ops `> < >= <= == !=` |
 | `$Name` | run another macro inline (e.g. `$Login`); nesting capped at depth 8 |
 
@@ -69,7 +70,7 @@ badge shows in the Macros card, with a tier filter beside the set filter.
 
 | Tier | Name | Steps | Runs on |
 |------|------|-------|---------|
-| **1** | Replay | `STRING`/keys/`HEX`, `DELAY`, `SET` | any device VM (open-loop) |
+| **1** | Replay | `STRING`/keys/`HEX`, `DELAY`, `SET`, `RGB` | any device VM (open-loop) |
 | **2** | Interactive | + `WAITFOR`, `WAITIO`, `WAITOK` | capable device VMs (closed-loop) |
 | **3** | App-only | `RUN` (+ `IF` riding its exit code) | the Sutra player only |
 

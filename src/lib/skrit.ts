@@ -345,7 +345,7 @@ export async function resetIoConfig(): Promise<void> {
 }
 
 // ---- key-value config (CFG_GET/CFG_SET) + WiFi provisioning ----
-export const CFG = { WIFI_SSID: 0x10, WIFI_PASS: 0x11, WIFI_STATUS: 0x12 } as const;
+export const CFG = { WIFI_SSID: 0x10, WIFI_PASS: 0x11, WIFI_STATUS: 0x12, DATA_PINS: 0x13 } as const;
 /** WIFI_STATUS state byte. */
 export const WIFI = { OFF: 0, CONNECTING: 1, CONNECTED: 2, PORTAL: 3, FAILED: 4 } as const;
 export const WS_PORT = 9555;
@@ -371,6 +371,16 @@ export async function wifiStatus(): Promise<WifiStatus> {
   const v = await cfgGet(CFG.WIFI_STATUS);
   return { state: v[0] ?? 0, detail: dec.decode(Uint8Array.from(v.slice(1))) };
 }
+/** The DATA bridge UART's pins (tx/rx; -1 = none). Throws if the device has no CFG. */
+export async function dataPins(): Promise<{ tx: number; rx: number }> {
+  const v = await cfgGet(CFG.DATA_PINS);
+  const s16 = (lo: number, hi: number) => {
+    const n = lo | (hi << 8);
+    return n >= 0x8000 ? n - 0x10000 : n;
+  };
+  return { tx: s16(v[0] ?? 0xff, v[1] ?? 0xff), rx: s16(v[2] ?? 0xff, v[3] ?? 0xff) };
+}
+
 /** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */
 export async function wifiConfigure(ssid: string, password: string): Promise<void> {
   await cfgSetStr(CFG.WIFI_PASS, password);
