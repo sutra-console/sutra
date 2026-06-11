@@ -41,9 +41,11 @@ drives any plain COM port.
 - **MCP server**: per-tool toggles; lets an LLM read the console, run/author
   macros (run-by-name only), drive outputs (incl. PWM config + RGB), provision IO,
   and manage the connection.
-- **Wireshark integration**: the bundled `sutra-extcap` binary turns every network
-  Duta into a live Wireshark capture interface (mDNS-discovered, auth-gated, the
-  DATA stream as pcap packets). See [EXTCAP.md](EXTCAP.md).
+- **Wireshark integration**: the bundled `sutra-extcap` binary turns every Duta
+  into a live Wireshark capture interface — USB-attached ones (probed + listed by
+  name) and network ones (mDNS-discovered, auth-gated) alike, with the DATA stream
+  delivered as pcap packets. A WiFi capture coexists with a Sutra USB session, so
+  you can drive the target while Wireshark watches. See [EXTCAP.md](EXTCAP.md).
 
 ## Run
 
