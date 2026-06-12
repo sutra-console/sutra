@@ -128,6 +128,8 @@ A malformed or unknown request still gets a response (`TYPE|0x80`, `SEQ` echoed,
 | `0x41` | `CFG_SET` | `key(1)`, `value…` | — | set a config key (validated + persisted by the device). See *WiFi provisioning*. Key `0x14` (DATA kind, rw) switches the bridged medium (uart ↔ i2c) on devices that support it. |
 | `0x60` | `I2C_SCAN` | (none) | `bitmap(16)` | probe all 7-bit addresses; bit `a&7` of byte `a>>3` set ⇒ address `a` ACKed. Needs DATA kind `i2c`. |
 | `0x61` | `I2C_XFER` | `addr(1)`, `wlen(1)`, `w…`, `rlen(1)` | `addr(1)`, `r…` | master transfer: write `w` then read `rlen` (either phase may be empty). NAK → status `0x05`. The transfer is also emitted as a DATA record. |
+| `0x70` | `INVOKE_DESC` | `index(1)` | `index(1)`, `total(1)`[, `id(2)`, `nargs(1)`, `argtype(1)×nargs`, `flags(1)`, `name…`] | the **command menu**: the user-defined commands this device exposes. Iterate `index` 0…`total`-1 (the tuple is present iff `index < total`), exactly like `PIN_CAPS`. `id` is the 16-bit command id (see *INVOKE*); `argtype` lists the packed arg signature; `flags` bit0 = returns a reply. Needs `FLAG_INVOKE`; a device with none answers `0x07`. |
+| `0x71` | `INVOKE` | `id(2)`, `payload…` | `id(2)`, `reply…` | call command `id` with its packed args. The device routes `id` to the registered handler and runs it. Unknown `id` → `0x05 not-found`; no INVOKE support → `0x07 unsupported`; bad/short payload → `0x03`. The response echoes `id`; `reply…` is present only when the command's `flags` advertised one. |
 
 Multi-byte integers are **little-endian** (matches SDCC and `x86`/`arm` hosts).
 
@@ -183,6 +185,7 @@ mc_ver   = 0x01
 | `0x03` | `SETOUT` | `index(1)`, `val(1)` | 1 | drive output `index` (0/1) |
 | `0x04` | `SETPWM` | `index(1)`, `duty(2)` | 1 | set output `index` PWM duty (0-1023); no-op on a non-PWM output |
 | `0x05` | `SETRGB` | `index(1)`, `r(1)`, `g(1)`, `b(1)` | 1 | fill output `index`'s RGB strip with a color; no-op on a non-RGB output |
+| `0x06` | `INVOKE` | `id(2)`, `n(1)`, `payload[n]` | 1 | call user-defined command `id` with the packed `payload` (see *INVOKE*); no-op if the device doesn't expose that `id`. Lets a macro drive a module's own commands. |
 | `0x10` | `EXPECT` | `timeout(2)`, `n(1)`, `bytes[n]` | 2 | match `bytes` on incoming DATA; sets outcome (match=OK, timeout=FAIL) |
 | `0x11` | `WAITIO` | `index(1)`, `cmp(1)`, `val(2)`, `timeout(2)` | 2 | poll input `index` until `value cmp val`; sets outcome (met=OK, timeout=FAIL) |
 | `0x12` | `WAITOK` | (none) | 2 | if last outcome is FAIL, halt the run with `STATUS` failed |
@@ -495,6 +498,97 @@ reverts to the compiled default (the soft factory-reset; a held-button boot is t
 `caps` bitfield (`PIN_CAPS`): bit0=digital, bit1=adc, bit2=pwm, bit3=dac, bit4=i2c, bit5=spi,
 bit6=touch. The firmware mirrors these (and the per-mcu pin tables) in `duta_pincap.h`.
 
+## INVOKE — user-defined commands
+
+`IO`/`PWM`/`RGB`/`CFG`/`I2C` are the **blessed built-ins**. `INVOKE` is the
+open-ended extension point: a module on the device registers its own command,
+advertises it, and the host forwards a high-level intent to it **without having
+to understand the implementation**. Duta is a framework — stock firmware "just
+does the simple thing" the way QMK "just sends keycodes", but a user is free to
+put arbitrary behavior behind a command. Sutra's job is to deliver
+`send_touch(x, y)` (or `zigbee_join(…)`, or anything) to whatever handler the
+device named, and trust that the device's own code knows what to do with it.
+
+A device that exposes commands sets `FLAG_INVOKE` in `INFO`.
+
+### Discovery
+
+Iterate `INVOKE_DESC(index)` from `0` while `index < total` — the same shape as
+`PIN_CAPS`. Each entry is:
+
+```
+id(2)            the command id (little-endian; see id ranges)
+nargs(1)         number of arguments
+argtype(1)×nargs the arg signature (types below)
+flags(1)         bit0 = the command returns a reply payload
+name…            the device's human label for the command
+```
+
+### Arg codec
+
+The `argtype` signature is enough to pack/unpack a call generically — a host can
+render a typed form (and a macro compiler can emit `INVOKE`) from the descriptor
+alone, with **no catalog required**:
+
+| `argtype` | wire |
+|-----------|------|
+| `0` `u8`    | 1 byte |
+| `1` `u16`   | 2 bytes LE |
+| `2` `u32`   | 4 bytes LE |
+| `3` `i16`   | 2 bytes LE, signed |
+| `4` `i32`   | 4 bytes LE, signed |
+| `5` `bytes` | `len(1)`, then `len` bytes |
+| `6` `str`   | `len(1)`, then `len` UTF-8 bytes |
+
+Fixed types are packed back-to-back in argument order; variable types carry their
+own length. The `payload` of an `INVOKE` is exactly this concatenation.
+
+### Calling
+
+`INVOKE(id(2), payload…)` → `STATUS`, `id(2)`[, `reply…`]. The device routes `id`
+to the handler. `reply…` is present only if the descriptor's `flags` bit0 was
+set. Errors: unknown `id` → `0x05 not-found`; a device with no `INVOKE` support →
+`0x07 unsupported`; a payload that doesn't match the signature → `0x03 bad-args`.
+
+### Id ranges (namespacing)
+
+The 16-bit id space is split so user-defined commands never collide with future
+blessed ones — the BLE-assigned-numbers / HID-usage-page pattern:
+
+| range | owner |
+|-------|-------|
+| `0x0000`–`0x7FFF` | **well-known** — curated here, ids stable forever |
+| `0x8000`–`0xFFFF` | **vendor / custom** — the device owns it freely (`SKRIT_INVOKE_VENDOR_BASE`) |
+
+**Well-known registry** (the canonical list; a host catalog mirrors it):
+
+| id | name | args | meaning |
+|----|------|------|---------|
+| `0x0001` | `send_touch` | `x:u16`, `y:u16` | a touch/tap at screen coordinate `x,y` |
+
+A device may also expose a well-known id with a *richer* handler (e.g. a real
+touchscreen-spoofer behind `send_touch`); the contract is only the id + signature.
+
+### Host catalog vs device list
+
+Two lists, one authoritative:
+
+- **The device's `INVOKE_DESC` list is the source of truth for *what exists*.** A
+  host must handle a command it's never heard of.
+- **A host-side catalog says what *known* ids *mean*** — for each well-known id, a
+  nicer label, per-arg names/units, and a UI widget (slider, xy-pad, hex). When
+  the device advertises a catalogued id, the host renders the rich control; when
+  it advertises an unknown (vendor) id, the host falls back to a generic form
+  built from the `argtype` signature. **Unknown ids never hard-fail.** The
+  catalog is shipped as a single machine-readable file the app UI and the MCP
+  server both load (the same approach planned for the ZCL dictionary).
+
+### In macros
+
+`INVOKE` is also skrit-mc opcode `0x06` (`id(2)`, `n(1)`, `payload[n]`, tier 1),
+so a stored macro can drive a module's own commands — the same descriptor +
+codec compiles a text `Invoke send_touch 100 200` straight to bytecode.
+
 ## Async events
 
 A device MAY push **unsolicited** frames in the `0x50..0x5F` range; these have the
@@ -513,7 +607,7 @@ beyond the frame's own; a host treats a malformed event as a no-op.
 ## Versioning
 
 `proto_ver` starts at **1**. Additive changes (new `TYPE`s like `REBOOT`, `OUTPUT_PULSE`,
-`SERIAL_*`, the `0x50` events, new `caps` bits, and the *skrit-mux* channel tag) keep
-the same version: an older app simply doesn't send or decode them and a newer device
+`SERIAL_*`, `INVOKE`, the `0x50` events, new `caps`/`flags` bits, and the *skrit-mux*
+channel tag) keep the same version: an older app simply doesn't send or decode them and a newer device
 still answers the v1 core. Breaking changes bump it. The app reads `INFO` on connect
 and refuses mismatched major versions.
