@@ -3,7 +3,7 @@
 Duta is a framework, not a fixed-function device (the QMK "just sends keycodes"
 posture is the *default*, not the ceiling). `INVOKE` is the open extension point:
 a module on the device registers its own command, advertises it, and Sutra
-forwards a high-level intent — `send_touch(x, y)`, `zigbee_join(…)`, anything —
+forwards a high-level intent — `set_position(x, y)`, `zigbee_join(…)`, anything —
 to that handler **without having to understand the implementation**.
 
 See `PROTOCOL.md` → *INVOKE* for the wire format. This doc tracks the Sutra
@@ -15,7 +15,7 @@ surface + the plan for the visual layer.
 |-------|-------|-------|
 | Wire spec (`INVOKE_DESC`/`INVOKE`, arg codec, id ranges, skrit-mc op `0x06`) | skrit `protocol.h` + `PROTOCOL.md` | ✅ |
 | Device core dispatch + `cmd_desc`/`cmd_invoke` HAL | duta `skrit_device.h` | ✅ (host-tested) |
-| Demo commands on real HW | duta nRF52840 (`send_touch`, `blink`, `echo`) | ✅ |
+| Demo commands on real HW | duta nRF52840 (`set_position`, `blink`, `echo`) | ✅ |
 | Client catalog + helpers (`invocables()`, `packArgs`, `invokeCommand`) | sutra `src/lib/skrit.ts` + `invocables.json` | ✅ |
 | MCP tools (`list_invocables`, `invoke`) | sutra `src-tauri/src/mcp.rs` | ✅ |
 | **Generic invoke panel** (UI) | sutra `src/components/` | ⏳ planned |
@@ -40,7 +40,7 @@ A device-controls panel that appears when `getInfo().flags & FLAG.INVOKE`.
   |---------------------|---------|
   | `number` / u8·u16·u32·i16·i32 | numeric input (clamp to `min`/`max`) |
   | `slider` | range slider with the value readout |
-  | `xy` (a paired x/y, e.g. send_touch) | an xy-pad that writes both args |
+  | `xy` (a paired x/y, e.g. set_position) | an xy-pad that writes both args |
   | `hex` / `bytes` | hex text field → `number[]` |
   | `text` / `str` | text field |
   | no catalog match | generic `arg0…argN` inputs typed by the wire code |
@@ -56,11 +56,11 @@ A device-controls panel that appears when `getInfo().flags & FLAG.INVOKE`.
 Make `INVOKE` a first-class macro step so a stored program can drive a module's
 own commands (compiles to skrit-mc `0x06`).
 
-- **Grammar**: `Invoke <name|0xID> <arg> <arg> …` (e.g. `Invoke send_touch 100 200`).
+- **Grammar**: `Invoke <name|0xID> <arg> <arg> …` (e.g. `Invoke set_position 100 200`).
   Add to the `parse_macro` front-end (`Step::Invoke { id, args }`).
 - **Compile**: resolve `name → id` via the catalog; pack args with the same codec
   as `packArgs` → emit `0x06, id_lo, id_hi, n, payload…`. Tier 1 (no gate).
-- **Decode/inline-decoration**: render `Invoke send_touch(100, 200)` with the
+- **Decode/inline-decoration**: render `Invoke set_position(100, 200)` with the
   catalog label, mirroring the RGB color decoration work (task #10).
 - **Editor affordance**: an "Invoke" insert offering the connected device's
   `invocables()` as a dropdown + a typed arg form (reuse the panel's widgets).

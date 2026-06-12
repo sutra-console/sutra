@@ -243,7 +243,7 @@ pub struct SetDataKindArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct InvokeArgs {
-    /// The command to call: a name ("send_touch") or an id ("0x1" / "1"). See list_invocables.
+    /// The command to call: a name ("set_position") or an id ("0x1" / "1"). See list_invocables.
     pub command: String,
     /// Numeric arguments in order, packed per the device's signature (u8/u16/u32/i16/i32).
     /// Omit for a no-arg command, or use `payload_hex` for bytes/str args.
@@ -1352,13 +1352,13 @@ mod tests {
     fn invocable_catalog_parses() {
         let cat = invocable_catalog();
         assert!(!cat.commands.is_empty(), "catalog parsed empty (serde shape mismatch?)");
-        let touch = cat
+        let pos = cat
             .commands
             .iter()
-            .find(|c| c.name == "send_touch")
-            .expect("send_touch seed missing");
-        assert_eq!(touch.id, 1);
-        assert_eq!(touch.args.len(), 2);
-        assert_eq!(touch.args[0].ty, "u16");
+            .find(|c| c.name == "set_position")
+            .expect("set_position seed missing");
+        assert_eq!(pos.id, 1);
+        assert_eq!(pos.args.len(), 2);
+        assert_eq!(pos.args[0].ty, "u16");
     }
 }

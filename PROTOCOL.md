@@ -506,7 +506,7 @@ advertises it, and the host forwards a high-level intent to it **without having
 to understand the implementation**. Duta is a framework — stock firmware "just
 does the simple thing" the way QMK "just sends keycodes", but a user is free to
 put arbitrary behavior behind a command. Sutra's job is to deliver
-`send_touch(x, y)` (or `zigbee_join(…)`, or anything) to whatever handler the
+`set_position(x, y)` (or `zigbee_join(…)`, or anything) to whatever handler the
 device named, and trust that the device's own code knows what to do with it.
 
 A device that exposes commands sets `FLAG_INVOKE` in `INFO`.
@@ -564,10 +564,10 @@ blessed ones — the BLE-assigned-numbers / HID-usage-page pattern:
 
 | id | name | args | meaning |
 |----|------|------|---------|
-| `0x0001` | `send_touch` | `x:u16`, `y:u16` | a touch/tap at screen coordinate `x,y` |
+| `0x0001` | `set_position` | `x:u16`, `y:u16` | move to coordinate `x,y` (servo/gantry/pointer — the device decides) |
 
 A device may also expose a well-known id with a *richer* handler (e.g. a real
-touchscreen-spoofer behind `send_touch`); the contract is only the id + signature.
+2-axis gantry behind `set_position`); the contract is only the id + signature.
 
 ### Host catalog vs device list
 
@@ -587,7 +587,7 @@ Two lists, one authoritative:
 
 `INVOKE` is also skrit-mc opcode `0x06` (`id(2)`, `n(1)`, `payload[n]`, tier 1),
 so a stored macro can drive a module's own commands — the same descriptor +
-codec compiles a text `Invoke send_touch 100 200` straight to bytecode.
+codec compiles a text `Invoke set_position 100 200` straight to bytecode.
 
 ## Async events
 

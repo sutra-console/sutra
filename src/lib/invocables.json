@@ -4,9 +4,9 @@
   "commands": [
     {
       "id": 1,
-      "name": "send_touch",
-      "label": "Send touch",
-      "description": "Inject a touch/tap at screen coordinate x,y. The device's handler decides how (e.g. capacitive spoof, digitizer).",
+      "name": "set_position",
+      "label": "Set position",
+      "description": "Move to coordinate x,y. The device's handler decides what moves (servo/gantry axes, a pointer, a stage).",
       "args": [
         { "name": "x", "type": "u16", "widget": "number", "min": 0, "max": 4095 },
         { "name": "y", "type": "u16", "widget": "number", "min": 0, "max": 4095 }
