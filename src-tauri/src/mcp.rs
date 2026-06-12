@@ -15,8 +15,38 @@ use rmcp::{
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{cap, msg, parity, pincap, proto, reboot, sig};
+use crate::protocol::{cap, inv, msg, parity, pincap, proto, reboot, sig};
 use crate::serial::{self, Shared};
+
+// ---- INVOKE: user-defined commands. The well-known catalog (shared with the
+// app UI) labels recognized ids; the device's INVOKE_DESC is authoritative for
+// what exists, and unknown vendor ids still work from their raw signature. ----
+static INVOCABLE_CATALOG_JSON: &str = include_str!("../../src/lib/invocables.json");
+
+#[derive(Deserialize)]
+struct CatalogArg {
+    name: String,
+    #[serde(rename = "type")]
+    ty: String,
+}
+#[derive(Deserialize)]
+struct CatalogCommand {
+    id: u16,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    args: Vec<CatalogArg>,
+}
+#[derive(Deserialize, Default)]
+struct Catalog {
+    #[serde(default)]
+    commands: Vec<CatalogCommand>,
+}
+fn invocable_catalog() -> Catalog {
+    serde_json::from_str(INVOCABLE_CATALOG_JSON).unwrap_or_default()
+}
 
 #[derive(Clone)]
 pub struct SutraTools {
@@ -212,6 +242,19 @@ pub struct SetDataKindArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InvokeArgs {
+    /// The command to call: a name ("send_touch") or an id ("0x1" / "1"). See list_invocables.
+    pub command: String,
+    /// Numeric arguments in order, packed per the device's signature (u8/u16/u32/i16/i32).
+    /// Omit for a no-arg command, or use `payload_hex` for bytes/str args.
+    #[serde(default)]
+    pub args: Vec<i64>,
+    /// Raw payload bytes as hex ("64 00 c8 00"); overrides `args`. Use for bytes/str args.
+    #[serde(default)]
+    pub payload_hex: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConfigureWifiArgs {
     /// The WiFi network name to join.
     pub ssid: String,
@@ -240,7 +283,7 @@ impl SutraTools {
                 "get_outputs", "set_output", "device_info", "pulse_output", "set_pwm",
                 "set_pwm_config", "set_rgb", "list_inputs", "read_input", "describe_device",
                 "describe_pins", "get_io_config", "set_io_config", "set_data_kind",
-                "i2c_scan", "i2c_transfer",
+                "i2c_scan", "i2c_transfer", "list_invocables", "invoke",
             ] {
                 router.remove_route(n);
             }
@@ -556,6 +599,125 @@ impl SutraTools {
                 }
             }
             Ok(r) if r.status == Some(0x05) => format!("NAK — no device at 0x{addr:02X}"),
+            Ok(r) => format!("status 0x{:02x}", r.status.unwrap_or(0)),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "List the user-defined commands this device exposes (skrit INVOKE). Each line: id, name, arg signature, and whether it returns a reply. Recognized ids are labelled from the catalog; unknown vendor ids (>=0x8000) show their raw signature. Call one with `invoke`."
+    )]
+    async fn list_invocables(&self) -> String {
+        let first = match self.cmd(msg::INVOKE_DESC, vec![0]).await {
+            Ok(r) => r,
+            Err(e) => return format!("error: {e}"),
+        };
+        if first.status != Some(0) {
+            return "(device exposes no INVOKE commands)".into();
+        }
+        let total = first.body.get(2).copied().unwrap_or(0);
+        if total == 0 {
+            return "(no commands)".into();
+        }
+        let cat = invocable_catalog();
+        let mut lines = vec![format!("invocables ({total}):")];
+        for i in 0..total {
+            let r = match self.cmd(msg::INVOKE_DESC, vec![i]).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let b = &r.body; // st,idx,total,idlo,idhi,nargs,at..,flags,name
+            let id = (b.get(3).copied().unwrap_or(0) as u16)
+                | ((b.get(4).copied().unwrap_or(0) as u16) << 8);
+            let nargs = b.get(5).copied().unwrap_or(0) as usize;
+            let codes = b.get(6..6 + nargs).unwrap_or(&[]);
+            let flags = b.get(6 + nargs).copied().unwrap_or(0);
+            let dev_name = String::from_utf8_lossy(b.get(7 + nargs..).unwrap_or(&[])).into_owned();
+            let hit = cat.commands.iter().find(|c| c.id == id);
+            let label = hit
+                .and_then(|c| c.label.clone().or_else(|| (!c.name.is_empty()).then(|| c.name.clone())))
+                .unwrap_or_else(|| if dev_name.is_empty() { format!("0x{id:x}") } else { dev_name.clone() });
+            // prefer catalogued arg names when the signature matches
+            let sig = match hit.filter(|c| c.args.len() == nargs) {
+                Some(c) => c
+                    .args
+                    .iter()
+                    .map(|a| format!("{}:{}", a.name, a.ty))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                None => codes
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &t)| format!("arg{j}:{}", inv::arg_name(t)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            };
+            let reply = if flags & inv::REPLY != 0 { " -> reply" } else { "" };
+            let vendor = if id >= inv::VENDOR_BASE { " [vendor]" } else { "" };
+            lines.push(format!("  0x{id:04x} {label}({sig}){reply}{vendor}"));
+        }
+        lines.join("\n")
+    }
+
+    #[tool(
+        description = "Call a user-defined command on the device (skrit INVOKE). `command` is a name or id (see list_invocables); pass numeric `args` in order (packed per the device's signature) or raw `payload_hex` for bytes/str args. Returns any reply bytes."
+    )]
+    async fn invoke(
+        &self,
+        Parameters(InvokeArgs { command, args, payload_hex }): Parameters<InvokeArgs>,
+    ) -> String {
+        // resolve the command -> id (catalog name, "0x.." hex, or decimal)
+        let cat = invocable_catalog();
+        let id: u16 = if let Some(h) = cat.commands.iter().find(|c| c.name == command) {
+            h.id
+        } else if let Some(hex) = command.strip_prefix("0x").or_else(|| command.strip_prefix("0X")) {
+            match u16::from_str_radix(hex, 16) {
+                Ok(v) => v,
+                Err(_) => return format!("bad command id '{command}'"),
+            }
+        } else {
+            match command.parse::<u16>() {
+                Ok(v) => v,
+                Err(_) => return format!("unknown command '{command}' (use a name or id; see list_invocables)"),
+            }
+        };
+        // build the payload: raw hex overrides; else pack the numeric args by signature
+        let payload: Vec<u8> = if let Some(hx) = payload_hex {
+            let mut p = Vec::new();
+            for tok in hx.split_whitespace() {
+                match u8::from_str_radix(tok.trim_start_matches("0x"), 16) {
+                    Ok(b) => p.push(b),
+                    Err(_) => return format!("bad hex byte: {tok}"),
+                }
+            }
+            p
+        } else if args.is_empty() {
+            Vec::new()
+        } else {
+            match self.pack_invoke_args(id, &args).await {
+                Ok(p) => p,
+                Err(e) => return e,
+            }
+        };
+        let mut body = vec![(id & 0xff) as u8, (id >> 8) as u8];
+        body.extend_from_slice(&payload);
+        match self.cmd(msg::INVOKE, body).await {
+            Ok(r) if r.status == Some(0) => {
+                let reply = r.body.get(3..).unwrap_or(&[]);
+                if reply.is_empty() {
+                    format!("ok (invoked 0x{id:04x})")
+                } else {
+                    format!(
+                        "ok -> reply: {}",
+                        reply.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+                    )
+                }
+            }
+            Ok(r) if r.status == Some(0x05) => {
+                format!("not-found: device has no command 0x{id:04x} (see list_invocables)")
+            }
+            Ok(r) if r.status == Some(0x07) => "unsupported: device exposes no INVOKE commands".into(),
+            Ok(r) if r.status == Some(0x03) => "bad args: payload doesn't match the command signature".into(),
             Ok(r) => format!("status 0x{:02x}", r.status.unwrap_or(0)),
             Err(e) => format!("error: {e}"),
         }
@@ -1087,6 +1249,43 @@ impl SutraTools {
             .await
             .map_err(|e| e.to_string())?
     }
+
+    /// Pack numeric INVOKE args for command `id` per the device's advertised signature.
+    async fn pack_invoke_args(&self, id: u16, args: &[i64]) -> Result<Vec<u8>, String> {
+        let first = self.cmd(msg::INVOKE_DESC, vec![0]).await?;
+        let total = first.body.get(2).copied().unwrap_or(0);
+        for i in 0..total {
+            let r = self.cmd(msg::INVOKE_DESC, vec![i]).await?;
+            let b = &r.body;
+            let cid = (b.get(3).copied().unwrap_or(0) as u16)
+                | ((b.get(4).copied().unwrap_or(0) as u16) << 8);
+            if cid != id {
+                continue;
+            }
+            let nargs = b.get(5).copied().unwrap_or(0) as usize;
+            let codes = b.get(6..6 + nargs).unwrap_or(&[]).to_vec();
+            if args.len() != nargs {
+                return Err(format!("command 0x{id:04x} takes {nargs} arg(s), got {}", args.len()));
+            }
+            let mut p = Vec::new();
+            for (j, &t) in codes.iter().enumerate() {
+                let v = args[j];
+                match t {
+                    inv::U8 => p.push(v as u8),
+                    inv::U16 | inv::I16 => p.extend_from_slice(&(v as u16).to_le_bytes()),
+                    inv::U32 | inv::I32 => p.extend_from_slice(&(v as u32).to_le_bytes()),
+                    _ => {
+                        return Err(format!(
+                            "arg{j} is type '{}' — use payload_hex for bytes/str args",
+                            inv::arg_name(t)
+                        ))
+                    }
+                }
+            }
+            return Ok(p);
+        }
+        Err(format!("device has no command 0x{id:04x} (see list_invocables)"))
+    }
 }
 
 #[tool_handler]
@@ -1140,4 +1339,26 @@ pub fn start(shared: Arc<Shared>, port: u16) -> Result<CancellationToken, String
             .await;
     });
     Ok(ct)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The embedded catalog (shared with the app UI) must parse into our serde
+    // shape — invocable_catalog() swallows errors with unwrap_or_default(), so
+    // assert it here rather than silently shipping an empty catalog.
+    #[test]
+    fn invocable_catalog_parses() {
+        let cat = invocable_catalog();
+        assert!(!cat.commands.is_empty(), "catalog parsed empty (serde shape mismatch?)");
+        let touch = cat
+            .commands
+            .iter()
+            .find(|c| c.name == "send_touch")
+            .expect("send_touch seed missing");
+        assert_eq!(touch.id, 1);
+        assert_eq!(touch.args.len(), 2);
+        assert_eq!(touch.args[0].ty, "u16");
+    }
 }

@@ -48,6 +48,8 @@ pub mod msg {
     pub const CFG_SET: u8 = 0x41;
     pub const I2C_SCAN: u8 = 0x60;
     pub const I2C_XFER: u8 = 0x61;
+    pub const INVOKE_DESC: u8 = 0x70; // enumerate the device's user-defined command menu
+    pub const INVOKE: u8 = 0x71; // call a command by id with a packed payload
     // Async device->host events (0x50..0x5F): RESP bit clear, SEQ=0.
     pub const EVENT_LOG: u8 = 0x50;
     pub const EVENT_INPUT: u8 = 0x51;
@@ -129,6 +131,30 @@ pub mod flag {
     pub const AUTH_REQUIRED: u8 = 0x01;
     pub const DEFAULT_CRED: u8 = 0x02;
     pub const PROVISION: u8 = 0x04; // accepts runtime IO provisioning (PIN_CAPS/CONFIG_*)
+    pub const INVOKE: u8 = 0x08; // exposes user-defined commands (INVOKE_DESC/INVOKE)
+}
+
+// INVOKE arg-type codes + sentinels (user-defined commands).
+#[allow(dead_code)]
+pub mod inv {
+    pub const U8: u8 = 0;
+    pub const U16: u8 = 1;
+    pub const U32: u8 = 2;
+    pub const I16: u8 = 3;
+    pub const I32: u8 = 4;
+    pub const BYTES: u8 = 5;
+    pub const STR: u8 = 6;
+    pub const REPLY: u8 = 0x01; // INVOKE_DESC flags bit0: command returns a reply
+    pub const VENDOR_BASE: u16 = 0x8000; // ids >= this are vendor / user-defined
+
+    /// Human name for an arg-type code.
+    pub fn arg_name(code: u8) -> &'static str {
+        match code {
+            U8 => "u8", U16 => "u16", U32 => "u32",
+            I16 => "i16", I32 => "i32", BYTES => "bytes", STR => "str",
+            _ => "?",
+        }
+    }
 }
 
 // Pin-capability bits (PIN_CAPS `caps` byte) + provisioning sentinels.
