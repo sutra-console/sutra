@@ -1,4 +1,4 @@
-//! sutra-extcap — Dutas as live Wireshark capture interfaces.
+//! sutra-extcap â€” Dutas as live Wireshark capture interfaces.
 //! ============================================================================
 //! A Wireshark *extcap* program (the same mechanism Nordic's BLE sniffer uses):
 //! Wireshark runs it with --extcap-interfaces to list capture sources, then
@@ -9,14 +9,14 @@
 //! bytes becomes one timestamped packet.
 //!
 //! Install: copy the built binary into Wireshark's extcap folder
-//! (Help ▸ About ▸ Folders ▸ Personal Extcap path). "Duta: <name>" interfaces
+//! (Help â–¸ About â–¸ Folders â–¸ Personal Extcap path). "Duta: <name>" interfaces
 //! then appear on the capture screen whenever a Duta is on the LAN.
 //!
 //! Interfaces come from BOTH transports: mDNS-discovered WebSocket Dutas
-//! (coexist with a Sutra USB session — the console is teed) and directly
+//! (coexist with a Sutra USB session â€” the console is teed) and directly
 //! USB-attached ones (candidate ports verified with a mux PING; serial is
 //! exclusive, so a port Sutra holds is skipped). Raw UART DATA as USER0;
-//! when typed streams land (I²C/CAN), records gain real link types and the
+//! when typed streams land (IÂ²C/CAN), records gain real link types and the
 //! container moves to pcapng.
 
 use std::io::Write;
@@ -27,11 +27,11 @@ use sutra_lib::{serial, ws};
 
 const LINKTYPE_USER0: u32 = 147;
 // Bluetooth LE Link Layer with a 10-byte pseudo-header. Wireshark's native
-// `btle` dissector reads this directly — full BLE decode, no Lua needed.
+// `btle` dissector reads this directly â€” full BLE decode, no Lua needed.
 const LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR: u32 = 256;
 const DATA_KIND_BLE_SNIFF: u8 = 4; // SKRIT_DATA_BLE_SNIFF
 // IEEE 802.15.4 TAP: a TLV pseudo-header + the MAC frame. Wireshark's native
-// 802.15.4 stack decodes Zigbee/Thread/6LoWPAN/Matter from it — no Lua.
+// 802.15.4 stack decodes Zigbee/Thread/6LoWPAN/Matter from it â€” no Lua.
 const LINKTYPE_IEEE802_15_4_TAP: u32 = 283;
 const DATA_KIND_IEEE802154: u8 = 7; // SKRIT_DATA_IEEE802154
 const EXTCAP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -60,11 +60,11 @@ fn dlt_for_kind(kind: u8) -> (u32, &'static str, &'static str) {
 
 /// Reframe one ieee802154 DATA record into a LINKTYPE_IEEE802_15_4_TAP packet:
 /// a TLV pseudo-header (FCS type, RSS, channel, LQI) followed by the MAC frame.
-/// Wireshark's native 802.15.4 dissector decodes the rest (Zigbee / Thread / …).
+/// Wireshark's native 802.15.4 dissector decodes the rest (Zigbee / Thread / â€¦).
 ///
 /// Input record (PROTOCOL.md "IEEE 802.15.4 sniffer"):
-///   ts_ms(4 LE) · channel(1) · rssi(1, signed dBm) · lqi(1) · flags(1) ·
-///     psdu_len(1) · psdu…   (psdu includes the 2-byte FCS)
+///   ts_ms(4 LE) Â· channel(1) Â· rssi(1, signed dBm) Â· lqi(1) Â· flags(1) Â·
+///     psdu_len(1) Â· psduâ€¦   (psdu includes the 2-byte FCS)
 fn ieee802154_tap_packet(rec: &[u8]) -> Option<Vec<u8>> {
     if rec.len() < 9 {
         return None;
@@ -82,7 +82,7 @@ fn ieee802154_tap_packet(rec: &[u8]) -> Option<Vec<u8>> {
     // so Wireshark dissects cleanly instead of flagging every frame "Bad FCS".
     let psdu = &rec[9..9 + plen - 2];
 
-    // Each TLV: type(u16 LE) · length(u16 LE) · value, value padded to 4 bytes.
+    // Each TLV: type(u16 LE) Â· length(u16 LE) Â· value, value padded to 4 bytes.
     fn push_tlv(buf: &mut Vec<u8>, typ: u16, val: &[u8]) {
         buf.extend_from_slice(&typ.to_le_bytes());
         buf.extend_from_slice(&(val.len() as u16).to_le_bytes());
@@ -113,8 +113,8 @@ fn ieee802154_tap_packet(rec: &[u8]) -> Option<Vec<u8>> {
 /// packet so Wireshark's `btle` dissector decodes it natively.
 ///
 /// Input record (PROTOCOL.md "BLE sniffer"):
-///   ts_ms(4 LE) · channel(1) · rssi(1, magnitude) · access-address(4 LE) ·
-///   pdu_len(1) · pdu…
+///   ts_ms(4 LE) Â· channel(1) Â· rssi(1, magnitude) Â· access-address(4 LE) Â·
+///   pdu_len(1) Â· pduâ€¦
 /// Output packet: 10-byte LE pseudo-header + access-address(4) + pdu + CRC(3).
 /// The radio already de-whitened and CRC-checked, so we set the CRC-valid flag
 /// and append a 3-byte CRC placeholder (the real CRC is discarded on-device).
@@ -154,35 +154,6 @@ fn ble_ll_packet(rec: &[u8]) -> Option<Vec<u8>> {
     pkt.extend_from_slice(pdu);
     pkt.extend_from_slice(&[0, 0, 0]); // CRC placeholder (marked valid via flags)
     Some(pkt)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    // Reframe a known 802.15.4 data frame and drop a one-packet pcap for tshark.
-    #[test]
-    fn ieee802154_tap_pcap() {
-        // MAC data frame: FCF 0x8841 (data, PAN-compressed, short dst+src),
-        // seq 1, dst PAN abcd, dst ffff (bcast), src 0000, payload, + 2 FCS bytes.
-        let psdu: &[u8] =
-            &[0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34];
-        let mut rec = vec![0u8, 0, 0, 0, 15, 0xD0u8, 0xFF, 0x01, psdu.len() as u8];
-        rec.extend_from_slice(psdu);
-
-        let tap = ieee802154_tap_packet(&rec).expect("reframe");
-        assert_eq!(tap[0], 0, "version");
-        assert_eq!(u16::from_le_bytes([tap[2], tap[3]]), 36, "tap header length");
-        // MAC frame follows the header, minus the 2-byte FCS we drop.
-        assert_eq!(&tap[36..], &psdu[..psdu.len() - 2], "MAC frame (no FCS)");
-
-        let path = std::env::temp_dir().join("duta_154_tap.pcap");
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(&pcap_global_header(LINKTYPE_IEEE802_15_4_TAP)).unwrap();
-        write_record(&mut f, &tap).unwrap();
-        eprintln!("wrote {}", path.display());
-    }
 }
 
 /// Frame one DATA record for the chosen link type. ble-sniff records become LL
@@ -229,7 +200,7 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        // includes Wireshark's bare `--extcap-version=…` probe
+        // includes Wireshark's bare `--extcap-version=â€¦` probe
         println!("extcap {{version={EXTCAP_VERSION}}}{{display=Sutra Duta bridge}}{{help=https://github.com/sutra-console/sutra}}");
     }
 }
@@ -245,7 +216,7 @@ fn list_interfaces() {
         }
         if let Some(name) = usb_probe_name(&p.name) {
             println!(
-                "interface {{value={port}}}{{display=Duta: {name} — {port} (USB, skrit DATA)}}",
+                "interface {{value={port}}}{{display=Duta: {name} â€” {port} (USB, skrit DATA)}}",
                 port = p.name
             );
         }
@@ -254,7 +225,7 @@ fn list_interfaces() {
     for d in ws::discover(2500).unwrap_or_default() {
         let label = if d.name.is_empty() { d.host.trim_end_matches('.').to_string() } else { d.name.clone() };
         println!(
-            "interface {{value={url}}}{{display=Duta: {label} — {ip} (WiFi, skrit DATA)}}",
+            "interface {{value={url}}}{{display=Duta: {label} â€” {ip} (WiFi, skrit DATA)}}",
             url = d.url,
             ip = d.ip
         );
@@ -328,7 +299,7 @@ fn usb_probe_name(port: &str) -> Option<String> {
 }
 
 /// Ask a device what its DATA channel carries (DATA_DESC -> kind). Returns the
-/// kind byte (uart=0, …, ble-sniff=4, i2c=6), or None if it doesn't answer.
+/// kind byte (uart=0, â€¦, ble-sniff=4, i2c=6), or None if it doesn't answer.
 /// Used to pick the pcap link type up front. Best-effort: a device that predates
 /// DATA_DESC just looks like uart, so we fall back to the raw USER0 stream.
 fn probe_kind(iface: &str, password: &str) -> Option<u8> {
@@ -349,7 +320,7 @@ fn probe_kind(iface: &str, password: &str) -> Option<u8> {
 
 /// DATA_DESC roundtrip on an already-open serial port, reusing the caller's mux
 /// reader/buffer so a follow-on capture loses no frames. Reply body = [status,
-/// kind, name…]; we want body[1].
+/// kind, nameâ€¦]; we want body[1].
 fn usb_data_kind(
     p: &mut Box<dyn serialport::SerialPort>,
     reader: &mut MuxReader,
@@ -414,7 +385,7 @@ fn probe_kind_ws(url: &str, password: &str) -> Option<u8> {
 }
 
 /// Capture from a USB-attached Duta: demux the serial stream, DATA -> pcap.
-/// (No AUTH — USB links aren't session-gated.)
+/// (No AUTH â€” USB links aren't session-gated.)
 fn capture_usb(port: &str, out: &mut std::fs::File, max_time: u64) -> Result<(), String> {
     let mut p = open_usb(port, Duration::from_millis(50))?;
     let mut reader = MuxReader::new();
@@ -445,7 +416,7 @@ fn capture_usb(port: &str, out: &mut std::fs::File, max_time: u64) -> Result<(),
             }
             if let Some(pkt) = frame_record(kind, &payload) {
                 if write_record(out, &pkt).is_err() {
-                    park_lines(&mut p); // Wireshark closed its end — done
+                    park_lines(&mut p); // Wireshark closed its end â€” done
                     return Ok(());
                 }
             }
@@ -520,7 +491,7 @@ fn capture(iface: &str, fifo: &str, password: &str, max_time: u64) -> Result<(),
             return Ok(());
         }
         // Fallback: a device that doesn't answer DATA_DESC (predates it) still
-        // captures — default to the raw USER0 stream after a short grace period.
+        // captures â€” default to the raw USER0 stream after a short grace period.
         if kind.is_none() {
             if let Some(t) = auth_at {
                 if t.elapsed() > Duration::from_millis(1500) {
@@ -565,7 +536,7 @@ fn capture(iface: &str, fifo: &str, password: &str, max_time: u64) -> Result<(),
             } else if ch == mux::DATA && authed && !payload.is_empty() {
                 // Hold DATA until DATA_DESC has set the link type + header.
                 if let Some(k) = kind {
-                    // Wireshark closing its pipe end surfaces as a write error —
+                    // Wireshark closing its pipe end surfaces as a write error â€”
                     // that's our stop signal.
                     if let Some(pkt) = frame_record(k, &payload) {
                         if write_record(&mut out, &pkt).is_err() {
@@ -575,5 +546,34 @@ fn capture(iface: &str, fifo: &str, password: &str, max_time: u64) -> Result<(),
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // Reframe a known 802.15.4 data frame and drop a one-packet pcap for tshark.
+    #[test]
+    fn ieee802154_tap_pcap() {
+        // MAC data frame: FCF 0x8841 (data, PAN-compressed, short dst+src),
+        // seq 1, dst PAN abcd, dst ffff (bcast), src 0000, payload, + 2 FCS bytes.
+        let psdu: &[u8] =
+            &[0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34];
+        let mut rec = vec![0u8, 0, 0, 0, 15, 0xD0u8, 0xFF, 0x01, psdu.len() as u8];
+        rec.extend_from_slice(psdu);
+
+        let tap = ieee802154_tap_packet(&rec).expect("reframe");
+        assert_eq!(tap[0], 0, "version");
+        assert_eq!(u16::from_le_bytes([tap[2], tap[3]]), 36, "tap header length");
+        // MAC frame follows the header, minus the 2-byte FCS we drop.
+        assert_eq!(&tap[36..], &psdu[..psdu.len() - 2], "MAC frame (no FCS)");
+
+        let path = std::env::temp_dir().join("duta_154_tap.pcap");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&pcap_global_header(LINKTYPE_IEEE802_15_4_TAP)).unwrap();
+        write_record(&mut f, &tap).unwrap();
+        eprintln!("wrote {}", path.display());
     }
 }

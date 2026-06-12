@@ -1,5 +1,5 @@
 //! Workspace: a user-chosen folder holding a `.sutra/` directory where Sutra
-//! keeps its per-project state — macros (`macros.json`) and capture exports
+//! keeps its per-project state â€” macros (`macros.json`) and capture exports
 //! (`captures/*.pcap`). The chosen path persists in the app config dir; with no
 //! workspace selected, macros fall back to the app data dir and captures prompt
 //! for a location.
@@ -124,7 +124,7 @@ fn pcap_record(out: &mut Vec<u8>, ts_ms: u32, data: &[u8]) {
 }
 
 /// Build a pcap (DLT_BLUETOOTH_LE_LL_WITH_PHDR) from raw ble-sniff records
-/// (each: ts(4)·ch(1)·rssi(1)·aa(4)·len(1)·pdu). One LL packet per record.
+/// (each: ts(4)Â·ch(1)Â·rssi(1)Â·aa(4)Â·len(1)Â·pdu). One LL packet per record.
 fn ble_pcap(records: &[Vec<u8>]) -> Vec<u8> {
     let mut out = pcap_header(DLT_BLUETOOTH_LE_LL_WITH_PHDR);
     for rec in records {
@@ -148,8 +148,8 @@ fn ble_pcap(records: &[Vec<u8>]) -> Vec<u8> {
         // flags: dewhitened | sig-power-valid | ref-AA-valid | crc-checked | crc-valid
         let flags: u16 = 0x0001 | 0x0002 | 0x0010 | 0x0040 | 0x0080;
         data[8..10].copy_from_slice(&flags.to_le_bytes());
-        data.extend_from_slice(aa); // LL packet: access address …
-        data.extend_from_slice(pdu); //            … + PDU
+        data.extend_from_slice(aa); // LL packet: access address â€¦
+        data.extend_from_slice(pdu); //            â€¦ + PDU
         pcap_record(&mut out, ts, &data);
     }
     out
@@ -158,7 +158,7 @@ fn ble_pcap(records: &[Vec<u8>]) -> Vec<u8> {
 const LINKTYPE_IEEE802_15_4_TAP: u32 = 283;
 
 /// Build a pcap (LINKTYPE_IEEE802_15_4_TAP) from raw ieee802154 records
-/// (each: ts(4)·ch(1)·rssi(1,signed)·lqi(1)·flags(1)·len(1)·psdu). One TAP
+/// (each: ts(4)Â·ch(1)Â·rssi(1,signed)Â·lqi(1)Â·flags(1)Â·len(1)Â·psdu). One TAP
 /// packet per record: a TLV pseudo-header + the MAC frame (FCS dropped). Mirrors
 /// sutra-extcap so saved captures and live Wireshark captures look identical.
 fn ieee154_pcap(records: &[Vec<u8>]) -> Vec<u8> {
@@ -224,7 +224,7 @@ pub fn save_ieee154_pcap(app: &AppHandle, name: &str, records: Vec<Vec<u8>>) -> 
 }
 
 // ---- workspace credential store (.sutra/keys.json) -------------------------
-// Per-workspace secrets that unlock a network — saved beside the captures they
+// Per-workspace secrets that unlock a network â€” saved beside the captures they
 // decrypt. Zigbee network/link keys today; BLE keys / device passwords can join
 // the same file later.
 
@@ -250,7 +250,7 @@ pub fn load_keys(app: &AppHandle) -> WorkspaceKeys {
 
 // ---- workspace network model (.sutra/networks.json) ------------------------
 // The network is the unit everything hangs off: its decryption key lives here
-// (not as a device/link param — the firmware stays a dumb radio), alongside the
+// (not as a device/link param â€” the firmware stays a dumb radio), alongside the
 // nodes we discover *passively* from sniffed traffic. Active discovery (ZDP) and
 // control fill in manufacturer/endpoints/clusters later.
 
@@ -309,7 +309,7 @@ pub fn load_networks(app: &AppHandle) -> Networks {
             }
         }
     }
-    // migrate legacy keys.json → one network per stored key
+    // migrate legacy keys.json â†’ one network per stored key
     let legacy = load_keys(app);
     Networks {
         networks: legacy
@@ -327,7 +327,7 @@ pub fn save_networks(app: &AppHandle, nets: &Networks) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
-/// The (key, label) pairs to hand tshark for decryption — every network that has
+/// The (key, label) pairs to hand tshark for decryption â€” every network that has
 /// a key set. This is what the network model unlocks.
 pub fn dissect_keys(app: &AppHandle) -> Vec<ZigbeeKey> {
     load_networks(app)
@@ -342,13 +342,13 @@ pub fn dissect_keys(app: &AppHandle) -> Vec<ZigbeeKey> {
 }
 
 // ---- tshark dissection -----------------------------------------------------
-// Thread / Zigbee / Matter are standard, fully-dissected protocols — we don't
+// Thread / Zigbee / Matter are standard, fully-dissected protocols â€” we don't
 // reimplement them. Instead we shell out to Wireshark's `tshark` as a dissection
 // engine: build the same LINKTYPE_IEEE802_15_4_TAP pcap, let tshark decode the
 // whole stack, and consume the per-packet Protocol/Info columns.
 
 /// Resolve the tshark binary: an explicit override (a file or its directory)
-/// from Sutra's settings, else autodetect — PATH, then the usual install dirs.
+/// from Sutra's settings, else autodetect â€” PATH, then the usual install dirs.
 fn resolve_tshark(explicit: Option<&str>) -> Option<PathBuf> {
     let exe = if cfg!(windows) { "tshark.exe" } else { "tshark" };
     if let Some(p) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
@@ -388,12 +388,12 @@ fn resolve_tshark(explicit: Option<&str>) -> Option<PathBuf> {
 #[derive(serde::Serialize)]
 pub struct DecodedRow {
     pub num: u32,
-    pub protocol: String,              // Wireshark's Protocol column (ZigBee, Thread, …)
-    pub summary: String,               // Wireshark's Info column — the "what happened" line
-    pub fields: Vec<(String, String)>, // (name, value) — the decoded field tree, drill-down
+    pub protocol: String,              // Wireshark's Protocol column (ZigBee, Thread, â€¦)
+    pub summary: String,               // Wireshark's Info column â€” the "what happened" line
+    pub fields: Vec<(String, String)>, // (name, value) â€” the decoded field tree, drill-down
 }
 
-/// Fields surfaced on drill-down. What's visible depends on the kind — and on
+/// Fields surfaced on drill-down. What's visible depends on the kind â€” and on
 /// whether the payload is encrypted (most Zigbee is, so only the NWK header shows
 /// unless a network key is configured).
 const FIELD_WHITELIST: &[&str] = &[
@@ -416,7 +416,7 @@ pub fn tshark_available(tshark_path: Option<String>) -> bool {
     resolve_tshark(tshark_path.as_deref()).is_some()
 }
 
-/// tshark's column summary per packet (frame num, Protocol, Info) — the rendered
+/// tshark's column summary per packet (frame num, Protocol, Info) â€” the rendered
 /// "what happened" line. A separate -T fields pass, since rtshark's PDML carries
 /// the field tree but not the columns.
 fn tshark_columns(
@@ -459,7 +459,7 @@ pub fn dissect_ieee154(
         return Ok(vec![]);
     }
     let bin = resolve_tshark(tshark_path.as_deref())
-        .ok_or("Wireshark (tshark) not found — set its path in Settings")?;
+        .ok_or("Wireshark (tshark) not found â€” set its path in Settings")?;
     let dir = bin.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
 
     let bytes = ieee154_pcap(&records);
@@ -510,44 +510,6 @@ pub fn dissect_ieee154(
     Ok(rows)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // End-to-end: a crafted 802.15.4 data frame through ieee154_pcap -> rtshark.
-    // Skipped when tshark isn't installed (so CI without Wireshark stays green).
-    #[test]
-    fn dissect_roundtrip() {
-        if !tshark_available(None) {
-            eprintln!("tshark not found — skipping dissect_roundtrip");
-            return;
-        }
-        // record: ts(4)·ch·rssi·lqi·flags·plen·psdu (psdu = MAC frame + 2 FCS bytes).
-        // MAC: FCF 0x8841 (data, PAN-compressed, short addrs), seq 1, dst PAN abcd,
-        // dst ffff (bcast), src 0000, payload, + FCS.
-        let psdu: &[u8] =
-            &[0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34];
-        let mut rec = vec![0u8, 0, 0, 0, 15, 0xD0, 0xFF, 0x01, psdu.len() as u8];
-        rec.extend_from_slice(psdu);
-
-        let rows = dissect_ieee154(vec![rec.clone()], None, vec![]).expect("dissect");
-        assert_eq!(rows.len(), 1, "one packet");
-
-        // A Zigbee key must be ACCEPTED by tshark (format check) even if it doesn't
-        // decrypt this frame — a bad -o would make tshark exit non-zero -> Err.
-        let key = ("5A6967426565416C6C69616E63653039".to_string(), "ZLL".to_string());
-        match dissect_ieee154(vec![rec], None, vec![key]) {
-            Ok(r) => eprintln!("with-key ok: protocol={} summary={}", r[0].protocol, r[0].summary),
-            Err(e) => panic!("tshark rejected the zigbee key preference: {e}"),
-        }
-        eprintln!("protocol={} summary={} fields={:?}", rows[0].protocol, rows[0].summary, rows[0].fields);
-        assert!(
-            rows[0].fields.iter().any(|(k, _)| k == "wpan.src16"),
-            "extracted the wpan source address"
-        );
-    }
-}
-
 // ---- Tauri commands --------------------------------------------------------
 
 /// Open a folder picker and adopt the chosen folder as the workspace.
@@ -580,4 +542,42 @@ pub fn save_ble_pcap(app: &AppHandle, name: &str, records: Vec<Vec<u8>>) -> Resu
     };
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // End-to-end: a crafted 802.15.4 data frame through ieee154_pcap -> rtshark.
+    // Skipped when tshark isn't installed (so CI without Wireshark stays green).
+    #[test]
+    fn dissect_roundtrip() {
+        if !tshark_available(None) {
+            eprintln!("tshark not found â€” skipping dissect_roundtrip");
+            return;
+        }
+        // record: ts(4)Â·chÂ·rssiÂ·lqiÂ·flagsÂ·plenÂ·psdu (psdu = MAC frame + 2 FCS bytes).
+        // MAC: FCF 0x8841 (data, PAN-compressed, short addrs), seq 1, dst PAN abcd,
+        // dst ffff (bcast), src 0000, payload, + FCS.
+        let psdu: &[u8] =
+            &[0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34];
+        let mut rec = vec![0u8, 0, 0, 0, 15, 0xD0, 0xFF, 0x01, psdu.len() as u8];
+        rec.extend_from_slice(psdu);
+
+        let rows = dissect_ieee154(vec![rec.clone()], None, vec![]).expect("dissect");
+        assert_eq!(rows.len(), 1, "one packet");
+
+        // A Zigbee key must be ACCEPTED by tshark (format check) even if it doesn't
+        // decrypt this frame â€” a bad -o would make tshark exit non-zero -> Err.
+        let key = ("5A6967426565416C6C69616E63653039".to_string(), "ZLL".to_string());
+        match dissect_ieee154(vec![rec], None, vec![key]) {
+            Ok(r) => eprintln!("with-key ok: protocol={} summary={}", r[0].protocol, r[0].summary),
+            Err(e) => panic!("tshark rejected the zigbee key preference: {e}"),
+        }
+        eprintln!("protocol={} summary={} fields={:?}", rows[0].protocol, rows[0].summary, rows[0].fields);
+        assert!(
+            rows[0].fields.iter().any(|(k, _)| k == "wpan.src16"),
+            "extracted the wpan source address"
+        );
+    }
 }
