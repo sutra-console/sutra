@@ -1,0 +1,16 @@
+{
+  "_comment": "Well-known skrit INVOKE commands (ids 0x0000-0x7FFF). Canonical client catalog, mirrors the registry in PROTOCOL.md. The DEVICE'S InvokeDesc list is authoritative for what exists; this only enriches recognized ids with labels, descriptions, and UI widget hints. Unknown (vendor, >=0x8000) ids fall back to a generic form built from the device's arg signature. Loaded by the app UI (skrit.ts) and the MCP server.",
+  "version": 1,
+  "commands": [
+    {
+      "id": 1,
+      "name": "send_touch",
+      "label": "Send touch",
+      "description": "Inject a touch/tap at screen coordinate x,y. The device's handler decides how (e.g. capacitive spoof, digitizer).",
+      "args": [
+        { "name": "x", "type": "u16", "widget": "number", "min": 0, "max": 4095 },
+        { "name": "y", "type": "u16", "widget": "number", "min": 0, "max": 4095 }
+      ]
+    }
+  ]
+}

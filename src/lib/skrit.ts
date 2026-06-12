@@ -1,6 +1,7 @@
 // Front-end mirror of the skrit CMD protocol. See protocol/PROTOCOL.md
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import invocableCatalog from "./invocables.json";
 
 export const MSG = {
   PING: 0x01,
@@ -36,6 +37,8 @@ export const MSG = {
   CFG_SET: 0x41,
   I2C_SCAN: 0x60,
   I2C_XFER: 0x61,
+  INVOKE_DESC: 0x70,
+  INVOKE: 0x71,
   EVENT_LOG: 0x50,
   EVENT_INPUT: 0x51,
 } as const;
@@ -339,7 +342,7 @@ export const CAP = {
   PWM: 0x80,
 } as const;
 // INFO flags byte (body[9])
-export const FLAG = { AUTH_REQUIRED: 0x01, DEFAULT_CRED: 0x02, PROVISION: 0x04 } as const;
+export const FLAG = { AUTH_REQUIRED: 0x01, DEFAULT_CRED: 0x02, PROVISION: 0x04, INVOKE: 0x08 } as const;
 
 export interface DeviceInfo {
   fwVer: number;
@@ -443,6 +446,113 @@ export async function setIoConfig(rows: IoRow[]): Promise<number | null> {
 export async function resetIoConfig(): Promise<void> {
   const resp = await sendCmd(MSG.CONFIG_SET, [PINCAP.CONFIG_RESET]);
   if (resp.status !== 0) throw new Error(`reset failed (status 0x${(resp.status ?? 0).toString(16)})`);
+}
+
+// ---- INVOKE: user-defined commands (INVOKE_DESC / INVOKE) ----
+// A device advertises its own command vocabulary; we forward a high-level intent
+// to its handler. The device's list is authoritative for *what exists*; the
+// catalog (invocables.json) enriches *recognized* ids with labels + widgets and
+// every unknown (vendor) id still works from its raw arg signature.
+
+/** INVOKE arg-type codes (INVOKE_DESC argtype bytes). */
+export const ARG = { U8: 0, U16: 1, U32: 2, I16: 3, I32: 4, BYTES: 5, STR: 6 } as const;
+export type ArgName = "u8" | "u16" | "u32" | "i16" | "i32" | "bytes" | "str";
+const ARG_NAMES: ArgName[] = ["u8", "u16", "u32", "i16", "i32", "bytes", "str"];
+const ARG_CODE: Record<ArgName, number> = { u8: 0, u16: 1, u32: 2, i16: 3, i32: 4, bytes: 5, str: 6 };
+/** ids >= this are vendor / user-defined (the device owns the meaning). */
+export const INVOKE_VENDOR_BASE = 0x8000;
+/** INVOKE_DESC per-command flags. */
+export const INVOKE_REPLY = 0x01;
+
+/** A catalogued argument: a label + UI widget hint over the wire type. */
+export interface InvocableArg {
+  name: string;
+  type: ArgName;
+  widget?: string; // "number" | "slider" | "hex" | "text" | ...
+  min?: number;
+  max?: number;
+  unit?: string;
+}
+/** One command the device exposes, merged with the client catalog. */
+export interface Invocable {
+  id: number;
+  name: string; // device's own label (or the catalog name)
+  label: string; // catalog label, else the device name
+  description?: string;
+  args: InvocableArg[]; // catalogued args if known, else generic from the signature
+  argCodes: number[]; // the raw ARG codes the device advertised
+  hasReply: boolean;
+  vendor: boolean; // id >= INVOKE_VENDOR_BASE
+  known: boolean; // matched a catalog entry
+}
+
+interface CatalogArg { name: string; type: ArgName; widget?: string; min?: number; max?: number; unit?: string }
+interface CatalogCommand { id: number; name: string; label?: string; description?: string; args: CatalogArg[] }
+const CATALOG: CatalogCommand[] = (invocableCatalog as { commands: CatalogCommand[] }).commands;
+
+/** Generic arg name + type from a wire code, when the catalog doesn't know the id. */
+function genericArg(code: number, i: number): InvocableArg {
+  return { name: `arg${i}`, type: ARG_NAMES[code] ?? "u8" };
+}
+
+/** Merge a device-advertised command with the catalog (catalog enriches, never overrides existence). */
+function mergeInvocable(id: number, name: string, argCodes: number[], flags: number): Invocable {
+  const vendor = id >= INVOKE_VENDOR_BASE;
+  const hit = CATALOG.find((c) => c.id === id);
+  // Use the catalog's typed args only if its signature matches what the device reports.
+  const matches =
+    hit && hit.args.length === argCodes.length && hit.args.every((a, i) => ARG_CODE[a.type] === argCodes[i]);
+  return {
+    id,
+    name: name || hit?.name || `cmd_0x${id.toString(16)}`,
+    label: hit?.label ?? name ?? `0x${id.toString(16)}`,
+    description: hit?.description,
+    args: matches ? hit!.args.map((a) => ({ ...a })) : argCodes.map(genericArg),
+    argCodes,
+    hasReply: (flags & INVOKE_REPLY) !== 0,
+    vendor,
+    known: !!hit,
+  };
+}
+
+/** The device's command menu, enriched by the client catalog. Empty if it exposes none. */
+export async function invocables(): Promise<Invocable[]> {
+  const first = await sendCmd(MSG.INVOKE_DESC, [0]);
+  if (first.status !== 0) return []; // device exposes no INVOKE commands
+  const total = first.body[2] ?? 0;
+  const out: Invocable[] = [];
+  for (let i = 0; i < total; i++) {
+    const b = (await sendCmd(MSG.INVOKE_DESC, [i])).body; // [st,idx,total,idlo,idhi,nargs,at..,flags,name..]
+    const id = (b[3] ?? 0) | ((b[4] ?? 0) << 8);
+    const nargs = b[5] ?? 0;
+    const argCodes = b.slice(6, 6 + nargs);
+    const flags = b[6 + nargs] ?? 0;
+    const name = dec.decode(Uint8Array.from(b.slice(7 + nargs)));
+    out.push(mergeInvocable(id, name, argCodes, flags));
+  }
+  return out;
+}
+
+/** Pack argument values into an INVOKE payload per the wire codec (LE; bytes/str length-prefixed). */
+export function packArgs(argCodes: number[], values: Array<number | number[] | string>): number[] {
+  const out: number[] = [];
+  argCodes.forEach((t, i) => {
+    const v = values[i];
+    if (t === ARG.U8) out.push((v as number) & 0xff);
+    else if (t === ARG.U16) { const n = v as number; out.push(n & 0xff, (n >> 8) & 0xff); }
+    else if (t === ARG.U32 || t === ARG.I32) { const n = (v as number) >>> 0; out.push(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff); }
+    else if (t === ARG.I16) { const n = (v as number) & 0xffff; out.push(n & 0xff, (n >> 8) & 0xff); }
+    else if (t === ARG.BYTES) { const a = (v as number[]) ?? []; out.push(a.length & 0xff, ...a); }
+    else if (t === ARG.STR) { const a = Array.from(new TextEncoder().encode((v as string) ?? "")); out.push(a.length & 0xff, ...a); }
+  });
+  return out;
+}
+
+/** Call a device command by id with a packed payload. Returns the echoed id + any reply bytes. */
+export async function invokeCommand(id: number, payload: number[] = []): Promise<{ id: number; reply: number[] }> {
+  const resp = await sendCmd(MSG.INVOKE, [id & 0xff, (id >> 8) & 0xff, ...payload]);
+  if (resp.status !== 0) throw new Error(`invoke 0x${id.toString(16)}: status 0x${(resp.status ?? 0).toString(16)}`);
+  return { id: (resp.body[1] ?? 0) | ((resp.body[2] ?? 0) << 8), reply: resp.body.slice(3) };
 }
 
 // ---- key-value config (CFG_GET/CFG_SET) + WiFi provisioning ----
