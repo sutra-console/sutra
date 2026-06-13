@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus, Save, Undo2, Redo2, RotateCcw, Trash2, Move,
-  Layers, Eye, EyeOff, ChevronUp, ChevronDown, ChevronRight,
+  Layers, Eye, EyeOff, Lock, LockOpen, ChevronUp, ChevronDown, ChevronRight,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalSpaceBetween, AlignVerticalSpaceBetween,
@@ -447,6 +447,14 @@ export function YantraEditor({
       ws[i] = { ...ws[i], hidden: !ws[i].hidden };
       return { ...d, widgets: ws };
     });
+  const toggleLock = (i: number) =>
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      ws[i] = { ...ws[i], locked: !ws[i].locked };
+      return { ...d, widgets: ws };
+    });
+  const toggleFrameLock = (id: string) =>
+    setDraft((d) => ({ ...d, frames: (d.frames ?? []).map((f) => (f.id === id ? { ...f, locked: !f.locked } : f)) }));
 
   // --- frames: nestable editor-only containers --------------------------------
   // Frame ids in the subtree rooted at `id` (inclusive).
@@ -462,17 +470,8 @@ export function YantraEditor({
     const set = new Set(frameIds);
     return widgets.map((w, i) => (w.frame && set.has(w.frame) ? i : -1)).filter((i) => i >= 0);
   };
-  // Expand a raw widget selection to whole frames (selecting one framed widget
-  // selects its frame's subtree).
-  const expandToSubtree = (idxs: number[]): number[] => {
-    const fids = new Set(idxs.map((i) => widgets[i]?.frame).filter(Boolean) as string[]);
-    if (!fids.size) return idxs;
-    const all = new Set<string>();
-    fids.forEach((id) => subtreeFrames(id).forEach((f) => all.add(f)));
-    const out = new Set(idxs);
-    widgetsInFrames([...all]).forEach((i) => out.add(i));
-    return [...out];
-  };
+  // (Canvas selection picks the individual widget; the layer tree's frame rows
+  //  select a whole subtree via selectFrame.)
 
   // Group the current selection into a new frame (nests when items share a parent
   // frame, or when whole frames are selected via the tree).
@@ -520,7 +519,6 @@ export function YantraEditor({
     selected.forEach((i) => { const f = widgets[i]?.frame; if (f) out.add(f); });
     return [...out];
   };
-  const expandGroups = expandToSubtree; // name used by Selecto/right-click selection
   const ungroupSelected = () => ungroupFrames(selectionFrames());
   const selectionHasGroup = selectionFrames().length > 0;
 
@@ -541,7 +539,7 @@ export function YantraEditor({
       return { ...d, widgets: ws };
     });
   // right-click selects the widget (and its frame) if it isn't already selected
-  const ensureSelected = (i: number) => { if (!selected.includes(i)) { setSelectedFrames([]); setSelected(expandGroups([i])); } };
+  const ensureSelected = (i: number) => { if (!selected.includes(i)) { setSelectedFrames([]); setSelected([i]); } };
   // frame helpers (layer tree)
   const selectFrame = (id: string, additive: boolean) => {
     setSelectedFrames((sf) => (additive ? (sf.includes(id) ? sf.filter((x) => x !== id) : [...sf, id]) : [id]));
@@ -734,7 +732,8 @@ export function YantraEditor({
     [selected, draft, containerW], // eslint-disable-line react-hooks/exhaustive-deps
   );
   const targets = useMemo(
-    () => selected.map((i) => widgetRefs.current[i]).filter(Boolean) as HTMLElement[],
+    // locked widgets are selectable but get no move/resize handles
+    () => selected.filter((i) => !widgets[i]?.locked).map((i) => widgetRefs.current[i]).filter(Boolean) as HTMLElement[],
     [selected, draft, containerW], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
@@ -774,6 +773,10 @@ export function YantraEditor({
           {w.hidden ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
         </button>
         <span className="min-w-0 flex-1 truncate" title={w.label || w.type}>{w.label || w.type}</span>
+        <button type="button" title={w.locked ? "Unlock" : "Lock"} className="text-muted-foreground hover:text-foreground"
+          onClick={(e) => { e.stopPropagation(); toggleLock(i); }}>
+          {w.locked ? <Lock className="size-3" /> : <LockOpen className="size-3 opacity-40" />}
+        </button>
         <button type="button" title="Bring forward" disabled={i === widgets.length - 1}
           className="text-muted-foreground hover:text-foreground disabled:opacity-30"
           onClick={(e) => { e.stopPropagation(); moveLayer(i, 1); }}><ChevronUp className="size-3" /></button>
@@ -797,6 +800,10 @@ export function YantraEditor({
         <input value={f.name ?? "Frame"} onClick={(e) => e.stopPropagation()}
           onChange={(e) => renameFrame(f.id, e.target.value)}
           className="min-w-0 flex-1 bg-transparent outline-none focus:underline" />
+        <button type="button" className="text-muted-foreground hover:text-foreground" title={f.locked ? "Unlock frame" : "Lock frame"}
+          onClick={(e) => { e.stopPropagation(); toggleFrameLock(f.id); }}>
+          {f.locked ? <Lock className="size-3" /> : <LockOpen className="size-3 opacity-40" />}
+        </button>
         <button type="button" className="text-muted-foreground hover:text-foreground" title="Hide / show frame"
           onClick={(e) => { e.stopPropagation(); toggleFrameHidden(f.id); }}><Eye className="size-3" /></button>
       </div>
@@ -955,6 +962,9 @@ export function YantraEditor({
                 <ContextMenuSeparator />
                 <ContextMenuItem disabled={selected.length < 2} onSelect={groupSelected}>Group</ContextMenuItem>
                 <ContextMenuItem disabled={!selectionHasGroup} onSelect={ungroupSelected}>Ungroup</ContextMenuItem>
+                <ContextMenuItem onSelect={() => { const lock = selected.some((j) => !widgets[j]?.locked); setDraft((d) => ({ ...d, widgets: (d.widgets ?? []).map((x, j) => (selected.includes(j) ? { ...x, locked: lock } : x)) })); }}>
+                  {selected.some((j) => !widgets[j]?.locked) ? "Lock" : "Unlock"}
+                </ContextMenuItem>
                 <ContextMenuSeparator />
                 <ContextMenuItem onSelect={snapSelected}>Snap to grid</ContextMenuItem>
                 {RESIZE_PRESETS.map(([rw, rh]) => (
@@ -1047,7 +1057,7 @@ export function YantraEditor({
                   .map((el) => Number((el as HTMLElement).dataset.idx))
                   .filter((n) => !Number.isNaN(n));
                 setSelectedFrames([]);
-                setSelected(expandGroups(idxs)); // selecting one framed widget selects its frame
+                setSelected(idxs); // pick the individual widget(s) — frame select is via the layer tree
               }}
             />
           )}
@@ -1181,9 +1191,15 @@ function WidgetProps({
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">Widget</div>
-        <Button size="sm" variant="ghost" className="h-6 px-1 text-destructive" onClick={onDelete}>
-          <Trash2 className="size-3.5" />
-        </Button>
+        <div className="flex items-center gap-0.5">
+          <Button size="sm" variant="ghost" className="h-6 px-1" title={w.locked ? "Unlock" : "Lock"}
+            onClick={() => onChange({ locked: !w.locked })}>
+            {w.locked ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5 opacity-50" />}
+          </Button>
+          <Button size="sm" variant="ghost" className="h-6 px-1 text-destructive" onClick={onDelete}>
+            <Trash2 className="size-3.5" />
+          </Button>
+        </div>
       </div>
 
       <Field label="Type">
