@@ -212,7 +212,8 @@ export function YantraEditor({
   const [past, setPast] = useState<YantraSpec[]>([]); // undo stack (checkpoints before each change)
   const [future, setFuture] = useState<YantraSpec[]>([]); // redo stack
   const committed = useRef<YantraSpec>(migrateFrames(spec)); // last history checkpoint
-  const gridRef = useRef<HTMLDivElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null); // scroll container (viewport)
+  const surfaceRef = useRef<HTMLDivElement>(null); // positioning context = content area (gutter excluded)
   const moveableRef = useRef<Moveable>(null);
   const toolbarRef = useRef<HTMLDivElement>(null); // floating toolbar, repositioned live during a gesture
   const moved = useRef(false); // true once a gesture actually moves (so a plain click doesn't commit/drift)
@@ -345,11 +346,15 @@ export function YantraEditor({
   useEffect(() => {
     setReady(true);
     const el = gridRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => { setContainerW(el.clientWidth); setContainerH(el.clientHeight); });
+    const sf = surfaceRef.current;
+    if (!el || !sf) return;
+    // width from the surface (content area, gutter excluded); height from the
+    // scroll viewport (so a tall surface doesn't inflate it).
+    const measure = () => { setContainerW(sf.clientWidth); setContainerH(el.clientHeight); };
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    setContainerW(el.clientWidth);
-    setContainerH(el.clientHeight);
+    ro.observe(sf);
+    measure();
     return () => ro.disconnect();
   }, []);
 
@@ -567,9 +572,9 @@ export function YantraEditor({
   // Read the dragged/resized widgets' final DOM rects back into the spec, converted
   // to coords RELATIVE to each widget's parent container, in its unit (pct|px).
   const commit = (indices: number[]) => {
-    const cont = gridRef.current;
+    const cont = surfaceRef.current;
     if (!cont) return;
-    const cr = cont.getBoundingClientRect();
+    const cr = cont.getBoundingClientRect(); // surface moves with scroll → no scroll term needed
     const r2 = (n: number) => Math.round(n * 100) / 100;
     setDraft((d) => {
       const ws = [...(d.widgets ?? [])];
@@ -578,8 +583,8 @@ export function YantraEditor({
         if (!el) continue;
         const w0 = ws[i];
         const r = el.getBoundingClientRect();
-        const absL = r.left - cr.left + cont.scrollLeft;
-        const absT = r.top - cr.top + cont.scrollTop;
+        const absL = r.left - cr.left;
+        const absT = r.top - cr.top;
         // drag-to-reparent: which container does the widget's centre land in?
         const target = dropTarget(absL + r.width / 2, absT + r.height / 2, parentKeyOf(w0));
         const pb = contentBox(target);
@@ -670,7 +675,7 @@ export function YantraEditor({
   // Move the floating toolbar to track the selection mid-gesture by writing to its
   // DOM node directly — no React state, so we never re-render (and abort) the drag.
   const syncLiveBox = () => {
-    const cont = gridRef.current;
+    const cont = surfaceRef.current;
     const bar = toolbarRef.current;
     if (!cont || !bar) return;
     const cr = cont.getBoundingClientRect();
@@ -679,8 +684,8 @@ export function YantraEditor({
       const el = widgetRefs.current[i];
       if (!el) continue;
       const r = el.getBoundingClientRect();
-      left = Math.min(left, r.left - cr.left + cont.scrollLeft);
-      top = Math.min(top, r.top - cr.top + cont.scrollTop);
+      left = Math.min(left, r.left - cr.left);
+      top = Math.min(top, r.top - cr.top);
     }
     if (!Number.isFinite(left)) return;
     bar.style.left = `${Math.max(2, left - 34)}px`;
@@ -923,9 +928,10 @@ export function YantraEditor({
           </div>
         </div>
 
+        <div ref={gridRef} className="yantra-canvas scroll-stable flex-1 overflow-auto rounded border bg-muted/10">
         <div
-          ref={gridRef}
-          className="yantra-canvas scroll-stable relative flex-1 overflow-auto rounded border bg-muted/10"
+          ref={surfaceRef}
+          className="relative min-h-full"
           style={{
             backgroundSize: `${cw}px ${ROW_H}px`,
             backgroundImage:
@@ -1076,7 +1082,8 @@ export function YantraEditor({
               }}
             />
           )}
-        </div>
+        </div>{/* surface */}
+        </div>{/* scroll container */}
       </div>
 
       {/* property panel */}

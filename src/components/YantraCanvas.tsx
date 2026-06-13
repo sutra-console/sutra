@@ -77,12 +77,16 @@ export function YantraCanvas({
   };
 
   return (
-    <div className="scroll-stable relative h-full overflow-auto p-1">
-      <CanvasNodes
-        container="root" widgets={widgets} frames={frames}
-        activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
-        disabled={disabled} fire={fire} readout={readout}
-      />
+    <div className="scroll-stable h-full overflow-auto">
+      {/* inner surface = the content area (scrollbar gutter excluded); widgets'
+          % resolves against this, matching the editor's measured surface. */}
+      <div className="relative h-full">
+        <CanvasNodes
+          container="root" widgets={widgets} frames={frames}
+          activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
+          disabled={disabled} fire={fire} readout={readout}
+        />
+      </div>
     </div>
   );
 }
