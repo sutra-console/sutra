@@ -23,17 +23,38 @@ import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import {
-  resolveAxis, storeAxis,
-  type AnchorMode, type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
+  resolveAxis, storeAxis, onData,
+  bindOf, computeBus, evalArray, evalBind, needsConsole, CURRENT_CONN,
+  type AnchorMode, type YantraAction, type YantraBind, type YantraFrame,
+  type YantraSource, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
 import { Widget } from "./YantraCanvas";
 
+const dec = new TextDecoder();
 const ANCHORS: AnchorMode[] = ["scale", "start", "center", "end", "stretch"];
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
 const ROW_H = 56; // px per grid row in the editor (renderer auto-sizes rows)
-const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label", "tabs"] as const;
+const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label", "table", "tabs"] as const;
+// widget types that can be FILLED from a scalar binding (the Data section)
+const SINK_TYPES = ["readout", "label", "toggle", "slider"];
 const tid = () => `t${crypto.randomUUID().slice(0, 5)}`;
+
+// ---- data sources (UI helpers for the source picker) ------------------------
+const srcKind = (s?: YantraSource): "uart" | "var" | "com" | "nodes" => {
+  const x = s ?? "uart";
+  if (x.startsWith("var:")) return "var";
+  if (x.startsWith("com:")) return "com";
+  if (x === "nodes") return "nodes";
+  return "uart";
+};
+const srcId = (s?: YantraSource): string => {
+  const i = (s ?? "").indexOf(":");
+  return i >= 0 ? (s ?? "").slice(i + 1) : "";
+};
+const makeSource = (kind: string, id: string): YantraSource =>
+  kind === "var" ? (`var:${id}` as YantraSource) : kind === "com" ? (`com:${id}` as YantraSource) : "uart";
+const showVal = (v: unknown): string => (v === undefined || v === null || v === "" ? "—" : String(v));
 
 // ---- small helpers ----------------------------------------------------------
 
@@ -95,6 +116,7 @@ function defaultWidget(type: string, y: number): YantraWidget {
     case "slider": return { ...base, w: 50, min: 0, max: 100, step: 1, send: "{value}" };
     case "select": return { ...base, w: 50, options: [{ label: "Option", send: "" }] };
     case "readout": return { ...base, w: 50, match: "" };
+    case "table": return { ...base, w: 60, h: 160, label: "Table", source: "uart", all: true, match: "", columns: [{ label: "col1", field: "1" }] };
     case "tabs": return { ...base, w: 60, h: 220, label: "Tabs", tabs: [{ id: tid(), label: "Tab 1" }, { id: tid(), label: "Tab 2" }] };
     default: return base;
   }
@@ -226,6 +248,23 @@ export function YantraEditor({
   const cw = containerW > 0 ? containerW / cols : 80;
   const dirty = JSON.stringify(draft) !== JSON.stringify(spec);
   const sel = selected.length ? selected[0] : null;
+
+  // Live data-flow preview: same reactive bus as the renderer, fed by the device
+  // console, so bound widgets show real values in WYSIWYG and the Data panel.
+  const [bufs, setBufs] = useState<Record<string, string>>({});
+  const wantsConsole = needsConsole(widgets);
+  useEffect(() => {
+    if (!wantsConsole) return;
+    let un: (() => void) | undefined;
+    onData((bytes) => {
+      const t = dec.decode(Uint8Array.from(bytes));
+      setBufs((b) => ({ ...b, [CURRENT_CONN]: ((b[CURRENT_CONN] ?? "") + t).slice(-4000) }));
+    }).then((u) => (un = u));
+    return () => un?.();
+  }, [wantsConsole]);
+  const bus = useMemo(() => computeBus(widgets, bufs), [widgets, bufs]);
+  const valueOf = (w: YantraWidget): unknown => evalBind(bindOf(w), bus, bufs);
+  const rowsOf = (w: YantraWidget): unknown[] => evalArray(w, bus, bufs);
 
   // Phase C: coords are relative to the parent container's content box, in unitH/unitV
   // (pct of parent | px). The editor is FLAT — we resolve each node's ABSOLUTE px rect
@@ -974,7 +1013,7 @@ export function YantraEditor({
                   ) : (
                     // the real control, non-interactive so gestures hit the wrapper (WYSIWYG)
                     <div className="pointer-events-none h-full w-full">
-                      <Widget w={w} disabled fire={() => {}} readout={() => "—"} />
+                      <Widget w={w} disabled fire={() => {}} value={valueOf(w)} rows={rowsOf(w)} />
                     </div>
                   )}
                 </div>
@@ -1150,6 +1189,8 @@ export function YantraEditor({
           <WidgetProps
             w={widgets[sel]}
             tabOptions={widgets.flatMap((x) => (x.tabs ?? []).map((t) => ({ id: t.id, label: `${x.name || x.label || "tabs"} · ${t.label}` })))}
+            liveValue={valueOf(widgets[sel])}
+            liveRows={rowsOf(widgets[sel]).length}
             onChange={(p) => setWidget(sel, p)}
             onAnchor={setAnchor}
             onDim={setDim}
@@ -1199,16 +1240,44 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
+// Pick a data source: a kind (uart / variable / com) + an id when var/com.
+function SourcePicker({ source, onChange }: { source?: YantraSource; onChange: (s: YantraSource) => void }) {
+  const kind = srcKind(source);
+  const id = srcId(source);
+  return (
+    <div className="flex gap-1">
+      <Select value={kind === "nodes" ? "uart" : kind} onValueChange={(k) => onChange(makeSource(k, id))}>
+        <SelectTrigger className="h-7 flex-1 text-[11px]"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="uart">UART / console</SelectItem>
+          <SelectItem value="var">Variable (widget)</SelectItem>
+          <SelectItem value="com">Com port (reserved)</SelectItem>
+        </SelectContent>
+      </Select>
+      {(kind === "var" || kind === "com") && (
+        <Input className="h-7 flex-1 font-mono text-[11px]"
+          placeholder={kind === "var" ? "widget name" : "conn id"}
+          value={id} onChange={(e) => onChange(makeSource(kind, e.target.value))} />
+      )}
+    </div>
+  );
+}
+
 function WidgetProps({
-  w, tabOptions, onChange, onAnchor, onDim, onDelete,
+  w, tabOptions, liveValue, liveRows, onChange, onAnchor, onDim, onDelete,
 }: {
   w: YantraWidget;
   tabOptions: { id: string; label: string }[];
+  liveValue: unknown; // current bound value (live preview)
+  liveRows: number; // current table row count (live preview)
   onChange: (patch: Partial<YantraWidget>) => void;
   onAnchor: (axis: "H" | "V", mode: AnchorMode) => void;
   onDim: (field: "x" | "y" | "w" | "h", raw: string) => void;
   onDelete: () => void;
 }) {
+  const bind: YantraBind = w.bind ?? (w.match ? { source: "uart", match: w.match } : {});
+  const setBind = (patch: Partial<YantraBind>) => onChange({ bind: { ...bind, ...patch }, match: undefined });
+  const bindKind = srcKind(bind.source);
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
@@ -1355,10 +1424,75 @@ function WidgetProps({
           </Button>
         </div>
       )}
-      {w.type === "readout" && (
-        <Field label="Match (regex, group 1)">
-          <Input className="h-7 font-mono text-[11px]" value={w.match ?? ""} onChange={(e) => onChange({ match: e.target.value })} />
-        </Field>
+      {/* Data: fill a display control from a live source (uart/var) + transform */}
+      {SINK_TYPES.includes(w.type) && (
+        <div className="flex flex-col gap-1.5 rounded border bg-muted/20 p-2">
+          <span className="text-[11px] font-medium text-muted-foreground">Data (fill from source)</span>
+          <SourcePicker source={bind.source} onChange={(s) => setBind({ source: s })} />
+          {bindKind !== "var" ? (
+            <Field label="Match (regex, group 1)">
+              <Input className="h-7 font-mono text-[11px]" value={bind.match ?? ""}
+                placeholder="e.g. lat,(\d+\.\d+)" onChange={(e) => setBind({ match: e.target.value })} />
+            </Field>
+          ) : (
+            <Field label="Field (path on value)">
+              <Input className="h-7 font-mono text-[11px]" value={bind.field ?? ""}
+                placeholder="e.g. addr or groups.lat" onChange={(e) => setBind({ field: e.target.value })} />
+            </Field>
+          )}
+          <Field label="Transform (JS: v, n, item, i)">
+            <Input className="h-7 font-mono text-[11px]" value={bind.expr ?? ""}
+              placeholder="e.g. n * 0.1" onChange={(e) => setBind({ expr: e.target.value })} />
+          </Field>
+          <div className="text-[10px] text-muted-foreground">
+            live: <span className="font-mono text-foreground">{showVal(liveValue)}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Table: a row template repeated over an array source */}
+      {w.type === "table" && (
+        <div className="flex flex-col gap-1.5 rounded border bg-muted/20 p-2">
+          <span className="text-[11px] font-medium text-muted-foreground">Rows (repeat over an array)</span>
+          <SourcePicker source={w.source} onChange={(s) => onChange({ source: s })} />
+          {srcKind(w.source) !== "var" && (
+            <>
+              <Field label="Match (regex per row)">
+                <Input className="h-7 font-mono text-[11px]" value={w.match ?? ""}
+                  placeholder="e.g. node (\w+) lqi (\d+)" onChange={(e) => onChange({ match: e.target.value })} />
+              </Field>
+              <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <input type="checkbox" checked={w.all ?? false}
+                  onChange={(e) => onChange({ all: e.target.checked })} />
+                all matches (one row each)
+              </label>
+            </>
+          )}
+          <div className="text-[10px] text-muted-foreground">{liveRows} row(s)</div>
+          <span className="mt-1 text-[11px] font-medium text-muted-foreground">Columns</span>
+          {(w.columns ?? []).map((c, i) => (
+            <div key={i} className="flex flex-col gap-1 rounded border bg-background/40 p-1.5">
+              <div className="flex gap-1">
+                <Input className="h-6 flex-1 text-[11px]" placeholder="label" value={c.label ?? ""}
+                  onChange={(e) => { const cs = [...(w.columns ?? [])]; cs[i] = { ...cs[i], label: e.target.value }; onChange({ columns: cs }); }} />
+                <Button size="sm" variant="ghost" className="h-6 px-1 text-destructive"
+                  onClick={() => onChange({ columns: (w.columns ?? []).filter((_, j) => j !== i) })}>
+                  <Trash2 className="size-3" />
+                </Button>
+              </div>
+              <div className="flex gap-1">
+                <Input className="h-6 flex-1 font-mono text-[11px]" placeholder="field (e.g. 1, addr)" value={c.field ?? ""}
+                  onChange={(e) => { const cs = [...(w.columns ?? [])]; cs[i] = { ...cs[i], field: e.target.value }; onChange({ columns: cs }); }} />
+                <Input className="h-6 flex-1 font-mono text-[11px]" placeholder="expr (item, i)" value={c.expr ?? ""}
+                  onChange={(e) => { const cs = [...(w.columns ?? [])]; cs[i] = { ...cs[i], expr: e.target.value }; onChange({ columns: cs }); }} />
+              </div>
+            </div>
+          ))}
+          <Button size="sm" variant="outline" className="h-6 gap-1 text-[11px]"
+            onClick={() => onChange({ columns: [...(w.columns ?? []), { label: `col${(w.columns ?? []).length + 1}` }] })}>
+            <Plus className="size-3" /> column
+          </Button>
+        </div>
       )}
 
       <Field label="Help (tooltip)">

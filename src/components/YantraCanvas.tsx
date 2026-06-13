@@ -4,12 +4,13 @@
 // device INVOKE command, or a CFG set. Readouts watch the live console stream
 // and surface a regex capture. v1 = render + interact; scripts/plugins/visual-
 // editor come later.
-import { type CSSProperties, useEffect, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
   MSG, dataWrite, i2cXfer, invokeCommand, onData, sendCmd,
-  axisStyle, type AnchorMode, type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
+  axisStyle, bindOf, computeBus, evalArray, evalBind, evalCell, needsConsole, CURRENT_CONN,
+  type AnchorMode, type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
 
 const enc = new TextEncoder();
@@ -49,32 +50,28 @@ export function YantraCanvas({
   };
   const widgets = spec.widgets ?? [];
   const frames = spec.frames ?? [];
-  const hasReadout = widgets.some((w) => w.type === "readout");
+  const wantsConsole = needsConsole(widgets);
 
   // active tab per `tabs` widget (keyed by its index); default = first pane
   const [activeTabs, setActiveTabs] = useState<Record<number, string>>({});
   const activeTabOf = (i: number) => activeTabs[i] ?? widgets[i].tabs?.[0]?.id;
 
-  // Rolling console buffer for readout regex matches (only while readouts exist).
-  const [consoleText, setConsoleText] = useState("");
+  // Rolling per-connection console buffers (only the current connection populated today).
+  const [bufs, setBufs] = useState<Record<string, string>>({});
   useEffect(() => {
-    if (!hasReadout) return;
+    if (!wantsConsole) return;
     let un: (() => void) | undefined;
     onData((bytes) => {
       const t = dec.decode(Uint8Array.from(bytes));
-      setConsoleText((c) => (c + t).slice(-4000));
+      setBufs((b) => ({ ...b, [CURRENT_CONN]: ((b[CURRENT_CONN] ?? "") + t).slice(-4000) }));
     }).then((u) => (un = u));
     return () => un?.();
-  }, [hasReadout]);
+  }, [wantsConsole]);
 
-  const readout = (re?: string): string => {
-    if (!re) return "—";
-    try {
-      return consoleText.match(new RegExp(re))?.[1] ?? "—";
-    } catch {
-      return "bad regex";
-    }
-  };
+  // Reactive value bus: each named widget publishes its evaluated value (recomputed as buffers grow).
+  const bus = useMemo(() => computeBus(widgets, bufs), [widgets, bufs]);
+  const valueOf = (w: YantraWidget): unknown => evalBind(bindOf(w), bus, bufs);
+  const rowsOf = (w: YantraWidget): unknown[] => evalArray(w, bus, bufs);
 
   return (
     <div className="scroll-stable h-full overflow-auto">
@@ -84,7 +81,7 @@ export function YantraCanvas({
         <CanvasNodes
           container="root" widgets={widgets} frames={frames}
           activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
-          disabled={disabled} fire={fire} readout={readout}
+          disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf}
         />
       </div>
     </div>
@@ -105,7 +102,7 @@ function nodeStyle(n: YantraWidget | YantraFrame): CSSProperties {
 
 // Recursively render the children of one container (root | a frame id | a tab-pane id).
 function CanvasNodes({
-  container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, readout,
+  container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, valueOf, rowsOf,
 }: {
   container: string; // "root" | frame id | pane id
   widgets: YantraWidget[];
@@ -114,7 +111,8 @@ function CanvasNodes({
   setActiveTabs: (f: (m: Record<number, string>) => Record<number, string>) => void;
   disabled?: boolean;
   fire: (a: YantraAction | undefined, value?: string) => void;
-  readout: (re?: string) => string;
+  valueOf: (w: YantraWidget) => unknown;
+  rowsOf: (w: YantraWidget) => unknown[];
 }) {
   const isRoot = container === "root";
   const childFrames = frames.filter((f) =>
@@ -130,7 +128,7 @@ function CanvasNodes({
 
   const sub = (c: string) => (
     <CanvasNodes container={c} widgets={widgets} frames={frames} activeTabOf={activeTabOf}
-      setActiveTabs={setActiveTabs} disabled={disabled} fire={fire} readout={readout} />
+      setActiveTabs={setActiveTabs} disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} />
   );
 
   return (
@@ -161,7 +159,7 @@ function CanvasNodes({
         }
         return (
           <div key={i} style={nodeStyle(w)}>
-            <Widget w={w} disabled={disabled} fire={fire} readout={readout} />
+            <Widget w={w} disabled={disabled} fire={fire} value={valueOf(w)} rows={rowsOf(w)} />
           </div>
         );
       })}
@@ -169,19 +167,29 @@ function CanvasNodes({
   );
 }
 
+/** Render any bound value to display text ("—" for empty). */
+const asText = (v: unknown): string =>
+  v === undefined || v === null || v === "" ? "—" : typeof v === "string" ? v : String(v);
+/** Coerce a bound value to on/off. */
+const truthy = (v: unknown): boolean =>
+  v === true || v === 1 || /^(1|on|true|yes|high)$/i.test(String(v ?? ""));
+
 export function Widget({
   w,
   disabled,
   fire,
-  readout,
+  value,
+  rows,
 }: {
   w: YantraWidget;
   disabled?: boolean;
   fire: (a: YantraAction | undefined, value?: string) => void;
-  readout: (re?: string) => string;
+  value?: unknown; // bound scalar (undefined = unbound → use internal state)
+  rows?: unknown[]; // table row items
 }) {
   const [on, setOn] = useState(false);
   const [val, setVal] = useState((w.min ?? 0).toString());
+  const bound = value !== undefined;
 
   switch (w.type) {
     case "button":
@@ -192,29 +200,67 @@ export function Widget({
         </Button>
       );
 
-    case "toggle":
+    case "toggle": {
+      const state = bound ? truthy(value) : on;
       return (
-        <Button className="h-full w-full" size="sm" variant={on ? "default" : "outline"}
+        <Button className="h-full w-full" size="sm" variant={state ? "default" : "outline"}
           disabled={disabled} title={w.help}
-          onClick={() => { const next = !on; setOn(next); fire(next ? w.on : w.off); }}>
-          {w.label}: {on ? "on" : "off"}
+          onClick={() => { const next = !state; if (!bound) setOn(next); fire(next ? w.on : w.off); }}>
+          {w.label}: {state ? "on" : "off"}
         </Button>
       );
+    }
 
-    case "slider":
+    case "slider": {
+      const shown = bound ? asText(value) : val; // bound ⇒ display-driven (still draggable to fire)
       return (
         <div className="flex h-full flex-col justify-center rounded border bg-muted/20 px-2 py-1">
           <div className="flex justify-between text-[11px]">
             <span className="text-muted-foreground">{w.label}</span>
-            <span className="font-mono tabular-nums">{val}</span>
+            <span className="font-mono tabular-nums">{shown}</span>
           </div>
           <input type="range" disabled={disabled}
-            min={w.min ?? 0} max={w.max ?? 100} step={w.step ?? 1} value={val}
+            min={w.min ?? 0} max={w.max ?? 100} step={w.step ?? 1} value={shown}
             onChange={(e) => setVal(e.target.value)}
-            onPointerUp={() => fire(w.send, val)}
-            onKeyUp={() => fire(w.send, val)} />
+            onPointerUp={() => fire(w.send, shown)}
+            onKeyUp={() => fire(w.send, shown)} />
         </div>
       );
+    }
+
+    case "table": {
+      const cols = w.columns && w.columns.length ? w.columns : [{ label: "value" }];
+      const list = rows ?? [];
+      return (
+        <div className="h-full overflow-auto rounded border bg-muted/20" title={w.help}>
+          <table className="w-full border-collapse text-[11px]">
+            <thead className="sticky top-0 bg-muted/60 backdrop-blur">
+              <tr>
+                {cols.map((c, ci) => (
+                  <th key={ci} className="px-1.5 py-0.5 text-left font-medium text-muted-foreground">
+                    {c.label ?? c.field ?? ci}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((item, ri) => (
+                <tr key={ri} className="border-t border-border/60">
+                  {cols.map((c, ci) => (
+                    <td key={ci} className="truncate px-1.5 py-0.5 font-mono tabular-nums">
+                      {asText(evalCell(c, item, ri))}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+              {list.length === 0 && (
+                <tr><td className="px-1.5 py-1 text-muted-foreground" colSpan={cols.length}>—</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
 
     case "select":
       return (
@@ -236,12 +282,16 @@ export function Widget({
       return (
         <div className="flex h-full flex-col justify-center rounded border bg-muted/20 px-2 py-1" title={w.help}>
           <div className="text-[11px] text-muted-foreground">{w.label}</div>
-          <div className="truncate font-mono text-lg tabular-nums">{readout(w.match)}</div>
+          <div className="truncate font-mono text-lg tabular-nums">{asText(value)}</div>
         </div>
       );
 
     case "label":
-      return <div className="flex h-full items-center text-xs font-medium">{w.label}</div>;
+      return (
+        <div className="flex h-full items-center text-xs font-medium">
+          {bound ? asText(value) : w.label}
+        </div>
+      );
 
     default:
       return (

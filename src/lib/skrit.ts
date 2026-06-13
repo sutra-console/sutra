@@ -652,6 +652,28 @@ export type YantraAction =
   | { invoke: { id: number; args?: number[] } }
   | { cfg: { key: number; bytes?: number[]; str?: string } };
 
+/** A data source ("stream") a widget can be filled from. Loose string by design so
+ *  new sources slot in. Wired now: "uart" (current connection console), "var:<name>"
+ *  (another widget's published value, via the bus), "com:<id>" (a specific connection —
+ *  multi-device-ready; resolves to the current connection until a backend supports many).
+ *  Reserved: "nodes" (active network node list — type slot only, not evaluated yet). */
+export type YantraSource = "uart" | "nodes" | `var:${string}` | `com:${string}`;
+
+/** A scalar fill binding: pull a value from a source, optionally transform it. */
+export interface YantraBind {
+  source?: YantraSource; // default "uart"
+  match?: string; // text source (uart/com): regex; capture group 1 → raw value `v`
+  field?: string; // bus/object value: property path (dotted) → `v`
+  expr?: string; // JS transform of v (string), n (= Number(v)), item, i → display value
+}
+
+/** A column template for the table/repeater widget; the row `item` is in scope. */
+export interface YantraColumn {
+  label?: string;
+  field?: string; // property path on the row item
+  expr?: string; // JS expression with item, i (and v=item, n=Number(item)) in scope
+}
+
 /** A widget in a .yantra control surface. Loose by design — new types/fields
  *  (scripts, plugins) slot in without breaking the renderer. */
 export interface YantraWidget {
@@ -666,7 +688,11 @@ export interface YantraWidget {
   on?: YantraAction; off?: YantraAction; // toggle
   min?: number; max?: number; step?: number; // slider
   options?: { label: string; send: YantraAction }[]; // select
-  match?: string; // readout: regex over the console; capture group 1 is shown
+  match?: string; // readout/table: regex over the console; capture group 1 is shown (legacy ⇒ bind{source:"uart"})
+  bind?: YantraBind; // data-flow: fill this control from a source (readout/label/toggle/slider)
+  all?: boolean; // table text source: matchAll → one row per match
+  source?: YantraSource; // table: an array-valued source ("var:<name>" or a text source with `all`)
+  columns?: YantraColumn[]; // table: per-cell row template
   hidden?: boolean; // layer hidden from the rendered surface
   locked?: boolean; // editor: not selectable on the canvas (clicks pass to children); still in the layer tree
   frame?: string; // parent frame id (container); coords are relative to it
@@ -719,6 +745,128 @@ export function storeAxis(mode: AnchorMode, start: number, size: number, parent:
     default: return { a: start, b: size }; // start
   }
 }
+
+// ── Yantra data flow: sources → binding → value bus ─────────────────────────
+/** Connection id of the single active connection today. Multi-device: per-connection
+ *  console buffers will be keyed here; `uart` and any `com:<id>` resolve to this until a
+ *  backend supports several at once. */
+export const CURRENT_CONN = "current";
+
+/** The console-buffer key a source reads, or null if it isn't a text/console source. */
+export function sourceBufKey(source?: YantraSource): string | null {
+  const s = source ?? "uart";
+  if (s === "uart" || s.startsWith("com:")) return CURRENT_CONN;
+  return null; // var:* / nodes are not console text
+}
+
+/** The effective scalar binding for a widget (legacy top-level `match` ⇒ a uart bind). */
+export function bindOf(w: YantraWidget): YantraBind | undefined {
+  if (w.bind) return w.bind;
+  if (w.match) return { source: "uart", match: w.match };
+  return undefined;
+}
+
+function fieldPath(obj: unknown, path?: string): unknown {
+  if (!path) return obj;
+  return path
+    .split(".")
+    .reduce<unknown>((o, k) => (o == null ? undefined : (o as Record<string, unknown>)[k]), obj);
+}
+
+/** Sandbox a JS expression with v (raw), n (= Number(v)), item (row), i (index). "—" on error. */
+function applyExpr(expr: string | undefined, v: unknown, item?: unknown, i?: number): unknown {
+  if (!expr) return v;
+  try {
+    return new Function("v", "n", "item", "i", `return (${expr});`)(v, Number(v as never), item, i);
+  } catch {
+    return "—";
+  }
+}
+
+/** Evaluate a scalar binding against the value bus + console buffers. */
+export function evalBind(
+  bind: YantraBind | undefined,
+  bus: Record<string, unknown>,
+  bufs: Record<string, string>,
+): unknown {
+  if (!bind) return undefined;
+  const src = bind.source ?? "uart";
+  let v: unknown;
+  if (src.startsWith("var:")) {
+    v = fieldPath(bus[src.slice(4)], bind.field);
+  } else if (src === "nodes") {
+    v = undefined; // reserved — not wired this cut
+  } else {
+    const text = bufs[sourceBufKey(src) ?? ""] ?? "";
+    if (bind.match) {
+      try {
+        v = text.match(new RegExp(bind.match))?.[1];
+      } catch {
+        return "bad regex";
+      }
+    } else {
+      v = text;
+    }
+  }
+  return applyExpr(bind.expr, v);
+}
+
+/** Resolve a table's array source into row items (RegExpMatchArray rows for text sources). */
+export function evalArray(
+  w: YantraWidget,
+  bus: Record<string, unknown>,
+  bufs: Record<string, string>,
+): unknown[] {
+  const src = w.source ?? "uart";
+  if (src.startsWith("var:")) {
+    const val = bus[src.slice(4)];
+    return Array.isArray(val) ? val : [];
+  }
+  if (src === "nodes") return []; // reserved — not wired this cut
+  const text = bufs[sourceBufKey(src) ?? ""] ?? "";
+  if (!w.match) return [];
+  try {
+    if (w.all) return Array.from(text.matchAll(new RegExp(w.match, "g")));
+    const m = text.match(new RegExp(w.match));
+    return m ? [m] : [];
+  } catch {
+    return [];
+  }
+}
+
+/** A table cell's display value: expr (item/v in scope) or item[field]. */
+export function evalCell(col: YantraColumn, item: unknown, i: number): unknown {
+  const v = col.field ? fieldPath(item, col.field) : item;
+  return col.expr ? applyExpr(col.expr, v, item, i) : v;
+}
+
+/** Build the reactive value bus: each named widget publishes its evaluated value.
+ *  Computed in widget order, so a `var:` consumer must come after its producer. */
+export function computeBus(
+  widgets: YantraWidget[],
+  bufs: Record<string, string>,
+): Record<string, unknown> {
+  const bus: Record<string, unknown> = {};
+  for (const w of widgets) {
+    if (!w.name) continue;
+    if (w.type === "table") bus[w.name] = evalArray(w, bus, bufs);
+    else {
+      const b = bindOf(w);
+      if (b) bus[w.name] = evalBind(b, bus, bufs);
+    }
+  }
+  return bus;
+}
+
+/** Does any widget read a console (uart/com) source? Decides whether to subscribe to onData. */
+export function needsConsole(widgets: YantraWidget[]): boolean {
+  return widgets.some((w) => {
+    if (w.type === "table") return !!w.match && sourceBufKey(w.source) != null;
+    const b = bindOf(w);
+    return !!b && sourceBufKey(b.source) != null;
+  });
+}
+
 /** A container node in the layer tree. Has its own bounds; children are positioned
  *  relative to it and clipped to it. Nestable via `parent` (or `tab` to live in a pane). */
 export interface YantraFrame {
