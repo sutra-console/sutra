@@ -3,7 +3,12 @@
 // and save back to the .yantra file. Pairs with YantraCanvas (the read-only
 // renderer); App switches between them with an "Edit" toggle.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Save, Undo2, Trash2, Move } from "lucide-react";
+import {
+  Plus, Save, Undo2, Trash2, Move,
+  AlignStartVertical, AlignCenterVertical, AlignEndVertical,
+  AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
+  AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
+} from "lucide-react";
 import Moveable from "react-moveable";
 import Selecto from "react-selecto";
 
@@ -272,6 +277,71 @@ export function YantraEditor({
     }
   };
 
+  // --- align / distribute the multi-selection (operates on spec units —
+  //     cells in grid mode, pixels in free; the math is unit-agnostic) ---------
+  type Box = { minX: number; minY: number; maxR: number; maxB: number; cx: number; cy: number };
+  const alignSelected = (fn: (w: YantraWidget, b: Box) => Partial<YantraWidget>) =>
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      const picks = selected.map((i) => ws[i]).filter(Boolean);
+      if (picks.length < 2) return d;
+      const minX = Math.min(...picks.map((w) => w.x ?? 0));
+      const minY = Math.min(...picks.map((w) => w.y ?? 0));
+      const maxR = Math.max(...picks.map((w) => (w.x ?? 0) + (w.w ?? 1)));
+      const maxB = Math.max(...picks.map((w) => (w.y ?? 0) + (w.h ?? 1)));
+      const b: Box = { minX, minY, maxR, maxB, cx: (minX + maxR) / 2, cy: (minY + maxB) / 2 };
+      for (const i of selected) {
+        const w = ws[i];
+        if (w) ws[i] = { ...w, ...fn(w, b) };
+      }
+      return { ...d, widgets: ws };
+    });
+  const distribute = (axis: "h" | "v") =>
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      const idxs = selected.filter((i) => ws[i]);
+      if (idxs.length < 3) return d;
+      const pos = (w: YantraWidget) => (axis === "h" ? w.x ?? 0 : w.y ?? 0);
+      const size = (w: YantraWidget) => (axis === "h" ? w.w ?? 1 : w.h ?? 1);
+      const sorted = [...idxs].sort((a, c) => pos(ws[a]) - pos(ws[c]));
+      const start = pos(ws[sorted[0]]);
+      const last = ws[sorted[sorted.length - 1]];
+      const end = pos(last) + size(last);
+      const totalSize = sorted.reduce((s, i) => s + size(ws[i]), 0);
+      const gap = (end - start - totalSize) / (sorted.length - 1);
+      let cursor = start;
+      for (const i of sorted) {
+        const w = ws[i];
+        const np = Math.max(0, Math.round(cursor));
+        ws[i] = axis === "h" ? { ...w, x: np } : { ...w, y: np };
+        cursor += size(w) + gap;
+      }
+      return { ...d, widgets: ws };
+    });
+
+  // shared align/distribute actions (used by both the floating toolbar and the panel)
+  const alignActions = [
+    { key: "l", label: "Align left", Icon: AlignStartVertical, run: () => alignSelected((_, b) => ({ x: Math.round(b.minX) })) },
+    { key: "c", label: "Align center", Icon: AlignCenterVertical, run: () => alignSelected((w, b) => ({ x: Math.round(b.cx - (w.w ?? 1) / 2) })) },
+    { key: "r", label: "Align right", Icon: AlignEndVertical, run: () => alignSelected((w, b) => ({ x: Math.round(b.maxR - (w.w ?? 1)) })) },
+    { key: "t", label: "Align top", Icon: AlignStartHorizontal, run: () => alignSelected((_, b) => ({ y: Math.round(b.minY) })) },
+    { key: "m", label: "Align middle", Icon: AlignCenterHorizontal, run: () => alignSelected((w, b) => ({ y: Math.round(b.cy - (w.h ?? 1) / 2) })) },
+    { key: "b", label: "Align bottom", Icon: AlignEndHorizontal, run: () => alignSelected((w, b) => ({ y: Math.round(b.maxB - (w.h ?? 1)) })) },
+  ];
+  const distActions = [
+    { key: "dh", label: "Distribute horizontally", Icon: AlignHorizontalDistributeCenter, run: () => distribute("h") },
+    { key: "dv", label: "Distribute vertically", Icon: AlignVerticalDistributeCenter, run: () => distribute("v") },
+  ];
+
+  // top-left corner (px, canvas coords) of the multi-selection's bounding box,
+  // so a mini align/distribute toolbar can pin to the group outline.
+  const groupBox = useMemo(() => {
+    if (selected.length < 2) return null;
+    const gs = selected.map((i) => widgets[i]).filter(Boolean).map(geom);
+    if (!gs.length) return null;
+    return { left: Math.min(...gs.map((g) => g.left)), top: Math.min(...gs.map((g) => g.top)) };
+  }, [selected, draft, cw, free]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // sibling elements (for alignment/snap guidelines)
   const guidelines = useMemo(
     () => widgetRefs.current.filter((el, i) => !!el && !selected.includes(i)) as HTMLElement[],
@@ -342,6 +412,31 @@ export function YantraEditor({
             </div>
           ))}
 
+          {/* mini align/distribute toolbar pinned to the group's outline */}
+          {groupBox && (
+            <div
+              className="absolute z-[60] flex flex-col gap-0.5 rounded-md border bg-popover/95 p-0.5 shadow-md backdrop-blur"
+              style={{ left: Math.max(2, groupBox.left - 30), top: Math.max(0, groupBox.top) }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              {alignActions.map((a) => (
+                <button key={a.key} type="button" title={a.label}
+                  className="flex size-6 items-center justify-center rounded hover:bg-accent"
+                  onClick={a.run}>
+                  <a.Icon className="size-3.5" />
+                </button>
+              ))}
+              <div className="mx-auto my-0.5 h-px w-4 bg-border" />
+              {distActions.map((a) => (
+                <button key={a.key} type="button" title={a.label} disabled={selected.length < 3}
+                  className="flex size-6 items-center justify-center rounded hover:bg-accent disabled:opacity-30"
+                  onClick={a.run}>
+                  <a.Icon className="size-3.5" />
+                </button>
+              ))}
+            </div>
+          )}
+
           {ready && (
             <Moveable
               ref={moveableRef}
@@ -405,7 +500,37 @@ export function YantraEditor({
 
       {/* property panel */}
       <div className="w-64 shrink-0 overflow-auto rounded border bg-muted/10 p-3">
-        {sel == null || !widgets[sel] ? (
+        {selected.length > 1 ? (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium">{selected.length} selected</div>
+              <Button size="sm" variant="ghost" className="h-6 px-1 text-destructive"
+                title="Delete selected" onClick={() => { removeMany(selected); setSelected([]); }}>
+                <Trash2 className="size-3.5" />
+              </Button>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] text-muted-foreground">Align</div>
+              <div className="grid grid-cols-3 gap-1">
+                {alignActions.map((a) => (
+                  <AlignBtn key={a.key} label={a.label} icon={a.Icon} onClick={a.run} />
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] text-muted-foreground">Distribute</div>
+              <div className="grid grid-cols-2 gap-1">
+                {distActions.map((a) => (
+                  <AlignBtn key={a.key} label={a.label} icon={a.Icon}
+                    disabled={selected.length < 3} onClick={a.run} />
+                ))}
+              </div>
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              Distribute needs 3+ widgets. Shift-click to add/remove from the selection.
+            </p>
+          </div>
+        ) : sel == null || !widgets[sel] ? (
           <div className="flex flex-col gap-2">
             <div className="text-sm font-medium">Surface</div>
             <Field label="Name">
@@ -433,6 +558,21 @@ export function YantraEditor({
         )}
       </div>
     </div>
+  );
+}
+
+function AlignBtn({
+  label, icon: Icon, onClick, disabled,
+}: {
+  label: string;
+  icon: typeof Move;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Button size="sm" variant="outline" className="h-8 px-0" title={label} disabled={disabled} onClick={onClick}>
+      <Icon className="size-4" />
+    </Button>
   );
 }
 
