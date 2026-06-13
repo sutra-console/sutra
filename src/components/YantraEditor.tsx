@@ -19,6 +19,9 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import type { YantraAction, YantraSpec, YantraWidget } from "@/lib/skrit";
 
 const ROW_H = 56; // px per grid row in the editor (renderer auto-sizes rows)
@@ -309,6 +312,26 @@ export function YantraEditor({
       return { ...d, widgets: ws };
     });
   const selectionHasGroup = selected.some((i) => widgets[i]?.group);
+
+  // resize the selection to a cell size, or snap its position+size to whole cells
+  const resizeSelected = (w: number, h: number) =>
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      for (const i of selected) if (ws[i]) ws[i] = { ...ws[i], w, h };
+      return { ...d, widgets: ws };
+    });
+  const snapSelected = () =>
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      for (const i of selected) {
+        const w = ws[i];
+        if (w) ws[i] = { ...w, x: Math.round(w.x ?? 0), y: Math.round(w.y ?? 0), w: Math.max(1, Math.round(w.w ?? 1)), h: Math.max(1, Math.round(w.h ?? 1)) };
+      }
+      return { ...d, widgets: ws };
+    });
+  // right-click selects the widget (and its group) if it isn't already selected
+  const ensureSelected = (i: number) => { if (!selected.includes(i)) setSelected(expandGroups([i])); };
+  const RESIZE_PRESETS: [number, number][] = [[1, 1], [2, 1], [2, 2], [3, 1], [3, 2], [4, 2]];
   const addWidget = (type: string) => {
     const newIdx = widgets.length;
     setDraft((d) => {
@@ -552,20 +575,39 @@ export function YantraEditor({
           }}
         >
           {widgets.map((w, i) => (
-            <div
-              key={i}
-              data-idx={i}
-              ref={(el) => { widgetRefs.current[i] = el; }}
-              className={`yantra-widget absolute select-none rounded border bg-card text-[11px] shadow-sm ${
-                selected.includes(i) ? "ring-2 ring-primary" : ""
-              } ${w.hidden ? "opacity-40" : ""}`}
-              style={{ ...geom(w), padding: 4 }}
-            >
-              <div className="flex h-full flex-col overflow-hidden">
-                <span className="truncate font-medium">{w.label || w.type}</span>
-                <span className="truncate text-[10px] text-muted-foreground">{w.type}</span>
-              </div>
-            </div>
+            <ContextMenu key={i}>
+              <ContextMenuTrigger asChild>
+                <div
+                  data-idx={i}
+                  ref={(el) => { widgetRefs.current[i] = el; }}
+                  onContextMenu={() => ensureSelected(i)}
+                  className={`yantra-widget absolute select-none rounded border bg-card text-[11px] shadow-sm ${
+                    selected.includes(i) ? "ring-2 ring-primary" : ""
+                  } ${w.hidden ? "opacity-40" : ""}`}
+                  style={{ ...geom(w), padding: 4 }}
+                >
+                  <div className="flex h-full flex-col overflow-hidden">
+                    <span className="truncate font-medium">{w.label || w.type}</span>
+                    <span className="truncate text-[10px] text-muted-foreground">{w.type}</span>
+                  </div>
+                </div>
+              </ContextMenuTrigger>
+              <ContextMenuContent className="w-44">
+                <ContextMenuItem onSelect={() => { removeMany(selected); setSelected([]); }}>
+                  Delete{selected.length > 1 ? ` (${selected.length})` : ""}
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+                <ContextMenuItem disabled={selected.length < 2} onSelect={groupSelected}>Group</ContextMenuItem>
+                <ContextMenuItem disabled={!selectionHasGroup} onSelect={ungroupSelected}>Ungroup</ContextMenuItem>
+                <ContextMenuSeparator />
+                <ContextMenuItem onSelect={snapSelected}>Snap to grid</ContextMenuItem>
+                {RESIZE_PRESETS.map(([rw, rh]) => (
+                  <ContextMenuItem key={`${rw}x${rh}`} onSelect={() => resizeSelected(rw, rh)}>
+                    Resize {rw}×{rh}
+                  </ContextMenuItem>
+                ))}
+              </ContextMenuContent>
+            </ContextMenu>
           ))}
 
           {/* mini toolbar pinned to (and following) the group's outline: A = align,
