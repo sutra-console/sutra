@@ -340,6 +340,24 @@ fn list_yantras(app: tauri::AppHandle) -> Vec<workspace::YantraDoc> {
     workspace::list_yantras(&app)
 }
 
+/// Write a control surface spec back to its .yantra file (visual editor save).
+#[tauri::command]
+fn save_yantra(app: tauri::AppHandle, file: String, spec: serde_json::Value) -> Result<String, String> {
+    workspace::save_yantra(&app, &file, spec)
+}
+
+/// Create a new blank control surface; returns its filename.
+#[tauri::command]
+fn create_yantra(app: tauri::AppHandle, name: String) -> Result<String, String> {
+    workspace::create_yantra(&app, &name)
+}
+
+/// Delete a control surface file.
+#[tauri::command]
+fn delete_yantra(app: tauri::AppHandle, file: String) -> Result<(), String> {
+    workspace::delete_yantra(&app, &file)
+}
+
 // ---- security: at-rest secret encryption ----
 
 /// Current Security panel state for the active workspace.
@@ -572,6 +590,9 @@ pub fn run() {
             observe_frames,
             list_i2c_defs,
             list_yantras,
+            save_yantra,
+            create_yantra,
+            delete_yantra,
             security_status,
             security_enable,
             security_disable,

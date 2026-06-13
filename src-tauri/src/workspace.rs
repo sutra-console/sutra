@@ -243,6 +243,46 @@ pub fn list_yantras(app: &AppHandle) -> Vec<YantraDoc> {
     out
 }
 
+/// Sanitize a user-supplied .yantra filename and force the `.yantra` extension.
+/// Returns None if nothing usable remains.
+fn safe_yantra_name(file: &str) -> Option<String> {
+    let stem = std::path::Path::new(file.trim())
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'), "-"))
+        .map(|s| s.trim_matches('-').to_string())
+        .filter(|s| !s.is_empty())?;
+    Some(format!("{stem}.yantra"))
+}
+
+/// Write a control surface to `<ws>/.sutra/yantra/<file>` as YAML (the editor edits
+/// the JSON spec; we serialize it back to a `.yantra`). Returns the saved filename.
+pub fn save_yantra(app: &AppHandle, file: &str, spec: serde_json::Value) -> Result<String, String> {
+    let dir = dot_sutra(app).ok_or("no workspace selected")?.join("yantra");
+    let _ = std::fs::create_dir_all(&dir);
+    let name = safe_yantra_name(file).ok_or("invalid file name")?;
+    let yaml = serde_yaml::to_string(&spec).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(&name), yaml).map_err(|e| e.to_string())?;
+    Ok(name)
+}
+
+/// Create a blank control surface named `name` and return its filename.
+pub fn create_yantra(app: &AppHandle, name: &str) -> Result<String, String> {
+    let title = name.trim();
+    if title.is_empty() {
+        return Err("name required".into());
+    }
+    let spec = serde_json::json!({ "name": title, "cols": 6, "widgets": [] });
+    save_yantra(app, title, spec)
+}
+
+/// Delete a control surface file from the workspace.
+pub fn delete_yantra(app: &AppHandle, file: &str) -> Result<(), String> {
+    let dir = dot_sutra(app).ok_or("no workspace selected")?.join("yantra");
+    let name = safe_yantra_name(file).ok_or("invalid file name")?;
+    std::fs::remove_file(dir.join(name)).map_err(|e| e.to_string())
+}
+
 fn seed_yantra_example(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
     let empty = std::fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(true);

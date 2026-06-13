@@ -35,6 +35,7 @@ import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { BleSnifferPanel } from "@/components/BleSnifferPanel";
 import { Ieee154Panel, type NodeSnapshot } from "@/components/Ieee154Panel";
 import { YantraCanvas } from "@/components/YantraCanvas";
+import { YantraEditor } from "@/components/YantraEditor";
 import { ConfigureDevice } from "@/components/ConfigureDevice";
 import { I2cPanel } from "@/components/I2cPanel";
 import { NetworkConfig } from "@/components/NetworkConfig";
@@ -104,7 +105,11 @@ import {
   type I2cDef,
   listI2cDefs,
   listYantras,
+  saveYantra,
+  createYantra,
+  deleteYantra,
   type YantraDoc,
+  type YantraSpec,
   pickWorkspace,
   setWorkspace as adoptWorkspace,
   closeWorkspace as closeWorkspaceApi,
@@ -283,6 +288,8 @@ export default function App() {
   const [mainView, setMainView] = useState<"data" | "controls">("data"); // card view: data stream vs .yantra controls
   const [yantras, setYantras] = useState<YantraDoc[]>([]); // workspace .yantra control surfaces
   const [yantraSel, setYantraSel] = useState(0); // which .yantra is shown
+  const [editingYantra, setEditingYantra] = useState(false); // Controls view: edit vs render
+  const [savingYantra, setSavingYantra] = useState(false);
   const [outBitmap, setOutBitmap] = useState(0); // device output states (bit i = control i)
   const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
   const [pwmVals, setPwmVals] = useState<Record<number, number>>({}); // index -> duty 0..1023
@@ -812,6 +819,58 @@ export default function App() {
     }).then((u) => (un = u));
     return () => un?.();
   }, []);
+
+  /** Reload .yantra surfaces; optionally select one by filename. */
+  async function reloadYantras(selectFile?: string) {
+    const list = await listYantras();
+    setYantras(list);
+    if (selectFile) {
+      const i = list.findIndex((y) => y.file === selectFile);
+      if (i >= 0) setYantraSel(i);
+    } else if (yantraSel >= list.length) {
+      setYantraSel(Math.max(0, list.length - 1));
+    }
+  }
+  /** Persist the edited control surface back to its .yantra file. */
+  async function saveYantraDoc(spec: YantraSpec) {
+    const cur = yantras[yantraSel];
+    if (!cur) return;
+    setSavingYantra(true);
+    try {
+      const f = await saveYantra(cur.file, spec);
+      await reloadYantras(f);
+      setStatus("control surface saved");
+    } catch (e) {
+      setStatus(`save failed: ${e}`);
+    } finally {
+      setSavingYantra(false);
+    }
+  }
+  /** Create a blank surface and drop straight into edit mode (rename via the panel). */
+  async function newYantra() {
+    try {
+      const f = await createYantra("Untitled");
+      await reloadYantras(f);
+      setMainView("controls");
+      setEditingYantra(true);
+      setStatus("new control surface");
+    } catch (e) {
+      setStatus(`create failed: ${e}`);
+    }
+  }
+  /** Delete the current surface (with confirm) and leave edit mode. */
+  async function deleteYantraDoc() {
+    const cur = yantras[yantraSel];
+    if (!cur || !confirm(`Delete control surface "${cur.doc.name || cur.file}"?`)) return;
+    try {
+      await deleteYantra(cur.file);
+      setEditingYantra(false);
+      await reloadYantras();
+      setStatus("control surface deleted");
+    } catch (e) {
+      setStatus(`delete failed: ${e}`);
+    }
+  }
 
   /** Run a Security action, update the panel, and surface the outcome. */
   async function runSecurity(fn: () => Promise<SecurityStatus>, ok: string) {
@@ -1646,7 +1705,7 @@ export default function App() {
                     <button type="button" className={tab(mainView === "data")} onClick={() => setMainView("data")}>
                       <Icon className="size-3.5" /> {label}
                     </button>
-                    {yantras.length > 0 && (
+                    {(yantras.length > 0 || !!workspace) && (
                       <button type="button" className={tab(mainView === "controls")} onClick={() => setMainView("controls")}>
                         <LayoutGrid className="size-3.5" /> Controls
                       </button>
@@ -1658,11 +1717,31 @@ export default function App() {
             <div className="ml-auto flex items-center gap-2 self-center">
               {mainView === "controls" && yantras.length > 1 && (
                 <select className="h-7 rounded border bg-background px-1 text-xs"
-                  value={yantraSel} onChange={(e) => setYantraSel(Number(e.target.value))}>
+                  value={yantraSel} onChange={(e) => { setYantraSel(Number(e.target.value)); setEditingYantra(false); }}>
                   {yantras.map((y, i) => (
                     <option key={y.file} value={i}>{y.doc.name || y.file}</option>
                   ))}
                 </select>
+              )}
+              {mainView === "controls" && (
+                <div className="flex items-center gap-1">
+                  <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs"
+                    onClick={newYantra} title="New control surface">
+                    <Plus className="size-3.5" /> New
+                  </Button>
+                  {yantras[yantraSel] && (
+                    <Button size="sm" variant={editingYantra ? "default" : "outline"}
+                      className="h-7 gap-1 px-2 text-xs" onClick={() => setEditingYantra((v) => !v)}>
+                      <Pencil className="size-3.5" /> {editingYantra ? "Done" : "Edit"}
+                    </Button>
+                  )}
+                  {editingYantra && yantras[yantraSel] && (
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-destructive"
+                      onClick={deleteYantraDoc} title="Delete this surface">
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  )}
+                </div>
               )}
               {mainView === "data" && dataSrcPins && dataDesc?.kind === DATA_KIND.UART && (
                 <span className="font-mono text-[10px] text-muted-foreground"
@@ -1702,10 +1781,23 @@ export default function App() {
           <CardContent className="flex min-h-0 flex-1 flex-col bg-[#0a0a0b] p-2">
             {mainView === "controls" ? (
               yantras[yantraSel] ? (
-                <YantraCanvas spec={yantras[yantraSel].doc} disabled={!connected} />
+                editingYantra ? (
+                  <YantraEditor
+                    key={yantras[yantraSel].file}
+                    file={yantras[yantraSel].file}
+                    spec={yantras[yantraSel].doc}
+                    onSave={saveYantraDoc}
+                    saving={savingYantra}
+                  />
+                ) : (
+                  <YantraCanvas spec={yantras[yantraSel].doc} disabled={!connected} />
+                )
               ) : (
-                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                  Drop a .yantra in the workspace's .sutra/yantra/ to add a control surface.
+                <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+                  No control surfaces yet.
+                  <Button size="sm" variant="outline" className="gap-1" onClick={newYantra}>
+                    <Plus className="size-3.5" /> New control surface
+                  </Button>
                 </div>
               )
             ) : dataDesc?.kind === DATA_KIND.I2C ? (

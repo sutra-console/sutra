@@ -673,6 +673,13 @@ export interface YantraDoc {
 }
 /** Load the workspace's .yantra control surfaces (parsed YAML→JSON). */
 export const listYantras = () => invoke<YantraDoc[]>("list_yantras");
+/** Write a control surface spec back to its .yantra file; returns the filename. */
+export const saveYantra = (file: string, spec: YantraSpec) =>
+  invoke<string>("save_yantra", { file, spec });
+/** Create a new blank control surface; returns its filename. */
+export const createYantra = (name: string) => invoke<string>("create_yantra", { name });
+/** Delete a control surface file. */
+export const deleteYantra = (file: string) => invoke<void>("delete_yantra", { file });
 
 // ---- I2C device definitions (workspace .sutra/i2c/*.json) ----
 export interface I2cReg {
