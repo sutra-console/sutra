@@ -88,6 +88,8 @@ import {
   dataWrite,
   getNetworks,
   setNetworks as saveNetworksApi,
+  zdpIngest,
+  type ZdpDiscovery,
   type Network,
   type NetNode,
   wifiStatus,
@@ -194,6 +196,15 @@ const MCP_TOOL_OPTIONS: { key: keyof McpToolFlags; label: string; hint: string }
   { key: "connection", label: "Connection control", hint: "list ports, connect, set serial" },
 ];
 
+// Sidebar sections for the settings view (replaces the old single-scroll modal).
+type SettingsTab = "mcp" | "connection" | "decode" | "tools";
+const SETTINGS_SECTIONS: { id: SettingsTab; label: string; icon: typeof Bot }[] = [
+  { id: "mcp", label: "MCP server", icon: Bot },
+  { id: "connection", label: "Connection", icon: Plug },
+  { id: "decode", label: "Packet decode", icon: Radio },
+  { id: "tools", label: "MCP tools", icon: Settings2 },
+];
+
 export default function App() {
   const [ports, setPorts] = useState<PortDesc[]>([]);
   const [connected, setConnected] = useState(false);
@@ -270,6 +281,7 @@ export default function App() {
   const [mcp, setMcp] = useState<McpStatus>({ running: false, url: null });
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("mcp");
   const setSetting = <K extends keyof Settings>(k: K, v: Settings[K]) =>
     setSettings((s) => ({ ...s, [k]: v }));
 
@@ -609,6 +621,18 @@ export default function App() {
         const chunk = ieeeBuf.splice(0);
         setIeee154Frames((fs) => [...fs, ...chunk].slice(-2000));
         setIeee154Total((t) => t + chunk.length);
+        // Live interview: ZDP replies addressed to our injector (0x7fff) get
+        // decrypted + parsed backend-side and merged into the node model.
+        const replies = chunk.filter((f) => f.dst === "0x7fff");
+        if (replies.length) {
+          Promise.all(replies.map((f) => zdpIngest(f.mac).catch(() => null))).then((ds) => {
+            const got = ds.filter((d): d is ZdpDiscovery => d != null);
+            if (got.length) {
+              getNetworks().then((n) => setNetworks(n.networks ?? [])).catch(() => {});
+              setStatus(`interviewed ${got.map((d) => `${d.addr} ${d.kind}`).join(", ")}`);
+            }
+          });
+        }
       } else if (kind === DATA_KIND.I2C && i2cBuf.length) {
         const chunk = i2cBuf.splice(0);
         setI2cRecords((rs) => [...rs, ...chunk].slice(-500));
@@ -1848,171 +1872,199 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
-      {/* settings modal */}
-      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Settings</DialogTitle>
-          </DialogHeader>
+      {/* settings view — a full-screen pane with a section sidebar (not a modal) */}
+      {settingsOpen && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-background text-foreground">
+          <header className="flex items-center gap-3 border-b px-4 py-2.5">
+            <Cog className="size-5 text-primary" />
+            <span className="font-semibold tracking-tight">Settings</span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="ml-auto size-8"
+              title="Close settings"
+              onClick={() => setSettingsOpen(false)}
+            >
+              <X />
+            </Button>
+          </header>
 
-          <div className="flex flex-col gap-4 py-1">
-            <div className="flex flex-col gap-2">
-              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                MCP server
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm">Auto-start on launch</div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Start the MCP server automatically when the app opens.
-                  </div>
-                </div>
-                <Switch
-                  checked={settings.autoStartMcp}
-                  onCheckedChange={(v) => setSetting("autoStartMcp", v)}
-                />
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm">Port</div>
-                <Input
-                  type="number"
-                  className="h-8 w-24"
-                  value={settings.mcpPort}
-                  onChange={(e) => setSetting("mcpPort", +e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-2 border-t pt-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Connection
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm">Remember last port</div>
-                  <div className="text-[11px] text-muted-foreground">
-                    Preselect the last connected port on launch.
-                  </div>
-                </div>
-                <Switch
-                  checked={settings.rememberLastPort}
-                  onCheckedChange={(v) => setSetting("rememberLastPort", v)}
-                />
-              </div>
-              <div className="text-[11px] text-muted-foreground">
-                Last used: <code>{settings.lastPort}</code>
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-2 border-t pt-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Packet decode (Wireshark)
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-sm">tshark path</div>
-                  <div className="text-[11px] text-muted-foreground">
-                    For decoding Zigbee/Thread captures. Leave blank to autodetect;{" "}
-                    {tsharkOk ? (
-                      <span className="text-success">found ✓</span>
-                    ) : (
-                      <span className="text-destructive">not found</span>
-                    )}
-                    .
-                  </div>
-                </div>
-                <Input
-                  className="h-8 w-44 font-mono text-xs"
-                  placeholder="autodetect"
-                  value={settings.tsharkPath}
-                  spellCheck={false}
-                  onChange={(e) => setSetting("tsharkPath", e.target.value)}
-                />
-              </div>
-
-              {/* Networks — the workspace network model (.sutra/networks.json):
-                  each network's decryption key (fed to tshark to decode NWK/APS to
-                  real ZCL commands) plus the nodes discovered passively from sniffing. */}
-              <div className="mt-1">
-                <div className="flex items-center gap-2">
-                  <div className="text-sm">Networks</div>
-                  <span
-                    className="cursor-help text-[10px] text-muted-foreground underline decoration-dotted"
-                    title={
-                      "Where to find your network key:\n" +
-                      "• Home Assistant (ZHA): Settings ▸ Devices & Services ▸ Zigbee Home Automation ▸ ⋮ ▸ Download diagnostics — the JSON has network_info.network_key.\n" +
-                      "• Zigbee2MQTT: data/configuration.yaml ▸ advanced ▸ network_key (a 16-byte array)."
-                    }
-                  >
-                    where?
-                  </span>
-                </div>
-                <div className="text-[11px] text-muted-foreground">
-                  Saved in the workspace. The key decrypts your network so frames show the
-                  actual command, not just "Command"; nodes are discovered by sniffing
-                  (802.15.4 ▸ Nodes ▸ Save nodes).
-                  {!workspace && <span className="text-destructive"> Select a workspace to save.</span>}
-                </div>
-              </div>
-              {networks.map((net, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate text-xs">
-                    <span className="text-muted-foreground">{net.label}</span>{" "}
-                    {net.key
-                      ? <span className="font-mono">{net.key.slice(0, 8)}…</span>
-                      : <span className="text-amber-500">no key</span>}
-                    {net.nodes.length > 0 && (
-                      <span className="text-muted-foreground"> · {net.nodes.length} nodes</span>
-                    )}
-                  </span>
-                  <Button variant="ghost" size="icon" className="size-7 text-muted-foreground"
-                    title="Remove network" onClick={() => saveNetworks(networks.filter((_, j) => j !== i))}>
-                    <Trash2 />
-                  </Button>
-                </div>
+          <div className="flex min-h-0 flex-1">
+            {/* sidebar menu */}
+            <nav className="flex w-52 shrink-0 flex-col gap-0.5 border-r p-2">
+              {SETTINGS_SECTIONS.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setSettingsTab(s.id)}
+                  className={cn(
+                    "flex items-center gap-2 rounded-md px-3 py-2 text-sm",
+                    settingsTab === s.id
+                      ? "bg-accent font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-accent/50",
+                  )}
+                >
+                  <s.icon className="size-4 shrink-0" /> {s.label}
+                </button>
               ))}
-              <div className="flex items-center gap-1">
-                <Input className="h-8 w-24 text-xs" placeholder="label"
-                  value={draftKeyLabel} onChange={(e) => setDraftKeyLabel(e.target.value)} />
-                <Input className="h-8 min-w-0 flex-1 font-mono text-xs" placeholder="key: hex or 16-byte array"
-                  value={draftKey} spellCheck={false} onChange={(e) => setDraftKey(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addNetwork()} />
-                <Button size="sm" className="h-8" disabled={!workspace} onClick={addNetwork} title="Add network key">
-                  <Plus />
-                </Button>
-              </div>
-            </div>
+            </nav>
 
-            <div className="flex flex-col gap-2 border-t pt-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                MCP tools exposed to the LLM
-              </div>
-              {MCP_TOOL_OPTIONS.map((o) => (
-                <div key={o.key} className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm">{o.label}</div>
-                    <div className="font-mono text-[10px] text-muted-foreground">{o.hint}</div>
+            {/* section content */}
+            <div className="min-w-0 flex-1 overflow-auto p-6">
+              <div className="mx-auto flex max-w-2xl flex-col gap-4">
+                {settingsTab === "mcp" && (
+                  <div className="flex flex-col gap-3">
+                    <div className="text-sm font-semibold">MCP server</div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm">Auto-start on launch</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          Start the MCP server automatically when the app opens.
+                        </div>
+                      </div>
+                      <Switch
+                        checked={settings.autoStartMcp}
+                        onCheckedChange={(v) => setSetting("autoStartMcp", v)}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm">Port</div>
+                      <Input
+                        type="number"
+                        className="h-8 w-24"
+                        value={settings.mcpPort}
+                        onChange={(e) => setSetting("mcpPort", +e.target.value)}
+                      />
+                    </div>
                   </div>
-                  <Switch
-                    checked={settings.mcpTools[o.key]}
-                    onCheckedChange={(v) => setToolFlag(o.key, v)}
-                  />
-                </div>
-              ))}
-              <p className="text-[10px] leading-tight text-muted-foreground">
-                Disabled tools are hidden from the model entirely. Changing these restarts a running
-                MCP server.
-              </p>
+                )}
+
+                {settingsTab === "connection" && (
+                  <div className="flex flex-col gap-3">
+                    <div className="text-sm font-semibold">Connection</div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm">Remember last port</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          Preselect the last connected port on launch.
+                        </div>
+                      </div>
+                      <Switch
+                        checked={settings.rememberLastPort}
+                        onCheckedChange={(v) => setSetting("rememberLastPort", v)}
+                      />
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      Last used: <code>{settings.lastPort}</code>
+                    </div>
+                  </div>
+                )}
+
+                {settingsTab === "decode" && (
+                  <div className="flex flex-col gap-3">
+                    <div className="text-sm font-semibold">Packet decode (Wireshark)</div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm">tshark path</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          For decoding Zigbee/Thread captures. Leave blank to autodetect;{" "}
+                          {tsharkOk ? (
+                            <span className="text-success">found ✓</span>
+                          ) : (
+                            <span className="text-destructive">not found</span>
+                          )}
+                          .
+                        </div>
+                      </div>
+                      <Input
+                        className="h-8 w-44 font-mono text-xs"
+                        placeholder="autodetect"
+                        value={settings.tsharkPath}
+                        spellCheck={false}
+                        onChange={(e) => setSetting("tsharkPath", e.target.value)}
+                      />
+                    </div>
+
+                    {/* Networks — the workspace network model (.sutra/networks.json):
+                        each network's decryption key (fed to tshark to decode NWK/APS to
+                        real ZCL commands) plus the nodes discovered passively from sniffing. */}
+                    <div className="mt-1">
+                      <div className="flex items-center gap-2">
+                        <div className="text-sm">Networks</div>
+                        <span
+                          className="cursor-help text-[10px] text-muted-foreground underline decoration-dotted"
+                          title={
+                            "Where to find your network key:\n" +
+                            "• Home Assistant (ZHA): Settings ▸ Devices & Services ▸ Zigbee Home Automation ▸ ⋮ ▸ Download diagnostics — the JSON has network_info.network_key.\n" +
+                            "• Zigbee2MQTT: data/configuration.yaml ▸ advanced ▸ network_key (a 16-byte array)."
+                          }
+                        >
+                          where?
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        Saved in the workspace. The key decrypts your network so frames show the
+                        actual command, not just "Command"; nodes are discovered by sniffing
+                        (802.15.4 ▸ Nodes ▸ Save nodes).
+                        {!workspace && <span className="text-destructive"> Select a workspace to save.</span>}
+                      </div>
+                    </div>
+                    {networks.map((net, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <span className="min-w-0 flex-1 truncate text-xs">
+                          <span className="text-muted-foreground">{net.label}</span>{" "}
+                          {net.key
+                            ? <span className="font-mono">{net.key.slice(0, 8)}…</span>
+                            : <span className="text-amber-500">no key</span>}
+                          {net.nodes.length > 0 && (
+                            <span className="text-muted-foreground"> · {net.nodes.length} nodes</span>
+                          )}
+                        </span>
+                        <Button variant="ghost" size="icon" className="size-7 text-muted-foreground"
+                          title="Remove network" onClick={() => saveNetworks(networks.filter((_, j) => j !== i))}>
+                          <Trash2 />
+                        </Button>
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-1">
+                      <Input className="h-8 w-24 text-xs" placeholder="label"
+                        value={draftKeyLabel} onChange={(e) => setDraftKeyLabel(e.target.value)} />
+                      <Input className="h-8 min-w-0 flex-1 font-mono text-xs" placeholder="key: hex or 16-byte array"
+                        value={draftKey} spellCheck={false} onChange={(e) => setDraftKey(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && addNetwork()} />
+                      <Button size="sm" className="h-8" disabled={!workspace} onClick={addNetwork} title="Add network key">
+                        <Plus />
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {settingsTab === "tools" && (
+                  <div className="flex flex-col gap-3">
+                    <div className="text-sm font-semibold">MCP tools exposed to the LLM</div>
+                    {MCP_TOOL_OPTIONS.map((o) => (
+                      <div key={o.key} className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm">{o.label}</div>
+                          <div className="font-mono text-[10px] text-muted-foreground">{o.hint}</div>
+                        </div>
+                        <Switch
+                          checked={settings.mcpTools[o.key]}
+                          onCheckedChange={(v) => setToolFlag(o.key, v)}
+                        />
+                      </div>
+                    ))}
+                    <p className="text-[10px] leading-tight text-muted-foreground">
+                      Disabled tools are hidden from the model entirely. Changing these restarts a running
+                      MCP server.
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-
-          <DialogFooter>
-            <DialogClose asChild>
-              <Button size="sm">Done</Button>
-            </DialogClose>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        </div>
+      )}
     </div>
   );
 }

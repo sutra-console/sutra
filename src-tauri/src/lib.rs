@@ -1,4 +1,5 @@
 mod ble;
+pub mod interview; // live ZDP interview: sniffed frame → node discovery
 pub mod macrovars; // {$name} macro-variable substitution (Zigbee inject + general)
 mod mcp;
 pub mod protocol;
@@ -278,6 +279,14 @@ fn set_networks(app: tauri::AppHandle, networks: workspace::Networks) -> Result<
     workspace::save_networks(&app, &networks)
 }
 
+/// Try to decode a sniffed 802.15.4 MAC frame (no FCS) as a ZDP reply against the
+/// active network; on success merges the discovery into the node model. The
+/// 802.15.4 panel calls this for each captured frame during an interview.
+#[tauri::command]
+fn zdp_ingest(app: tauri::AppHandle, frame: Vec<u8>) -> Option<interview::ZdpDiscovery> {
+    interview::ingest_mac_frame(&app, &frame)
+}
+
 /// The I2C device definitions in the workspace's .sutra/i2c/ (raw JSON).
 #[tauri::command]
 fn list_i2c_defs(app: tauri::AppHandle) -> Vec<serde_json::Value> {
@@ -385,6 +394,7 @@ pub fn run() {
             dissect_ieee154,
             get_networks,
             set_networks,
+            zdp_ingest,
             list_i2c_defs,
             export_set,
             import_set,

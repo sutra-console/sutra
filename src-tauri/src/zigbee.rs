@@ -289,6 +289,45 @@ pub fn build_zdp_inject(p: &ZdpInject) -> Result<Vec<u8>, String> {
 // aux-header offset to unsecure_nwk. This is the half that turns an interview
 // *reply* into data, and lets Sutra decrypt the live sniffer stream host-side.
 
+/// Parse an 802.15.4 **data** MAC header → (header length, source short addr).
+/// Handles the short/long-address + PAN-compression cases real Zigbee traffic
+/// uses; None for non-data frames or addressing modes we don't decode. The NWK
+/// frame starts at `header length`.
+pub fn mac_data_header(frame: &[u8]) -> Option<(usize, u16)> {
+    if frame.len() < 3 || frame[0] & 0x07 != 0x01 {
+        return None; // frame type bits 001 = data
+    }
+    let fcf = u16::from_le_bytes([frame[0], frame[1]]);
+    let pan_compress = fcf & (1 << 6) != 0;
+    let dst_mode = (fcf >> 10) & 0x3;
+    let src_mode = (fcf >> 14) & 0x3;
+    let mut off = 3usize; // FCF(2) · sequence(1)
+    if dst_mode != 0 {
+        off += 2; // destination PAN
+    }
+    off += match dst_mode {
+        0 => 0,
+        2 => 2, // short
+        3 => 8, // long
+        _ => return None,
+    };
+    if src_mode != 0 && !pan_compress {
+        off += 2; // source PAN
+    }
+    let mut src_short = 0u16;
+    match src_mode {
+        0 => {}
+        2 => {
+            let b = frame.get(off..off + 2)?;
+            src_short = u16::from_le_bytes([b[0], b[1]]);
+            off += 2;
+        }
+        3 => off += 8, // long source; short addr not available
+        _ => return None,
+    }
+    (frame.len() >= off).then_some((off, src_short))
+}
+
 /// Length of the cleartext NWK header (FCF·dst·src·radius·seq + optional fields),
 /// parsed from the FCF. None if the frame is too short to contain what it claims.
 pub fn nwk_header_len(frame: &[u8]) -> Option<usize> {
@@ -610,6 +649,19 @@ mod tests {
     fn zdp_simple_desc_carries_endpoint() {
         let zdp = zdp_request(0x40, 0xabcd, Some(7));
         assert_eq!(zdp, vec![0x40, 0xcd, 0xab, 0x07]);
+    }
+
+    #[test]
+    fn mac_data_header_real_frame() {
+        // Real MAC frame: FCF 0x8841 (data·PANcompress·short dst·short src).
+        let mac = [
+            0x41, 0x88, 0x57, 0x84, 0x0c, 0xff, 0xff, 0x6e, 0xb5, 0x09, 0x12, // …NWK begins
+        ];
+        let (hlen, src) = mac_data_header(&mac).unwrap();
+        assert_eq!(hlen, 9, "FCF·seq·dstPAN·dst·src = 9 (PAN compression)");
+        assert_eq!(src, 0xb56e, "source short address");
+        // a non-data frame (ack, type 010) is rejected
+        assert!(mac_data_header(&[0x02, 0x00, 0x00]).is_none());
     }
 
     #[test]

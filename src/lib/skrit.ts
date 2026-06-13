@@ -775,6 +775,7 @@ export interface Ieee154Frame {
   src: string; // short / ext / ""
   payloadHex: string; // MAC payload (after addressing, before FCS) as hex
   raw: number[]; // original record bytes (for pcap export)
+  mac: number[]; // the MAC frame (no FCS) — feeds zdpIngest for the live interview
 }
 
 const IEEE154_FTYPE = ["Beacon", "Data", "Ack", "MAC Command", "0x4", "0x5", "0x6", "0x7"];
@@ -850,8 +851,25 @@ export function decodeIeee154(p: number[] | Uint8Array): Ieee154Frame | null {
     type = IEEE154_CMD[payload[0]] ?? `Command 0x${payload[0].toString(16)}`;
   }
   const payloadHex = payload.map((x) => x.toString(16).padStart(2, "0").toUpperCase()).join(" ");
-  return { ts, channel, rssi, lqi, type, seq, dstPan, dst, src, payloadHex, raw: b };
+  return { ts, channel, rssi, lqi, type, seq, dstPan, dst, src, payloadHex, raw: b, mac };
 }
+
+/** A node fact recovered from a decrypted ZDP reply (see zdpIngest). */
+export interface ZdpDiscovery {
+  addr: string; // "0xabcd"
+  kind: string; // active_ep | simple_desc | node_desc
+  endpoints: number[];
+  endpoint: number | null;
+  in_clusters: string[];
+  out_clusters: string[];
+  manufacturer: string | null;
+}
+
+/** Try to decode a sniffed MAC frame (no FCS) as a ZDP reply against the active
+ *  network; on success the backend merges it into the node model. Returns the
+ *  discovery, or null if the frame isn't a decryptable ZDP reply. */
+export const zdpIngest = (mac: number[]) =>
+  invoke<ZdpDiscovery | null>("zdp_ingest", { frame: mac });
 
 /** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */
 export async function wifiConfigure(ssid: string, password: string): Promise<void> {
