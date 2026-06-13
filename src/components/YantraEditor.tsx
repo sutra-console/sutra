@@ -147,25 +147,28 @@ export function YantraEditor({
   const [selected, setSelected] = useState<number[]>([]);
   const [containerW, setContainerW] = useState(0);
   const [ready, setReady] = useState(false);
-  const [liveBox, setLiveBox] = useState<{ left: number; top: number } | null>(null); // group top-left during a gesture
   const [toolMenu, setToolMenu] = useState<"a" | "s" | null>(null); // open align/spacing submenu
   const gridRef = useRef<HTMLDivElement>(null);
   const moveableRef = useRef<Moveable>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null); // floating toolbar, repositioned live during a gesture
   const widgetRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const cols = draft.cols ?? 6;
-  const free = draft.layout === "free";
   const widgets = draft.widgets ?? [];
   widgetRefs.current.length = widgets.length;
   const cw = containerW > 0 ? containerW / cols : 80;
   const dirty = JSON.stringify(draft) !== JSON.stringify(spec);
   const sel = selected.length ? selected[0] : null;
 
-  // px geometry of a widget (grid cells × cell size, or absolute pixels in free mode)
-  const geom = (w: YantraWidget) =>
-    free
-      ? { left: w.x ?? 0, top: w.y ?? 0, width: w.w ?? 140, height: w.h ?? 48 }
-      : { left: (w.x ?? 0) * cw, top: (w.y ?? 0) * ROW_H, width: (w.w ?? 1) * cw, height: (w.h ?? 1) * ROW_H };
+  // px geometry of a widget. Coordinates are ALWAYS in grid units (x/w in columns,
+  // y/h in rows) — grid mode keeps them integer (snapped), free mode allows
+  // fractional. Freeflow changes only snapping, never the coordinate system.
+  const geom = (w: YantraWidget) => ({
+    left: (w.x ?? 0) * cw,
+    top: (w.y ?? 0) * ROW_H,
+    width: (w.w ?? 1) * cw,
+    height: (w.h ?? 1) * ROW_H,
+  });
 
   // re-seed when the file prop changes (App also remounts via key, but be safe)
   useEffect(() => { setDraft(clone(spec)); setSelected([]); }, [file]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -182,7 +185,7 @@ export function YantraEditor({
   }, []);
 
   // keep Moveable's box synced when geometry changes from outside a gesture
-  useEffect(() => { moveableRef.current?.updateRect(); }, [draft, containerW, free, selected]);
+  useEffect(() => { moveableRef.current?.updateRect(); }, [draft, containerW, selected]);
 
   // Delete/Backspace removes the selection (unless a text field is focused)
   useEffect(() => {
@@ -212,39 +215,12 @@ export function YantraEditor({
     const newIdx = widgets.length;
     setDraft((d) => {
       const ws = d.widgets ?? [];
-      const w = defaultWidget(type, 0);
-      if (d.layout === "free") {
-        const bottom = ws.reduce((m, x) => Math.max(m, (x.y ?? 0) + (x.h ?? 0)), 0);
-        Object.assign(w, { x: 8, y: bottom + 8, w: type === "select" || type === "readout" ? 200 : 140, h: 48 });
-      } else {
-        w.y = ws.reduce((m, x) => Math.max(m, (x.y ?? 0) + (x.h ?? 1)), 0);
-      }
-      return { ...d, widgets: [...ws, w] };
+      const y = ws.reduce((m, x) => Math.max(m, (x.y ?? 0) + (x.h ?? 1)), 0);
+      return { ...d, widgets: [...ws, defaultWidget(type, y)] };
     });
     setSelected([newIdx]);
   };
 
-  // Flip grid⇄free, converting coordinates through the current cell size so
-  // widgets keep their on-screen position instead of jumping.
-  const toggleFree = () =>
-    setDraft((d) => {
-      const toFree = d.layout !== "free";
-      const cwNow = containerW > 0 ? containerW / (d.cols ?? 6) : 80;
-      const ws = (d.widgets ?? []).map((w) =>
-        toFree
-          ? {
-              ...w,
-              x: Math.round((w.x ?? 0) * cwNow), y: Math.round((w.y ?? 0) * ROW_H),
-              w: Math.round((w.w ?? 1) * cwNow), h: Math.round((w.h ?? 1) * ROW_H),
-            }
-          : {
-              ...w,
-              x: Math.round((w.x ?? 0) / cwNow), y: Math.round((w.y ?? 0) / ROW_H),
-              w: Math.max(1, Math.round((w.w ?? cwNow) / cwNow)), h: Math.max(1, Math.round((w.h ?? ROW_H) / ROW_H)),
-            },
-      );
-      return { ...d, layout: toFree ? "free" : "grid", widgets: ws };
-    });
 
   // Read the final DOM geometry of the dragged/resized widgets back into the spec
   // (cells in grid mode, pixels in free mode), then clear the gesture transforms.
@@ -261,15 +237,15 @@ export function YantraEditor({
         const r = el.getBoundingClientRect();
         const left = r.left - cr.left + cont.scrollLeft;
         const top = r.top - cr.top + cont.scrollTop;
-        ws[i] = d.layout === "free"
-          ? { ...ws[i], x: Math.max(0, Math.round(left)), y: Math.max(0, Math.round(top)), w: Math.round(r.width), h: Math.round(r.height) }
-          : {
-              ...ws[i],
-              x: Math.max(0, Math.round(left / cwNow)),
-              y: Math.max(0, Math.round(top / ROW_H)),
-              w: Math.max(1, Math.round(r.width / cwNow)),
-              h: Math.max(1, Math.round(r.height / ROW_H)),
-            };
+        // grid units, 2-decimal fractions (Shift-snap already lands on whole cells)
+        const r2 = (n: number) => Math.round(n * 100) / 100;
+        ws[i] = {
+          ...ws[i],
+          x: Math.max(0, r2(left / cwNow)),
+          y: Math.max(0, r2(top / ROW_H)),
+          w: Math.max(0.25, r2(r.width / cwNow)),
+          h: Math.max(0.25, r2(r.height / ROW_H)),
+        };
       }
       return { ...d, widgets: ws };
     });
@@ -342,13 +318,14 @@ export function YantraEditor({
     const gs = selected.map((i) => widgets[i]).filter(Boolean).map(geom);
     if (!gs.length) return null;
     return { left: Math.min(...gs.map((g) => g.left)), top: Math.min(...gs.map((g) => g.top)) };
-  }, [selected, draft, cw, free]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selected, draft, cw]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Live top-left of the selection (read from the DOM mid-gesture, so the floating
-  // toolbar follows the group as it's dragged/resized instead of waiting for commit).
+  // Move the floating toolbar to track the selection mid-gesture by writing to its
+  // DOM node directly — no React state, so we never re-render (and abort) the drag.
   const syncLiveBox = () => {
     const cont = gridRef.current;
-    if (!cont) return;
+    const bar = toolbarRef.current;
+    if (!cont || !bar) return;
     const cr = cont.getBoundingClientRect();
     let left = Infinity, top = Infinity;
     for (const i of selected) {
@@ -358,7 +335,28 @@ export function YantraEditor({
       left = Math.min(left, r.left - cr.left + cont.scrollLeft);
       top = Math.min(top, r.top - cr.top + cont.scrollTop);
     }
-    setLiveBox(Number.isFinite(left) ? { left, top } : null);
+    if (!Number.isFinite(left)) return;
+    bar.style.left = `${Math.max(2, left - 34)}px`;
+    bar.style.top = `${Math.max(0, top)}px`;
+  };
+
+  // Drag/resize apply Moveable's transform/size to the element. Holding Shift snaps
+  // the result to the grid (cell size cw × ROW_H), relative to the element's base.
+  const shiftOf = (e: unknown) => !!(e as { shiftKey?: boolean })?.shiftKey;
+  const dragWidget = (el: HTMLElement, translate: number[], transform: string, snap: boolean) => {
+    if (!snap) { el.style.transform = transform; return; }
+    const baseLeft = parseFloat(el.style.left) || 0;
+    const baseTop = parseFloat(el.style.top) || 0;
+    const sx = Math.round((baseLeft + translate[0]) / cw) * cw - baseLeft;
+    const sy = Math.round((baseTop + translate[1]) / ROW_H) * ROW_H - baseTop;
+    el.style.transform = `translate(${sx}px, ${sy}px)`;
+  };
+  const resizeWidget = (el: HTMLElement, width: number, height: number, transform: string, snap: boolean) => {
+    const w = snap ? Math.max(cw, Math.round(width / cw) * cw) : width;
+    const h = snap ? Math.max(ROW_H, Math.round(height / ROW_H) * ROW_H) : height;
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+    el.style.transform = transform;
   };
 
   // sibling elements (for alignment/snap guidelines)
@@ -385,11 +383,7 @@ export function YantraEditor({
               <Plus className="size-3" /> {t}
             </Button>
           ))}
-          <Button size="sm" variant={free ? "default" : "outline"} className="h-7 gap-1 px-2 text-[11px]"
-            title="Freeflow: place widgets anywhere (pixels) instead of snapping to the grid"
-            onClick={toggleFree}>
-            <Move className="size-3" /> Freeflow
-          </Button>
+          <span className="ml-1 text-[10px] text-muted-foreground">hold ⇧ to snap to grid</span>
           <div className="ml-auto flex items-center gap-1.5">
             {dirty && <span className="text-[11px] text-amber-600 dark:text-amber-400">unsaved</span>}
             <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
@@ -407,11 +401,10 @@ export function YantraEditor({
           ref={gridRef}
           className="yantra-canvas relative flex-1 overflow-auto rounded border bg-muted/10"
           style={{
-            backgroundSize: free ? undefined : `${cw}px ${ROW_H}px`,
-            backgroundImage: free
-              ? undefined
-              : "linear-gradient(to right, hsl(var(--border)/0.5) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)/0.5) 1px, transparent 1px)",
-            minHeight: free ? undefined : rows * ROW_H,
+            backgroundSize: `${cw}px ${ROW_H}px`,
+            backgroundImage:
+              "linear-gradient(to right, hsl(var(--border)/0.5) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)/0.5) 1px, transparent 1px)",
+            minHeight: rows * ROW_H,
           }}
         >
           {widgets.map((w, i) => (
@@ -432,40 +425,39 @@ export function YantraEditor({
           ))}
 
           {/* mini toolbar pinned to (and following) the group's outline: A = align,
-              S = spacing sub-menus. */}
-          {(liveBox ?? groupBox) && (() => {
-            const box = (liveBox ?? groupBox)!;
-            return (
-              <div
-                className="yantra-tool absolute z-[60] flex flex-col gap-0.5 rounded-md border bg-popover/95 p-0.5 shadow-md backdrop-blur"
-                style={{ left: Math.max(2, box.left - 34), top: Math.max(0, box.top) }}
-                onPointerDown={(e) => e.stopPropagation()}
-              >
-                <button type="button" title="Align" onClick={() => setToolMenu((m) => (m === "a" ? null : "a"))}
-                  className={`flex size-6 items-center justify-center rounded text-[11px] font-semibold hover:bg-accent ${toolMenu === "a" ? "bg-accent" : ""}`}>
-                  A
+              S = spacing sub-menus. Position is React-driven from the committed box;
+              syncLiveBox() nudges it directly during a gesture. */}
+          {groupBox && (
+            <div
+              ref={toolbarRef}
+              className="yantra-tool absolute z-[60] flex flex-col gap-0.5 rounded-md border bg-popover/95 p-0.5 shadow-md backdrop-blur"
+              style={{ left: Math.max(2, groupBox.left - 34), top: Math.max(0, groupBox.top) }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <button type="button" title="Align" onClick={() => setToolMenu((m) => (m === "a" ? null : "a"))}
+                className={`flex size-6 items-center justify-center rounded text-[11px] font-semibold hover:bg-accent ${toolMenu === "a" ? "bg-accent" : ""}`}>
+                A
+              </button>
+              {toolMenu === "a" && alignActions.map((a) => (
+                <button key={a.key} type="button" title={a.label}
+                  className="flex size-6 items-center justify-center rounded hover:bg-accent"
+                  onClick={a.run}>
+                  <a.Icon className="size-3.5" />
                 </button>
-                {toolMenu === "a" && alignActions.map((a) => (
-                  <button key={a.key} type="button" title={a.label}
-                    className="flex size-6 items-center justify-center rounded hover:bg-accent"
-                    onClick={a.run}>
-                    <a.Icon className="size-3.5" />
-                  </button>
-                ))}
-                <button type="button" title="Spacing" onClick={() => setToolMenu((m) => (m === "s" ? null : "s"))}
-                  className={`flex size-6 items-center justify-center rounded text-[11px] font-semibold hover:bg-accent ${toolMenu === "s" ? "bg-accent" : ""}`}>
-                  S
+              ))}
+              <button type="button" title="Spacing" onClick={() => setToolMenu((m) => (m === "s" ? null : "s"))}
+                className={`flex size-6 items-center justify-center rounded text-[11px] font-semibold hover:bg-accent ${toolMenu === "s" ? "bg-accent" : ""}`}>
+                S
+              </button>
+              {toolMenu === "s" && distActions.map((a) => (
+                <button key={a.key} type="button" title={a.label} disabled={selected.length < 3}
+                  className="flex size-6 items-center justify-center rounded hover:bg-accent disabled:opacity-30"
+                  onClick={a.run}>
+                  <a.Icon className="size-3.5" />
                 </button>
-                {toolMenu === "s" && distActions.map((a) => (
-                  <button key={a.key} type="button" title={a.label} disabled={selected.length < 3}
-                    className="flex size-6 items-center justify-center rounded hover:bg-accent disabled:opacity-30"
-                    onClick={a.run}>
-                    <a.Icon className="size-3.5" />
-                  </button>
-                ))}
-              </div>
-            );
-          })()}
+              ))}
+            </div>
+          )}
 
           {ready && (
             <Moveable
@@ -476,33 +468,17 @@ export function YantraEditor({
               rotatable={false}
               snappable
               elementGuidelines={guidelines}
-              snapGridWidth={free ? undefined : cw}
-              snapGridHeight={free ? undefined : ROW_H}
               bounds={{ left: 0, top: 0, position: "css" }}
               throttleDrag={0}
               throttleResize={0}
-              onDrag={({ target, transform }) => { (target as HTMLElement).style.transform = transform; syncLiveBox(); }}
-              onDragEnd={() => { commit(selected); setLiveBox(null); }}
-              onDragGroup={({ events }) => { events.forEach((ev) => { (ev.target as HTMLElement).style.transform = ev.transform; }); syncLiveBox(); }}
-              onDragGroupEnd={() => { commit(selected); setLiveBox(null); }}
-              onResize={({ target, width, height, drag }) => {
-                const el = target as HTMLElement;
-                el.style.width = `${width}px`;
-                el.style.height = `${height}px`;
-                el.style.transform = drag.transform;
-                syncLiveBox();
-              }}
-              onResizeEnd={() => { commit(selected); setLiveBox(null); }}
-              onResizeGroup={({ events }) => {
-                events.forEach((ev) => {
-                  const el = ev.target as HTMLElement;
-                  el.style.width = `${ev.width}px`;
-                  el.style.height = `${ev.height}px`;
-                  el.style.transform = ev.drag.transform;
-                });
-                syncLiveBox();
-              }}
-              onResizeGroupEnd={() => { commit(selected); setLiveBox(null); }}
+              onDrag={(e) => { dragWidget(e.target as HTMLElement, e.translate, e.transform, shiftOf(e.inputEvent)); syncLiveBox(); }}
+              onDragEnd={() => commit(selected)}
+              onDragGroup={(e) => { const s = shiftOf(e.inputEvent); e.events.forEach((ev) => dragWidget(ev.target as HTMLElement, ev.translate, ev.transform, s)); syncLiveBox(); }}
+              onDragGroupEnd={() => commit(selected)}
+              onResize={(e) => { resizeWidget(e.target as HTMLElement, e.width, e.height, e.drag.transform, shiftOf(e.inputEvent)); syncLiveBox(); }}
+              onResizeEnd={() => commit(selected)}
+              onResizeGroup={(e) => { const s = shiftOf(e.inputEvent); e.events.forEach((ev) => resizeWidget(ev.target as HTMLElement, ev.width, ev.height, ev.drag.transform, s)); syncLiveBox(); }}
+              onResizeGroupEnd={() => commit(selected)}
             />
           )}
           {ready && (

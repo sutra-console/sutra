@@ -72,34 +72,22 @@ export function YantraCanvas({
     }
   };
 
-  // Free layout: widgets are absolutely positioned in pixels (x/y/w/h = px).
-  if (spec.layout === "free") {
-    return (
-      <div className="relative h-full overflow-auto p-1">
-        {widgets.map((w, i) => (
-          <div
-            key={i}
-            className="absolute"
-            style={{ left: w.x ?? 0, top: w.y ?? 0, width: w.w ?? 80, height: w.h ?? 48 }}
-          >
-            <Widget w={w} disabled={disabled} fire={fire} readout={readout} />
-          </div>
-        ))}
-      </div>
-    );
-  }
-
+  // Coordinates are grid units (x/w in columns, y/h in rows) for BOTH layouts —
+  // grid mode keeps them whole, free mode allows fractions. We position absolutely
+  // (column % wide × ROW_H tall) so it matches the editor pixel-for-pixel. ROW_H
+  // must equal the editor's.
+  const ROW_H = 56;
   return (
-    <div
-      className="grid h-full content-start gap-2 overflow-auto p-1"
-      style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
-    >
+    <div className="relative h-full overflow-auto p-1">
       {widgets.map((w, i) => (
         <div
           key={i}
+          className="absolute"
           style={{
-            gridColumn: `${(w.x ?? 0) + 1} / span ${w.w ?? 1}`,
-            gridRow: `${(w.y ?? 0) + 1} / span ${w.h ?? 1}`,
+            left: `${((w.x ?? 0) / cols) * 100}%`,
+            top: (w.y ?? 0) * ROW_H,
+            width: `${((w.w ?? 1) / cols) * 100}%`,
+            height: (w.h ?? 1) * ROW_H,
           }}
         >
           <Widget w={w} disabled={disabled} fire={fire} readout={readout} />
