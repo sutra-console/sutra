@@ -1,4 +1,5 @@
 mod ble;
+pub mod macrovars; // {$name} macro-variable substitution (Zigbee inject + general)
 mod mcp;
 pub mod protocol;
 pub mod serial;

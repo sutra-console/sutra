@@ -1,0 +1,246 @@
+//! Macro variables: `{$name}` / `{$name arg arg}` substitution for the macro VM.
+//!
+//! Expansion is purely textual and happens per-line at play time, left-to-right,
+//! with side effects (a `{$fc}` pulls + increments the frame counter). The result
+//! is spliced back into the line, so the existing macro parser handles it — e.g.
+//! `HEX {$zdp active_ep abcd}` expands to space-separated hex the `HEX` keyword
+//! then consumes. This is the bridge between the verified Zigbee crypto
+//! (`crate::zigbee`) and the dumb-radio inject path: a macro composes an
+//! encrypted frame without any one-off command.
+//!
+//! v1 vocabulary:
+//!   {$key} {$pan} {$channel} {$src} {$eui}   network/injector context
+//!   {$fc}                                     NWK frame counter (pull + increment)
+//!   {$seq}                                    per-run sequence byte
+//!   {$zdp <cmd> <target> [endpoint]}          a full injectable ZDP request frame
+//!   {$NAME}                                   a user variable (set via `VAR NAME …`)
+//!
+//! The context here is data-only; the caller fills it from the workspace network
+//! model and writes the advanced counter back (persistence lives in workspace.rs).
+
+use std::collections::HashMap;
+
+use crate::zigbee::{
+    build_zdp_inject, ZdpInject, ZDP_ACTIVE_EP_REQ, ZDP_NODE_DESC_REQ, ZDP_SIMPLE_DESC_REQ,
+};
+
+/// Everything `{$…}` resolves against. Scalars are supplied by the caller; the
+/// counters (`frame_counter`, `seq`) advance as tokens consume them.
+#[derive(Clone, Default)]
+pub struct VarContext {
+    pub key: Option<[u8; 16]>,
+    pub pan: u16,
+    pub channel: u8,
+    pub src_short: u16,
+    pub src_eui64: [u8; 8],
+    pub frame_counter: u32,
+    pub seq: u8,
+    pub vars: HashMap<String, String>,
+}
+
+impl VarContext {
+    /// Pull the current NWK frame counter and advance it (the anti-replay value).
+    fn take_fc(&mut self) -> u32 {
+        let v = self.frame_counter;
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+        v
+    }
+
+    fn take_seq(&mut self) -> u8 {
+        let v = self.seq;
+        self.seq = self.seq.wrapping_add(1);
+        v
+    }
+
+    /// Resolve one `{$…}` token: `name` + whitespace-split `args`.
+    fn eval(&mut self, name: &str, args: &[&str]) -> Result<String, String> {
+        match name {
+            "key" => self
+                .key
+                .map(hex_str)
+                .ok_or_else(|| "no network key set (use NET <label>)".to_string()),
+            "pan" => Ok(format!("{:04x}", self.pan)),
+            "channel" => Ok(self.channel.to_string()),
+            "src" => Ok(format!("{:04x}", self.src_short)),
+            "eui" => Ok(hex_str(self.src_eui64)),
+            "fc" => Ok(self.take_fc().to_string()),
+            "seq" => Ok(format!("{:02x}", self.take_seq())),
+            "zdp" => self.eval_zdp(args),
+            other => self
+                .vars
+                .get(other)
+                .cloned()
+                .ok_or_else(|| format!("unknown variable {{${other}}}")),
+        }
+    }
+
+    /// `{$zdp <cmd> <target-hex> [endpoint]}` → the full injectable MAC frame as
+    /// space-separated hex. cmd ∈ active_ep | node_desc | simple_desc.
+    fn eval_zdp(&mut self, args: &[&str]) -> Result<String, String> {
+        let cmd = args.first().ok_or("zdp: missing command")?;
+        let target = parse_u16_hex(args.get(1).ok_or("zdp: missing target address")?)?;
+        let (cluster, endpoint) = match cmd.to_ascii_lowercase().as_str() {
+            "active_ep" | "activeep" => (ZDP_ACTIVE_EP_REQ, None),
+            "node_desc" | "nodedesc" => (ZDP_NODE_DESC_REQ, None),
+            "simple_desc" | "simpledesc" => {
+                let ep = parse_u8(args.get(2).ok_or("zdp simple_desc: missing endpoint")?)?;
+                (ZDP_SIMPLE_DESC_REQ, Some(ep))
+            }
+            other => return Err(format!("zdp: unknown command '{other}'")),
+        };
+        let key = self.key.ok_or("zdp: no network key set (use NET <label>)")?;
+        let fc = self.take_fc();
+        let seq = self.take_seq();
+        let frame = build_zdp_inject(&ZdpInject {
+            key: &key,
+            src_eui64: &self.src_eui64,
+            pan: self.pan,
+            target,
+            src_short: self.src_short,
+            frame_counter: fc,
+            mac_seq: fc as u8,
+            nwk_seq: (fc >> 8) as u8,
+            aps_counter: seq,
+            zdp_seq: seq,
+            radius: 30,
+            key_seq: 0,
+            cluster,
+            endpoint,
+        })?;
+        Ok(hex_bytes(&frame))
+    }
+}
+
+/// Resolve every `{$…}` in `line`, left-to-right, with side effects. Non-token
+/// text is copied verbatim; a `{` not starting a `{$` token is literal. No
+/// nesting in v1. Returns the resolved line or the first eval error.
+pub fn resolve_line(ctx: &mut VarContext, line: &str) -> Result<String, String> {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'$' {
+            let close = line[i..]
+                .find('}')
+                .map(|rel| i + rel)
+                .ok_or("unterminated {$…} (missing '}')")?;
+            let inner = &line[i + 2..close]; // between "{$" and "}"
+            let mut toks = inner.split_whitespace();
+            let name = toks.next().unwrap_or("");
+            let args: Vec<&str> = toks.collect();
+            out.push_str(&ctx.eval(name, &args)?);
+            i = close + 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn hex_str<const N: usize>(b: [u8; N]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn hex_bytes(b: &[u8]) -> String {
+    b.iter()
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_u16_hex(s: &str) -> Result<u16, String> {
+    let t = s.trim().trim_start_matches("0x");
+    u16::from_str_radix(t, 16).map_err(|_| format!("bad 16-bit hex '{s}'"))
+}
+
+fn parse_u8(s: &str) -> Result<u8, String> {
+    let t = s.trim();
+    t.parse::<u8>()
+        .or_else(|_| u8::from_str_radix(t.trim_start_matches("0x"), 16))
+        .map_err(|_| format!("bad u8 '{s}'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::zigbee::{unsecure_nwk, SEC_LEVEL_ENC_MIC32};
+
+    fn ctx() -> VarContext {
+        VarContext {
+            key: Some([
+                0xa1, 0x40, 0x35, 0x57, 0x84, 0xcc, 0xa8, 0x94, 0xa1, 0x40, 0x35, 0x57, 0x84, 0xcc,
+                0xa8, 0x94,
+            ]),
+            pan: 0x0c84,
+            channel: 11,
+            src_short: 0x7fff,
+            src_eui64: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            frame_counter: 1000,
+            seq: 0,
+            vars: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn scalars_and_literals() {
+        let mut c = ctx();
+        assert_eq!(resolve_line(&mut c, "pan={$pan} ch={$channel}").unwrap(), "pan=0c84 ch=11");
+        assert_eq!(resolve_line(&mut c, "src={$src}").unwrap(), "src=7fff");
+        // a brace that isn't a token is literal
+        assert_eq!(resolve_line(&mut c, "a {b} c").unwrap(), "a {b} c");
+        assert_eq!(resolve_line(&mut c, "{$key}").unwrap().len(), 32);
+    }
+
+    #[test]
+    fn fc_increments_and_persists() {
+        let mut c = ctx();
+        assert_eq!(resolve_line(&mut c, "{$fc} {$fc}").unwrap(), "1000 1001");
+        assert_eq!(c.frame_counter, 1002, "counter advanced for the next run");
+    }
+
+    #[test]
+    fn user_var_and_unknown() {
+        let mut c = ctx();
+        c.vars.insert("TARGET".into(), "abcd".into());
+        assert_eq!(resolve_line(&mut c, "n={$TARGET}").unwrap(), "n=abcd");
+        assert!(resolve_line(&mut c, "{$nope}").is_err());
+    }
+
+    #[test]
+    fn zdp_expands_to_a_decryptable_frame() {
+        let mut c = ctx();
+        // The macro a user would write: HEX {$zdp active_ep abcd}
+        let line = resolve_line(&mut c, "HEX {$zdp active_ep abcd}").unwrap();
+        assert!(line.starts_with("HEX "), "keyword preserved");
+        // parse the hex back into bytes (same as the HEX keyword does)
+        let frame: Vec<u8> = line["HEX ".len()..]
+            .split_whitespace()
+            .map(|h| u8::from_str_radix(h, 16).unwrap())
+            .collect();
+        // MAC FCF + the injector/target addresses
+        assert_eq!(&frame[0..2], &[0x61, 0x88], "MAC data frame");
+        assert_eq!(&frame[5..7], &[0xcd, 0xab], "MAC dst = target abcd");
+        // strip the 9-byte MAC header, decrypt the NWK payload, confirm the ZDP req
+        let key = c.key.unwrap();
+        let aps = unsecure_nwk(&key, &frame[9..], 8, SEC_LEVEL_ENC_MIC32).unwrap();
+        assert_eq!(&aps[2..4], &[0x05, 0x00], "cluster = Active_EP_req");
+        assert_eq!(&aps[9..11], &[0xcd, 0xab], "ZDP target = abcd");
+        // the frame counter advanced
+        assert_eq!(c.frame_counter, 1001);
+    }
+
+    #[test]
+    fn zdp_simple_desc_needs_endpoint() {
+        let mut c = ctx();
+        assert!(resolve_line(&mut c, "HEX {$zdp simple_desc abcd}").is_err());
+        let ok = resolve_line(&mut c, "HEX {$zdp simple_desc abcd 1}").unwrap();
+        let frame: Vec<u8> = ok["HEX ".len()..]
+            .split_whitespace()
+            .map(|h| u8::from_str_radix(h, 16).unwrap())
+            .collect();
+        let aps = unsecure_nwk(&c.key.unwrap(), &frame[9..], 8, SEC_LEVEL_ENC_MIC32).unwrap();
+        assert_eq!(&aps[2..4], &[0x04, 0x00], "cluster = Simple_Desc_req");
+        assert_eq!(aps[11], 0x01, "endpoint trails the target");
+    }
+}
