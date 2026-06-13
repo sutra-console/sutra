@@ -99,8 +99,10 @@ impl VarContext {
         };
         let payload: Vec<u8> = args.get(4..).unwrap_or(&[]).iter().map(|a| parse_u8(a)).collect::<Result<_, _>>()?;
         let key = self.key.ok_or("zcl: no network key set (use NET <label>)")?;
+        // Derive EVERY sequence/counter from the persistent, monotonic frame
+        // counter — not the per-run seq (which resets to 0 each macro, so the APS
+        // sublayer's (source, APS counter) duplicate table dropped repeats).
         let fc = self.take_fc();
-        let seq = self.take_seq();
         let frame = build_zcl_inject(&ZclInject {
             key: &key,
             src_eui64: &self.src_eui64,
@@ -110,8 +112,8 @@ impl VarContext {
             frame_counter: fc,
             mac_seq: fc as u8,
             nwk_seq: (fc >> 8) as u8,
-            aps_counter: seq,
-            zcl_seq: seq,
+            aps_counter: fc as u8,
+            zcl_seq: fc as u8,
             radius: 30,
             key_seq: 0,
             profile: ZCL_PROFILE_HA,
@@ -138,8 +140,8 @@ impl VarContext {
             other => return Err(format!("zdp: unknown command '{other}'")),
         };
         let key = self.key.ok_or("zdp: no network key set (use NET <label>)")?;
+        // All counters from the persistent monotonic frame counter (see eval_zcl).
         let fc = self.take_fc();
-        let seq = self.take_seq();
         let frame = build_zdp_inject(&ZdpInject {
             key: &key,
             src_eui64: &self.src_eui64,
@@ -149,8 +151,8 @@ impl VarContext {
             frame_counter: fc,
             mac_seq: fc as u8,
             nwk_seq: (fc >> 8) as u8,
-            aps_counter: seq,
-            zdp_seq: seq,
+            aps_counter: fc as u8,
+            zdp_seq: fc as u8,
             radius: 30,
             key_seq: 0,
             cluster,
