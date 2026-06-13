@@ -36,6 +36,8 @@ tokio-tungstenite = "0.24" # WebSocket client (network transport; ws://, wss via
 mdns-sd = "0.13"         # LAN auto-discovery: browse the _skrit._tcp services Dutas advertise
 tungstenite = "0.24"     # sync WS client for the sutra-extcap bin (Wireshark capture)
 rtshark = "4"            # drive tshark for Zigbee/Thread/Matter dissection (optional; bonus)
+aes = "0.8"              # AES-128 block cipher for Zigbee NWK/APS security (phase B)
+ccm = "0.5"              # CCM* AEAD (encrypt + 32-bit MIC) over AES-128, the Zigbee construction
 
 [[bin]]
 name = "sutra-extcap"

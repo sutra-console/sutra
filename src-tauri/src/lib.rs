@@ -4,6 +4,7 @@ pub mod protocol;
 pub mod serial;
 mod workspace;
 pub mod ws;
+pub mod zigbee; // Zigbee NWK/APS AES-CCM* security (network-model phase B)
 
 use std::sync::{Arc, Mutex};
 
