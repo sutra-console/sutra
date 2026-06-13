@@ -147,6 +147,8 @@ export function YantraEditor({
   const [selected, setSelected] = useState<number[]>([]);
   const [containerW, setContainerW] = useState(0);
   const [ready, setReady] = useState(false);
+  const [liveBox, setLiveBox] = useState<{ left: number; top: number } | null>(null); // group top-left during a gesture
+  const [toolMenu, setToolMenu] = useState<"a" | "s" | null>(null); // open align/spacing submenu
   const gridRef = useRef<HTMLDivElement>(null);
   const moveableRef = useRef<Moveable>(null);
   const widgetRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -342,6 +344,23 @@ export function YantraEditor({
     return { left: Math.min(...gs.map((g) => g.left)), top: Math.min(...gs.map((g) => g.top)) };
   }, [selected, draft, cw, free]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Live top-left of the selection (read from the DOM mid-gesture, so the floating
+  // toolbar follows the group as it's dragged/resized instead of waiting for commit).
+  const syncLiveBox = () => {
+    const cont = gridRef.current;
+    if (!cont) return;
+    const cr = cont.getBoundingClientRect();
+    let left = Infinity, top = Infinity;
+    for (const i of selected) {
+      const el = widgetRefs.current[i];
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      left = Math.min(left, r.left - cr.left + cont.scrollLeft);
+      top = Math.min(top, r.top - cr.top + cont.scrollTop);
+    }
+    setLiveBox(Number.isFinite(left) ? { left, top } : null);
+  };
+
   // sibling elements (for alignment/snap guidelines)
   const guidelines = useMemo(
     () => widgetRefs.current.filter((el, i) => !!el && !selected.includes(i)) as HTMLElement[],
@@ -412,30 +431,41 @@ export function YantraEditor({
             </div>
           ))}
 
-          {/* mini align/distribute toolbar pinned to the group's outline */}
-          {groupBox && (
-            <div
-              className="yantra-tool absolute z-[60] flex flex-col gap-0.5 rounded-md border bg-popover/95 p-0.5 shadow-md backdrop-blur"
-              style={{ left: Math.max(2, groupBox.left - 30), top: Math.max(0, groupBox.top) }}
-              onPointerDown={(e) => e.stopPropagation()}
-            >
-              {alignActions.map((a) => (
-                <button key={a.key} type="button" title={a.label}
-                  className="flex size-6 items-center justify-center rounded hover:bg-accent"
-                  onClick={a.run}>
-                  <a.Icon className="size-3.5" />
+          {/* mini toolbar pinned to (and following) the group's outline: A = align,
+              S = spacing sub-menus. */}
+          {(liveBox ?? groupBox) && (() => {
+            const box = (liveBox ?? groupBox)!;
+            return (
+              <div
+                className="yantra-tool absolute z-[60] flex flex-col gap-0.5 rounded-md border bg-popover/95 p-0.5 shadow-md backdrop-blur"
+                style={{ left: Math.max(2, box.left - 34), top: Math.max(0, box.top) }}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                <button type="button" title="Align" onClick={() => setToolMenu((m) => (m === "a" ? null : "a"))}
+                  className={`flex size-6 items-center justify-center rounded text-[11px] font-semibold hover:bg-accent ${toolMenu === "a" ? "bg-accent" : ""}`}>
+                  A
                 </button>
-              ))}
-              <div className="mx-auto my-0.5 h-px w-4 bg-border" />
-              {distActions.map((a) => (
-                <button key={a.key} type="button" title={a.label} disabled={selected.length < 3}
-                  className="flex size-6 items-center justify-center rounded hover:bg-accent disabled:opacity-30"
-                  onClick={a.run}>
-                  <a.Icon className="size-3.5" />
+                {toolMenu === "a" && alignActions.map((a) => (
+                  <button key={a.key} type="button" title={a.label}
+                    className="flex size-6 items-center justify-center rounded hover:bg-accent"
+                    onClick={a.run}>
+                    <a.Icon className="size-3.5" />
+                  </button>
+                ))}
+                <button type="button" title="Spacing" onClick={() => setToolMenu((m) => (m === "s" ? null : "s"))}
+                  className={`flex size-6 items-center justify-center rounded text-[11px] font-semibold hover:bg-accent ${toolMenu === "s" ? "bg-accent" : ""}`}>
+                  S
                 </button>
-              ))}
-            </div>
-          )}
+                {toolMenu === "s" && distActions.map((a) => (
+                  <button key={a.key} type="button" title={a.label} disabled={selected.length < 3}
+                    className="flex size-6 items-center justify-center rounded hover:bg-accent disabled:opacity-30"
+                    onClick={a.run}>
+                    <a.Icon className="size-3.5" />
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
 
           {ready && (
             <Moveable
@@ -451,24 +481,28 @@ export function YantraEditor({
               bounds={{ left: 0, top: 0, position: "css" }}
               throttleDrag={0}
               throttleResize={0}
-              onDrag={({ target, transform }) => { (target as HTMLElement).style.transform = transform; }}
-              onDragEnd={() => commit(selected)}
-              onDragGroup={({ events }) => events.forEach((ev) => { (ev.target as HTMLElement).style.transform = ev.transform; })}
-              onDragGroupEnd={() => commit(selected)}
+              onDrag={({ target, transform }) => { (target as HTMLElement).style.transform = transform; syncLiveBox(); }}
+              onDragEnd={() => { commit(selected); setLiveBox(null); }}
+              onDragGroup={({ events }) => { events.forEach((ev) => { (ev.target as HTMLElement).style.transform = ev.transform; }); syncLiveBox(); }}
+              onDragGroupEnd={() => { commit(selected); setLiveBox(null); }}
               onResize={({ target, width, height, drag }) => {
                 const el = target as HTMLElement;
                 el.style.width = `${width}px`;
                 el.style.height = `${height}px`;
                 el.style.transform = drag.transform;
+                syncLiveBox();
               }}
-              onResizeEnd={() => commit(selected)}
-              onResizeGroup={({ events }) => events.forEach((ev) => {
-                const el = ev.target as HTMLElement;
-                el.style.width = `${ev.width}px`;
-                el.style.height = `${ev.height}px`;
-                el.style.transform = ev.drag.transform;
-              })}
-              onResizeGroupEnd={() => commit(selected)}
+              onResizeEnd={() => { commit(selected); setLiveBox(null); }}
+              onResizeGroup={({ events }) => {
+                events.forEach((ev) => {
+                  const el = ev.target as HTMLElement;
+                  el.style.width = `${ev.width}px`;
+                  el.style.height = `${ev.height}px`;
+                  el.style.transform = ev.drag.transform;
+                });
+                syncLiveBox();
+              }}
+              onResizeGroupEnd={() => { commit(selected); setLiveBox(null); }}
             />
           )}
           {ready && (
