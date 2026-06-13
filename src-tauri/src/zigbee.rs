@@ -282,6 +282,167 @@ pub fn build_zdp_inject(p: &ZdpInject) -> Result<Vec<u8>, String> {
     Ok(frame)
 }
 
+// ---- receive side: decrypt an arbitrary sniffed frame + parse ZDP replies ---
+// Injection (above) builds a fixed-shape header; sniffed frames are arbitrary, so
+// to decrypt them we must compute the NWK header length from the FCF (optional
+// IEEE addresses / multicast / source-route all change it) before handing the
+// aux-header offset to unsecure_nwk. This is the half that turns an interview
+// *reply* into data, and lets Sutra decrypt the live sniffer stream host-side.
+
+/// Length of the cleartext NWK header (FCF·dst·src·radius·seq + optional fields),
+/// parsed from the FCF. None if the frame is too short to contain what it claims.
+pub fn nwk_header_len(frame: &[u8]) -> Option<usize> {
+    if frame.len() < 8 {
+        return None;
+    }
+    let fcf = u16::from_le_bytes([frame[0], frame[1]]);
+    let mut len = 8usize; // FCF(2)·dst(2)·src(2)·radius(1)·seq(1)
+    if fcf & (1 << 11) != 0 {
+        len += 8; // destination IEEE
+    }
+    if fcf & (1 << 12) != 0 {
+        len += 8; // source IEEE
+    }
+    if fcf & (1 << 8) != 0 {
+        len += 1; // multicast control
+    }
+    if fcf & (1 << 10) != 0 {
+        // source route subframe: relay count(1)·relay index(1)·relay list(2·count)
+        let relay_count = *frame.get(len)? as usize;
+        len += 2 + 2 * relay_count;
+    }
+    (frame.len() >= len).then_some(len)
+}
+
+/// Decrypt a complete secured NWK frame (header length parsed from the FCF).
+/// `level` is the network's configured security level (5 = ENC-MIC-32). Returns
+/// the decrypted NWK payload (a NWK command, or an APS frame for data).
+pub fn decrypt_nwk(key: &[u8; 16], frame: &[u8], level: u8) -> Result<Vec<u8>, String> {
+    let hlen = nwk_header_len(frame).ok_or("cannot parse NWK header length")?;
+    let fcf = u16::from_le_bytes([frame[0], frame[1]]);
+    if fcf & (1 << 9) == 0 {
+        return Err("NWK frame is not secured".into());
+    }
+    unsecure_nwk(key, frame, hlen, level)
+}
+
+/// A parsed APS data frame (the common unicast shape ZDP/ZCL use).
+pub struct ApsData<'a> {
+    pub dst_ep: u8,
+    pub src_ep: u8,
+    pub cluster: u16,
+    pub profile: u16,
+    pub payload: &'a [u8], // ZDP/ZCL payload (for ZDP: txn seq · response)
+}
+
+/// Parse a unicast APS **data** frame: fc·dst_ep·cluster·profile·src_ep·counter
+/// then payload. None for non-data / group-addressed / too-short frames.
+pub fn parse_aps_data(aps: &[u8]) -> Option<ApsData<'_>> {
+    if aps.len() < 8 || aps[0] & 0x03 != 0 {
+        return None; // frame type bits 00 = data only
+    }
+    Some(ApsData {
+        dst_ep: aps[1],
+        cluster: u16::from_le_bytes([aps[2], aps[3]]),
+        profile: u16::from_le_bytes([aps[4], aps[5]]),
+        src_ep: aps[6],
+        payload: &aps[8..],
+    })
+}
+
+// ZDP response cluster ids = request | 0x8000.
+pub const ZDP_NODE_DESC_RSP: u16 = 0x8002;
+pub const ZDP_SIMPLE_DESC_RSP: u16 = 0x8004;
+pub const ZDP_ACTIVE_EP_RSP: u16 = 0x8005;
+
+/// Active_EP_rsp: the endpoints a node hosts. `zdp` is the APS payload
+/// (txn seq · status · addr · count · endpoints…).
+pub struct ActiveEpRsp {
+    pub status: u8,
+    pub addr: u16,
+    pub endpoints: Vec<u8>,
+}
+pub fn parse_active_ep_rsp(zdp: &[u8]) -> Option<ActiveEpRsp> {
+    if zdp.len() < 5 {
+        return None;
+    }
+    let count = zdp[4] as usize;
+    Some(ActiveEpRsp {
+        status: zdp[1],
+        addr: u16::from_le_bytes([zdp[2], zdp[3]]),
+        endpoints: zdp.get(5..5 + count)?.to_vec(),
+    })
+}
+
+/// Simple_Desc_rsp: one endpoint's profile/device + input/output clusters.
+pub struct SimpleDescRsp {
+    pub status: u8,
+    pub addr: u16,
+    pub endpoint: u8,
+    pub profile: u16,
+    pub device: u16,
+    pub in_clusters: Vec<u16>,
+    pub out_clusters: Vec<u16>,
+}
+pub fn parse_simple_desc_rsp(zdp: &[u8]) -> Option<SimpleDescRsp> {
+    // txn(1)·status(1)·addr(2)·len(1)·[endpoint(1)·profile(2)·device(2)·ver(1)·
+    //   in_count(1)·in(2·n)·out_count(1)·out(2·m)]
+    if zdp.len() < 5 {
+        return None;
+    }
+    let d = &zdp[5..]; // the simple descriptor body
+    if d.len() < 8 {
+        return None;
+    }
+    let endpoint = d[0];
+    let profile = u16::from_le_bytes([d[1], d[2]]);
+    let device = u16::from_le_bytes([d[3], d[4]]);
+    let in_count = d[6] as usize;
+    let in_clusters = read_clusters(d, 7, in_count)?;
+    let out_off = 7 + in_count * 2;
+    let out_count = *d.get(out_off)? as usize;
+    let out_clusters = read_clusters(d, out_off + 1, out_count)?;
+    Some(SimpleDescRsp {
+        status: zdp[1],
+        addr: u16::from_le_bytes([zdp[2], zdp[3]]),
+        endpoint,
+        profile,
+        device,
+        in_clusters,
+        out_clusters,
+    })
+}
+
+/// Node_Desc_rsp: the node descriptor's manufacturer code is the headline field.
+pub struct NodeDescRsp {
+    pub status: u8,
+    pub addr: u16,
+    pub manufacturer: u16,
+}
+pub fn parse_node_desc_rsp(zdp: &[u8]) -> Option<NodeDescRsp> {
+    // txn(1)·status(1)·addr(2)·node descriptor(13): the manufacturer code is at
+    // descriptor bytes 3-4 (after the 3 flag/capability bytes).
+    if zdp.len() < 4 + 5 {
+        return None;
+    }
+    let desc = &zdp[4..];
+    Some(NodeDescRsp {
+        status: zdp[1],
+        addr: u16::from_le_bytes([zdp[2], zdp[3]]),
+        manufacturer: u16::from_le_bytes([desc[3], desc[4]]),
+    })
+}
+
+fn read_clusters(d: &[u8], off: usize, count: usize) -> Option<Vec<u16>> {
+    let bytes = d.get(off..off + count * 2)?;
+    Some(
+        bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,5 +610,81 @@ mod tests {
     fn zdp_simple_desc_carries_endpoint() {
         let zdp = zdp_request(0x40, 0xabcd, Some(7));
         assert_eq!(zdp, vec![0x40, 0xcd, 0xab, 0x07]);
+    }
+
+    #[test]
+    fn nwk_header_len_real_frame() {
+        // The real Link Status frame's NWK header: FCF 0x1209 sets ext-source
+        // (bit 12) → 8 base + 8 EUI = 16 bytes.
+        let nwk = [
+            0x09, 0x12, 0xfc, 0xff, 0x6e, 0xb5, 0x01, 0xac, 0x69, 0xa2, 0xc2, 0xfe, 0xff, 0x27,
+            0x87, 0x04, 0x28, 0x00, // (rest doesn't matter for header-len)
+        ];
+        assert_eq!(nwk_header_len(&nwk), Some(16));
+        // a minimal data header (no optional fields) is 8
+        let min = [0x08, 0x02, 0x00, 0x00, 0x34, 0x12, 0x1e, 0x05, 0x28];
+        assert_eq!(nwk_header_len(&min), Some(8));
+    }
+
+    #[test]
+    fn decrypt_nwk_real_frame() {
+        // Same real frame as real_frame_decrypt, but via the FCF-driven path.
+        let nwk: Vec<u8> = vec![
+            0x09, 0x12, 0xfc, 0xff, 0x6e, 0xb5, 0x01, 0xac, 0x69, 0xa2, 0xc2, 0xfe, 0xff, 0x27,
+            0x87, 0x04, 0x28, 0xe6, 0xe5, 0x58, 0x00, 0x69, 0xa2, 0xc2, 0xfe, 0xff, 0x27, 0x87,
+            0x04, 0x00, 0x3e, 0xd1, 0x9d, 0x7e, 0x0e, 0xbd, 0xde, 0xd4, 0xbc, 0x7d, 0xaa, 0x4d,
+            0xdd, 0xc9, 0x2f, 0xa6, 0x83, 0x72, 0x4e, 0x4c, 0x53, 0x83, 0x0f, 0x64, 0x3c, 0x6f,
+            0x64, 0xfa, 0xbb, 0xc4, 0xe3, 0x38, 0x17, 0xde, 0xb0, 0x61,
+        ];
+        let key: [u8; 16] = [
+            0xa1, 0x40, 0x35, 0x57, 0x84, 0xcc, 0xa8, 0x94, 0xa1, 0x40, 0x35, 0x57, 0x84, 0xcc,
+            0xa8, 0x94,
+        ];
+        let pt = decrypt_nwk(&key, &nwk, SEC_LEVEL_ENC_MIC32).unwrap();
+        assert_eq!(&pt[..2], &[0x08, 0x6a], "Link Status, header len auto-parsed");
+    }
+
+    #[test]
+    fn interview_reply_roundtrip() {
+        // Build an Active_EP_rsp the way a node would (APS data · ZDP payload),
+        // secure it as a NWK data frame, then run the full receive path.
+        let zdp = vec![0x40, 0x00, 0xcd, 0xab, 0x02, 0x01, 0x0a]; // txn·status·addr·count·eps
+        let mut aps = aps_zdp_header(ZDP_ACTIVE_EP_RSP, 0x30);
+        aps.extend_from_slice(&zdp);
+        let header = nwk_header(0x7fff, 0xabcd, 30, 0x20); // node → us
+        let frame = secure_nwk(&KEY, &header, &aps, &EUI, 5, 0, SEC_LEVEL_ENC_MIC32).unwrap();
+
+        let dec = decrypt_nwk(&KEY, &frame, SEC_LEVEL_ENC_MIC32).unwrap();
+        let aps = parse_aps_data(&dec).unwrap();
+        assert_eq!(aps.cluster, ZDP_ACTIVE_EP_RSP);
+        assert_eq!(aps.profile, 0x0000);
+        let rsp = parse_active_ep_rsp(aps.payload).unwrap();
+        assert_eq!(rsp.status, 0);
+        assert_eq!(rsp.addr, 0xabcd);
+        assert_eq!(rsp.endpoints, vec![1, 10], "the node's two endpoints");
+    }
+
+    #[test]
+    fn simple_desc_rsp_parses_clusters() {
+        // descriptor: ep1 · profile 0x0104 · device 0x0100 · ver · in[0x0006,0x0008] · out[0x0019]
+        let zdp = vec![
+            0x40, 0x00, 0xcd, 0xab, 0x0e, // txn·status·addr·len
+            0x01, 0x04, 0x01, 0x00, 0x01, 0x00, // ep·profile·device·ver
+            0x02, 0x06, 0x00, 0x08, 0x00, // in_count·in clusters
+            0x01, 0x19, 0x00, // out_count·out clusters
+        ];
+        let d = parse_simple_desc_rsp(&zdp).unwrap();
+        assert_eq!(d.endpoint, 1);
+        assert_eq!(d.profile, 0x0104);
+        assert_eq!(d.in_clusters, vec![0x0006, 0x0008]);
+        assert_eq!(d.out_clusters, vec![0x0019]);
+    }
+
+    #[test]
+    fn node_desc_rsp_manufacturer() {
+        // txn·status·addr · descriptor(flags 3 bytes · manufacturer 0x1037 · …)
+        let zdp = vec![0x40, 0x00, 0xcd, 0xab, 0x00, 0x40, 0x8e, 0x37, 0x10, 0x52, 0x80];
+        let n = parse_node_desc_rsp(&zdp).unwrap();
+        assert_eq!(n.manufacturer, 0x1037, "manufacturer code");
     }
 }
