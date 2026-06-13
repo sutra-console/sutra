@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Terminal, type TerminalHandle } from "@/components/Terminal";
 import { MacroHelp } from "@/components/MacroHelp";
+import { MacroVars } from "@/components/MacroVars";
 import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
@@ -293,6 +294,23 @@ export default function App() {
   const [editOrig, setEditOrig] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
   const [draftText, setDraftText] = useState("");
+  const macroTextRef = useRef<HTMLTextAreaElement>(null);
+  // Insert a {$…} variable token at the cursor (or replace the selection).
+  function insertMacroVar(token: string) {
+    const ta = macroTextRef.current;
+    if (!ta) {
+      setDraftText((t) => (t ? `${t}\n${token}` : token));
+      return;
+    }
+    const start = ta.selectionStart ?? draftText.length;
+    const end = ta.selectionEnd ?? start;
+    setDraftText(draftText.slice(0, start) + token + draftText.slice(end));
+    requestAnimationFrame(() => {
+      ta.focus();
+      const pos = start + token.length;
+      ta.setSelectionRange(pos, pos);
+    });
+  }
   const [draftSecret, setDraftSecret] = useState(false);
   const [draftSet, setDraftSet] = useState("");
   const [showHelp, setShowHelp] = useState(false);
@@ -1837,12 +1855,14 @@ export default function App() {
                 </datalist>
               </div>
               <Textarea
+                ref={macroTextRef}
                 placeholder={"login\nDELAY 1000\nSTRING whoami\nENTER"}
                 value={draftText}
                 onChange={(e) => setDraftText(e.target.value)}
                 className="h-44 resize-none font-mono text-xs"
               />
               <MacroColorStrip text={draftText} onChange={setDraftText} />
+              <MacroVars onInsert={insertMacroVar} active={networks.find((n) => n.key.trim()) ?? networks[0]} />
               {!showHelp && (
                 <p className="text-[10px] leading-tight text-muted-foreground">
                   One command per line. <code>STRING</code> <code>ENTER</code> <code>DELAY ms</code>{" "}
