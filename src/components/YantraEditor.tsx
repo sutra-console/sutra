@@ -738,7 +738,6 @@ export function YantraEditor({
     [selected, draft, containerW], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
-  const rows = Math.max(4, widgets.reduce((m, w) => Math.max(m, (w.y ?? 0) + (w.h ?? 1)), 0) + 1);
 
   // --- layer tree (frames + tabs panes; drag rows to reparent) ----------------
   const dragRef = useRef<{ kind: "w" | "f"; key: string } | null>(null);
@@ -901,12 +900,11 @@ export function YantraEditor({
 
         <div
           ref={gridRef}
-          className="yantra-canvas relative flex-1 overflow-auto rounded border bg-muted/10"
+          className="yantra-canvas relative flex-1 overflow-hidden rounded border bg-muted/10"
           style={{
             backgroundSize: `${cw}px ${ROW_H}px`,
             backgroundImage:
               "linear-gradient(to right, hsl(var(--border)/0.5) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)/0.5) 1px, transparent 1px)",
-            minHeight: rows * ROW_H,
           }}
         >
           {/* container outlines (non-interactive) so frame bounds are visible */}
