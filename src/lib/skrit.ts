@@ -82,6 +82,10 @@ export const listPorts = () => invoke<PortDesc[]>("list_ports");
 export const autodetect = () => invoke<DetectResult>("autodetect");
 /** Find a single-port muxed Duta: probes candidate ports with a skrit-mux PING. */
 export const autodetectMux = () => invoke<string>("autodetect_mux");
+/** Probe candidate ports for their board name → [port, board] pairs (for the ports list). */
+export const probeBoards = () => invoke<[string, string][]>("probe_boards");
+/** Local board-def JSON files (<app_data>/boards/) that extend the built-in board DB. */
+export const listBoards = () => invoke<unknown[]>("list_boards");
 /** Connect a DATA port. Pass cmdPort for a Duta, or null/omit for any generic serial port. */
 export const connect = (dataPort: string, cmdPort?: string | null) =>
   invoke<void>("connect", { dataPort, cmdPort: cmdPort ?? null });
@@ -660,6 +664,8 @@ export interface YantraWidget {
   min?: number; max?: number; step?: number; // slider
   options?: { label: string; send: YantraAction }[]; // select
   match?: string; // readout: regex over the console; capture group 1 is shown
+  hidden?: boolean; // layer hidden from the rendered surface
+  group?: string; // group id — widgets sharing one move/select together
 }
 export interface YantraSpec {
   name?: string;

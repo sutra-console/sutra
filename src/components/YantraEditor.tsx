@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus, Save, Undo2, Redo2, RotateCcw, Trash2, Move,
+  Layers, Eye, EyeOff, ChevronUp, ChevronDown,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalSpaceBetween, AlignVerticalSpaceBetween,
@@ -148,6 +149,7 @@ export function YantraEditor({
   const [containerW, setContainerW] = useState(0);
   const [ready, setReady] = useState(false);
   const [toolMenu, setToolMenu] = useState<"a" | "s" | null>(null); // open align/spacing submenu
+  const [showLayers, setShowLayers] = useState(false); // layers panel visible
   const [past, setPast] = useState<YantraSpec[]>([]); // undo stack (checkpoints before each change)
   const [future, setFuture] = useState<YantraSpec[]>([]); // redo stack
   const committed = useRef<YantraSpec>(clone(spec)); // last history checkpoint
@@ -263,6 +265,24 @@ export function YantraEditor({
     });
   const removeMany = (indices: number[]) =>
     setDraft((d) => ({ ...d, widgets: (d.widgets ?? []).filter((_, j) => !indices.includes(j)) }));
+  // Reorder z-index by swapping neighbors (dir +1 = toward front / on top). Render
+  // order is array order, so a later index draws on top. Remap the selection too.
+  const moveLayer = (i: number, dir: 1 | -1) => {
+    const j = i + dir;
+    if (j < 0 || j >= widgets.length) return;
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      [ws[i], ws[j]] = [ws[j], ws[i]];
+      return { ...d, widgets: ws };
+    });
+    setSelected((sel) => sel.map((s) => (s === i ? j : s === j ? i : s)));
+  };
+  const toggleHidden = (i: number) =>
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      ws[i] = { ...ws[i], hidden: !ws[i].hidden };
+      return { ...d, widgets: ws };
+    });
   const addWidget = (type: string) => {
     const newIdx = widgets.length;
     setDraft((d) => {
@@ -425,6 +445,40 @@ export function YantraEditor({
 
   return (
     <div className="flex h-full min-h-0 gap-3">
+      {/* layers: front (top of list) = drawn last = on top */}
+      {showLayers && (
+        <div className="flex w-44 shrink-0 flex-col overflow-auto rounded border bg-muted/10 p-2">
+          <div className="mb-1 text-[11px] font-medium text-muted-foreground">Layers</div>
+          {widgets.length === 0 && <div className="text-[10px] text-muted-foreground">No widgets yet.</div>}
+          {widgets.map((_, idx) => widgets.length - 1 - idx).map((i) => {
+            const w = widgets[i];
+            return (
+              <div key={i}
+                className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selected.includes(i) ? "bg-primary/15" : "hover:bg-accent/50"}`}
+                onClick={(e) => setSelected((sel) => (e.shiftKey ? (sel.includes(i) ? sel.filter((s) => s !== i) : [...sel, i]) : [i]))}>
+                <button type="button" title={w.hidden ? "Show" : "Hide"}
+                  className="text-muted-foreground hover:text-foreground"
+                  onClick={(e) => { e.stopPropagation(); toggleHidden(i); }}>
+                  {w.hidden ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
+                </button>
+                <span className="min-w-0 flex-1 truncate" title={w.label || w.type}>{w.label || w.type}</span>
+                {w.group && <span className="rounded bg-muted px-1 text-[9px] text-muted-foreground" title={`group ${w.group}`}>g</span>}
+                <button type="button" title="Bring forward" disabled={i === widgets.length - 1}
+                  className="text-muted-foreground hover:text-foreground disabled:opacity-30"
+                  onClick={(e) => { e.stopPropagation(); moveLayer(i, 1); }}>
+                  <ChevronUp className="size-3" />
+                </button>
+                <button type="button" title="Send backward" disabled={i === 0}
+                  className="text-muted-foreground hover:text-foreground disabled:opacity-30"
+                  onClick={(e) => { e.stopPropagation(); moveLayer(i, -1); }}>
+                  <ChevronDown className="size-3" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* canvas */}
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <div className="flex items-center gap-1.5">
@@ -435,6 +489,10 @@ export function YantraEditor({
               <Plus className="size-3" /> {t}
             </Button>
           ))}
+          <Button size="sm" variant={showLayers ? "default" : "outline"} className="h-7 gap-1 px-2 text-[11px]"
+            title="Layers" onClick={() => setShowLayers((v) => !v)}>
+            <Layers className="size-3" /> Layers
+          </Button>
           <span className="ml-1 text-[10px] text-muted-foreground">hold ⇧ to snap to grid</span>
           <div className="ml-auto flex items-center gap-1.5">
             {dirty && <span className="text-[11px] text-amber-600 dark:text-amber-400">unsaved</span>}
@@ -474,7 +532,7 @@ export function YantraEditor({
               ref={(el) => { widgetRefs.current[i] = el; }}
               className={`yantra-widget absolute select-none rounded border bg-card text-[11px] shadow-sm ${
                 selected.includes(i) ? "ring-2 ring-primary" : ""
-              }`}
+              } ${w.hidden ? "opacity-40" : ""}`}
               style={{ ...geom(w), padding: 4 }}
             >
               <div className="flex h-full flex-col overflow-hidden">

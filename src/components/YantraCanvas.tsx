@@ -80,7 +80,7 @@ export function YantraCanvas({
   return (
     <div className="relative h-full overflow-auto p-1">
       {widgets.map((w, i) => (
-        <div
+        w.hidden ? null : <div
           key={i}
           className="absolute"
           style={{
