@@ -4,7 +4,7 @@
 // (#RRGGBB is always 7 chars), so other tokens' offsets stay valid.
 import { useMemo } from "react";
 
-import { ColorField } from "@/components/ColorField";
+import { ColorField, ledSwatchStyle } from "@/components/ColorField";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { type Rgb, hexToRgb, rgbToHex } from "@/lib/skrit";
 
@@ -46,7 +46,7 @@ export function MacroColorStrip({
             >
               <span
                 className="size-3 rounded-sm border"
-                style={{ backgroundColor: c.hex }}
+                style={ledSwatchStyle(hexToRgb(c.hex) ?? { r: 0, g: 0, b: 0 })}
               />
               {c.hex}
             </button>

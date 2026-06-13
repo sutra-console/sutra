@@ -709,6 +709,29 @@ pub fn pick(app: &AppHandle) -> Result<Option<String>, String> {
     }
 }
 
+/// Adopt an already-known folder as the workspace (e.g. an Open Recent entry).
+/// Errors if the path no longer points at a folder.
+pub fn set_known(app: &AppHandle, path: &str) -> Result<String, String> {
+    let set_path = set(app, Path::new(path))?;
+    Ok(set_path.to_string_lossy().into_owned())
+}
+
+/// Forget the current workspace: macros + captures fall back to the app data dir.
+pub fn close(app: &AppHandle) -> Result<(), String> {
+    if let Some(marker) = marker_path(app) {
+        if marker.exists() {
+            std::fs::remove_file(&marker).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Export the workspace network model (discovered nodes + keys) to `path` as JSON.
+pub fn export_networks(app: &AppHandle, path: &str) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(&load_networks(app)).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
 /// Save the given raw ble-sniff records as a pcap. With a workspace, writes to
 /// `<ws>/.sutra/captures/<name>.pcap`; otherwise opens a save dialog. Returns the path.
 pub fn save_ble_pcap(app: &AppHandle, name: &str, records: Vec<Vec<u8>>) -> Result<String, String> {

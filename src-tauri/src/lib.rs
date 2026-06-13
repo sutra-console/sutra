@@ -233,6 +233,28 @@ fn pick_workspace(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
     Ok(picked)
 }
 
+/// Adopt a known folder path as the workspace (Open Recent) and re-point macros.
+#[tauri::command]
+fn set_workspace(app: tauri::AppHandle, state: tauri::State<AppState>, path: String) -> Result<String, String> {
+    let set = workspace::set_known(&app, &path)?;
+    serial::relocate_macros(&state.shared, workspace::macros_path(&app));
+    Ok(set)
+}
+
+/// Forget the current workspace; macros fall back to the app data dir.
+#[tauri::command]
+fn close_workspace(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
+    workspace::close(&app)?;
+    serial::relocate_macros(&state.shared, workspace::macros_path(&app));
+    Ok(())
+}
+
+/// Export the workspace network model (discovered nodes + keys) to a JSON file.
+#[tauri::command]
+fn export_networks(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    workspace::export_networks(&app, &path)
+}
+
 /// Save raw ble-sniff records as a pcap (into the workspace's captures/, or via
 /// a save dialog if no workspace). Returns the written path.
 #[tauri::command]
@@ -406,6 +428,9 @@ pub fn run() {
             macros_set,
             get_workspace,
             pick_workspace,
+            set_workspace,
+            close_workspace,
+            export_networks,
             save_ble_pcap,
             save_ieee154_pcap,
             tshark_available,

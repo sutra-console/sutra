@@ -36,11 +36,12 @@ export function NetworkDevices({
     );
   }
   return (
-    <div className="flex flex-col gap-1.5">
+    // masonry via CSS multicolumn: cards pack tightly regardless of height
+    <div className="columns-1 gap-2 sm:columns-2 xl:columns-3">
       {nodes.map((n) => {
         const clusters = n.endpoints.flatMap((e) => e.clusters.map(parseCluster));
         return (
-          <div key={n.addr} className="rounded border p-2 text-xs">
+          <div key={n.addr} className="mb-2 break-inside-avoid rounded border p-2 text-xs">
             <div className="flex flex-wrap items-center gap-2">
               {editing === n.addr ? (
                 <input

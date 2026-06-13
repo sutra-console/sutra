@@ -123,6 +123,12 @@ export const wsDiscover = (timeoutMs?: number) =>
 export const getWorkspace = () => invoke<string | null>("get_workspace");
 /** Open a folder picker and adopt it as the workspace; returns the path or null. */
 export const pickWorkspace = () => invoke<string | null>("pick_workspace");
+/** Adopt a known folder path as the workspace (Open Recent); returns the path. */
+export const setWorkspace = (path: string) => invoke<string>("set_workspace", { path });
+/** Forget the current workspace (macros fall back to app data). */
+export const closeWorkspace = () => invoke<void>("close_workspace");
+/** Export the workspace network model (discovered nodes + keys) to a JSON path. */
+export const exportNetworks = (path: string) => invoke<void>("export_networks", { path });
 /** Save ble-sniff records as a pcap (workspace captures/ or a save dialog). */
 export const saveBlePcap = (name: string, records: number[][]) =>
   invoke<string>("save_ble_pcap", { name, records });

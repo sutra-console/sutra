@@ -11,6 +11,7 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { type AttrObs, type DecodedRow, type Ieee154Frame, type Network } from "@/lib/skrit";
@@ -23,8 +24,6 @@ const frameMac = (f: Ieee154Frame): number[] => {
   const len = f.raw[8] ?? 0;
   return f.raw.slice(9, 9 + Math.max(0, len - 2));
 };
-const parseHex = (s: string): number[] =>
-  (s.replace(/0x/gi, "").match(/[0-9a-fA-F]{2}/g) ?? []).map((b) => parseInt(b, 16));
 const roleClass = (role: string): string =>
   role === "Coordinator" ? "text-amber-400"
   : role === "Router" ? "text-sky-400"
@@ -35,6 +34,33 @@ const rowText = (d: DecodedRow) => {
   const f = d.fields.map(([k, v]) => `${k}=${v}`).join(" ");
   return `#${d.num} ${d.protocol} | ${d.summary}${f ? " | " + f : ""}`;
 };
+
+// Filter query: space-separated terms over a row's named fields.
+//   foo        free-text substring across all fields (include)
+//   -foo / !foo  free-text exclude
+//   src=1234   column-specific exact match (case-insensitive)
+//   src!=1234  column-specific not-equal
+// All terms must hold. Empty query matches everything.
+function matchFilter(fields: Record<string, string>, query: string): boolean {
+  const hay = Object.values(fields).join(" ").toLowerCase();
+  for (const raw of query.split(/\s+/).filter(Boolean)) {
+    const m = /^([a-z]+)(!=|==|=)(.+)$/i.exec(raw);
+    if (m) {
+      const eq = (fields[m[1].toLowerCase()] ?? "").toLowerCase() === m[3].toLowerCase();
+      if (m[2].startsWith("!") ? eq : !eq) return false;
+      continue;
+    }
+    const neg = raw[0] === "-" || raw[0] === "!";
+    const term = (neg ? raw.slice(1) : raw).toLowerCase();
+    if (!term) continue;
+    if (hay.includes(term) === neg) return false;
+  }
+  return true;
+}
+const addFilterTerm = (q: string, value: string, include: boolean): string =>
+  (q.trim() ? q.trim() + " " : "") + (include ? "" : "-") + value;
+const addFieldTerm = (q: string, key: string, value: string, eq: boolean): string =>
+  (q.trim() ? q.trim() + " " : "") + `${key}${eq ? "=" : "!="}${value}`;
 
 // Color the protocol badge by upper-layer stack (from Wireshark's Protocol column).
 function protoColor(p: string): string {
@@ -102,7 +128,15 @@ export function Ieee154Panel({
   onRenameNode?: (addr: string, name: string) => void; // set a node nickname
   attrs?: Record<string, AttrObs>; // live ZCL attribute values, keyed addr|ep|cluster|attr
 }) {
-  const [mode, setMode] = useState<"nodes" | "packets" | "decoded">("nodes");
+  // Top-level menu (Nodes/Packets) is kept separate from each view's sub-selection
+  // so swapping between them remembers where you were (Packets stays on Raw/Decoded,
+  // Nodes stays on Info/Controls). `mode` is derived for all the existing logic.
+  const [top, setTop] = useState<"nodes" | "packets">("nodes");
+  const [packetView, setPacketView] = useState<"packets" | "decoded">("packets"); // remembered Packets sub-view
+  const [nodeView, setNodeView] = useState<"info" | "controls">("info"); // remembered Nodes sub-view
+  const mode = top === "nodes" ? "nodes" : packetView;
+  const [pktFilter, setPktFilter] = useState(""); // free-text filter for the Raw packets table
+  const [ctxCell, setCtxCell] = useState({ key: "", value: "" }); // right-clicked Raw cell (column + value)
   const [decoded, setDecoded] = useState<DecodedRow[]>([]);
   const [decoding, setDecoding] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set()); // decoded rows showing their field tree
@@ -111,7 +145,6 @@ export function Ieee154Panel({
   const [live, setLive] = useState(false); // auto re-decode as frames arrive
   const [decErr, setDecErr] = useState(""); // last decode error (shown, not thrown)
   const [ctxRow, setCtxRow] = useState<DecodedRow | null>(null); // right-clicked decoded row
-  const [injectHex, setInjectHex] = useState(""); // a MAC frame to transmit, as hex
   // keep the latest onDecode + frame count in refs so the live interval (set up
   // once) always decodes the CURRENT capture, not a stale closure.
   const onDecodeRef = useRef(onDecode);
@@ -241,9 +274,17 @@ export function Ieee154Panel({
   // every render (incl. live re-decodes + 150ms frame flushes), which is what
   // froze the UI under live decode.
   const shown =
-    mode !== "packets" ? [] : selected.size
-      ? frames.filter((f) => selected.has(f.src) || selected.has(f.dst))
-      : frames;
+    mode !== "packets"
+      ? []
+      : (selected.size
+          ? frames.filter((f) => selected.has(f.src) || selected.has(f.dst))
+          : frames
+        ).filter((f) =>
+          matchFilter(
+            { ch: String(f.channel), rssi: String(f.rssi), type: f.type, src: f.src, dst: f.dst, payload: f.payloadHex },
+            pktFilter,
+          ),
+        );
   const packetRows: { f: Ieee154Frame; n: number }[] = group
     ? (() => {
         const m = new Map<string, { f: Ieee154Frame; n: number }>();
@@ -268,64 +309,28 @@ export function Ieee154Panel({
   const shownDecoded = decoded
     .filter((d) => {
       if (hideNoise && noiseRe.test(d.summary)) return false;
-      if (decFilter && !`${d.protocol} ${d.summary}`.toLowerCase().includes(decFilter.toLowerCase()))
-        return false;
-      return true;
+      return matchFilter({ protocol: d.protocol, summary: d.summary }, decFilter);
     })
     .slice(-600); // cap rendered rows so a big buffer (esp. under live) can't freeze the UI
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 text-foreground">
       <div className="flex items-center gap-2">
-        <div className="flex overflow-hidden rounded border text-xs">
-          {(["nodes", "packets", "decoded"] as const).map((m) => (
-            <button key={m} type="button"
-              className={`px-2.5 py-1 capitalize ${mode === m ? "bg-accent" : "hover:bg-accent/50"}`}
-              onClick={() => { setMode(m); if (m === "decoded" && canDecode && !decoded.length) runDecode(); }}>
-              {m}
-            </button>
-          ))}
+        <div className="flex items-center overflow-hidden rounded border text-xs">
+          <button type="button"
+            className={`px-2.5 py-1 ${mode === "nodes" ? "bg-accent" : "hover:bg-accent/50"}`}
+            onClick={() => setTop("nodes")}>
+            Nodes
+          </button>
+          {/* "Packets" returns to its remembered Raw/Decoded sub-view (below) */}
+          <button type="button"
+            className={`border-l px-2.5 py-1 ${mode !== "nodes" ? "bg-accent" : "hover:bg-accent/50"}`}
+            onClick={() => { setTop("packets"); if (packetView === "decoded" && canDecode && !decoded.length) runDecode(); }}>
+            Packets
+          </button>
         </div>
         <Badge variant="secondary" className="gap-1"><Radio className="size-3" /> {nodeList.length} nodes</Badge>
         <span className="text-xs text-muted-foreground">{total.toLocaleString()} frames</span>
-        {mode === "packets" && (
-          <button type="button"
-            className={`rounded border px-2 py-0.5 text-[11px] ${group ? "bg-accent" : "hover:bg-accent/50"}`}
-            title="Collapse identical frames to the latest, with a count"
-            onClick={() => setGroup((g) => !g)}>
-            group identical
-          </button>
-        )}
-        {mode === "decoded" && canDecode && (
-          <>
-            <button type="button"
-              className="rounded border px-2 py-0.5 text-[11px] hover:bg-accent/50 disabled:opacity-50"
-              title="Re-run Wireshark dissection on the current capture"
-              disabled={decoding || !frames.length}
-              onClick={runDecode}>
-              {decoding ? "decoding…" : "↻ decode"}
-            </button>
-            <button type="button"
-              className={`rounded border px-2 py-0.5 text-[11px] ${live ? "bg-accent" : "hover:bg-accent/50"}`}
-              title="Auto re-decode as new frames arrive"
-              onClick={() => setLive((v) => !v)}>
-              live
-            </button>
-            <button type="button"
-              className={`rounded border px-2 py-0.5 text-[11px] ${hideNoise ? "bg-accent" : "hover:bg-accent/50"}`}
-              title="Hide Ack / Data Request / Link Status mesh + MAC chatter"
-              onClick={() => setHideNoise((v) => !v)}>
-              hide noise
-            </button>
-            <input
-              className="h-6 w-40 rounded border bg-transparent px-2 text-[11px] outline-none focus:border-primary"
-              placeholder="filter protocol / info…"
-              value={decFilter}
-              spellCheck={false}
-              onChange={(e) => setDecFilter(e.target.value)}
-            />
-          </>
-        )}
         {selected.size > 0 && (
           <button type="button"
             className="inline-flex items-center gap-1 rounded border border-primary/60 px-1.5 py-0.5 text-[11px] text-primary hover:bg-accent"
@@ -333,28 +338,6 @@ export function Ieee154Panel({
             onClick={() => { setSelected(new Set()); setAnchor(null); }}>
             filter: {selected.size} · clear <X className="size-3" />
           </button>
-        )}
-        {onInject && (
-          <span className="flex items-center gap-1" title="Transmit a MAC frame (hex, no FCS) on the current channel">
-            <input
-              className="h-6 w-44 rounded border bg-transparent px-2 font-mono text-[11px] outline-none focus:border-primary"
-              placeholder="inject hex…"
-              value={injectHex}
-              spellCheck={false}
-              onChange={(e) => setInjectHex(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter") return;
-                const b = parseHex(injectHex);
-                if (b.length) onInject(b);
-              }}
-            />
-            <button type="button"
-              className="rounded border px-2 py-0.5 text-[11px] hover:bg-accent/50 disabled:opacity-50"
-              disabled={!parseHex(injectHex).length}
-              onClick={() => { const b = parseHex(injectHex); if (b.length) onInject(b); }}>
-              inject
-            </button>
-          </span>
         )}
         {mode === "nodes" && onSaveNodes && (
           <Button variant="outline" size="sm" className="ml-auto h-7 gap-1" disabled={!nodeList.length}
@@ -372,79 +355,199 @@ export function Ieee154Panel({
         </Button>
       </div>
 
+      {/* Nodes splits into the discovery table (Info) and the per-peer command
+          surface (Controls) — same sub-view pattern as Packets below. */}
+      {mode === "nodes" && (
+        <div className="flex items-center gap-1.5 text-xs">
+          <span className="text-muted-foreground">View</span>
+          <div className="flex overflow-hidden rounded border">
+            <button type="button"
+              className={`px-2.5 py-0.5 ${nodeView === "info" ? "bg-accent" : "hover:bg-accent/50"}`}
+              onClick={() => setNodeView("info")}>
+              Info
+            </button>
+            <button type="button"
+              className={`border-l px-2.5 py-0.5 ${nodeView === "controls" ? "bg-accent" : "hover:bg-accent/50"}`}
+              onClick={() => setNodeView("controls")}>
+              Controls
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Raw vs tshark-Decoded is a sub-view of the Packets stream, so it lives
+          here with the table rather than in the top Nodes/Packets menu. */}
+      {mode !== "nodes" && (
+        <div className="flex items-center gap-1.5 text-xs">
+          <span className="text-muted-foreground">View</span>
+          <div className="flex overflow-hidden rounded border">
+            <button type="button"
+              className={`px-2.5 py-0.5 ${mode === "packets" ? "bg-accent" : "hover:bg-accent/50"}`}
+              onClick={() => setPacketView("packets")}>
+              Raw
+            </button>
+            <button type="button"
+              className={`border-l px-2.5 py-0.5 ${mode === "decoded" ? "bg-accent" : "hover:bg-accent/50"}`}
+              onClick={() => { setPacketView("decoded"); if (canDecode && !decoded.length) runDecode(); }}>
+              Decoded
+            </button>
+          </div>
+
+          {/* view-specific controls travel with their sub-view */}
+          {mode === "packets" && (
+            <button type="button"
+              className={`rounded border px-2 py-0.5 ${group ? "bg-accent" : "hover:bg-accent/50"}`}
+              title="Collapse identical frames to the latest, with a count"
+              onClick={() => setGroup((g) => !g)}>
+              group identical
+            </button>
+          )}
+          {mode === "decoded" && canDecode && (
+            <>
+              <button type="button"
+                className="rounded border px-2 py-0.5 hover:bg-accent/50 disabled:opacity-50"
+                title="Re-run Wireshark dissection on the current capture"
+                disabled={decoding || !frames.length}
+                onClick={runDecode}>
+                {decoding ? "decoding…" : "↻ decode"}
+              </button>
+              <button type="button"
+                className={`rounded border px-2 py-0.5 ${live ? "bg-accent" : "hover:bg-accent/50"}`}
+                title="Auto re-decode as new frames arrive"
+                onClick={() => setLive((v) => !v)}>
+                live
+              </button>
+              <button type="button"
+                className={`rounded border px-2 py-0.5 ${hideNoise ? "bg-accent" : "hover:bg-accent/50"}`}
+                title="Hide Ack / Data Request / Link Status mesh + MAC chatter"
+                onClick={() => setHideNoise((v) => !v)}>
+                hide noise
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       <div ref={scrollRef} className="min-h-0 min-w-0 flex-1 overflow-auto rounded border">
         {mode === "nodes" ? (
-          <div className="flex flex-col gap-3 p-1">
-          <table className="w-full text-left font-mono text-xs">
-            <thead className="sticky top-0 bg-background text-muted-foreground">
-              <tr>
-                <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("addr")}>Address{arrow("addr")}</th>
-                <th className="px-2 py-1 font-normal">Role</th>
-                <th className="px-2 py-1 font-normal">PAN</th>
-                <th className="px-2 py-1 font-normal">Frame types</th>
-                <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("rssi")}>RSSI{arrow("rssi")}</th>
-                <th className="px-2 py-1 font-normal">Ch</th>
-                <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("count")}>#{arrow("count")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {nodeList.map((d) => (
-                <tr key={d.addr}
-                  className={`cursor-pointer select-none border-t ${selected.has(d.addr) ? "bg-primary/15" : "hover:bg-accent/40"}`}
-                  title="Filter the Packets view: click = this node · Ctrl/⌘+click = toggle · Shift+click = range"
-                  onClick={(e) => clickNode(e, d.addr)}>
-                  <td className="px-2 py-0.5">{d.addr}</td>
-                  <td className="px-2 py-0.5"><span className={roleClass(nodeRole(d))}>{nodeRole(d)}</span></td>
-                  <td className="px-2 py-0.5 text-muted-foreground">{[...d.pans].join(",") || "—"}</td>
-                  <td className="px-2 py-0.5 text-muted-foreground">{[...d.types].join(", ")}</td>
-                  <td className="px-2 py-0.5 tabular-nums">{d.rssi} dBm</td>
-                  <td className="px-2 py-0.5 text-muted-foreground">{[...d.channels].sort((a, b) => a - b).join(",")}</td>
-                  <td className="px-2 py-0.5 tabular-nums">{d.count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {/* Control: typed peers + cluster command buttons (from the network model). */}
-          {activeNet && onZclCommand && (
-            <div className="flex flex-col gap-1">
-              <div className="text-[11px] font-medium text-muted-foreground">
-                Control — peers on {activeNet.label || "network"}
-              </div>
-              <NetworkDevices net={activeNet} onCommand={onZclCommand} onRename={onRenameNode} attrs={attrs} />
+          nodeView === "controls" ? (
+            // Control: typed peers + cluster command buttons (from the network model).
+            <div className="p-1">
+              {activeNet && onZclCommand ? (
+                <NetworkDevices net={activeNet} onCommand={onZclCommand} onRename={onRenameNode} attrs={attrs} />
+              ) : (
+                <p className="p-1 text-[11px] text-muted-foreground">
+                  No controllable peers yet — set a network key and sniff (channel pinned) so nodes
+                  reveal their clusters.
+                </p>
+              )}
             </div>
-          )}
-          </div>
-        ) : mode === "packets" ? (
-          <table className="w-full text-left font-mono text-xs">
-            <thead className="sticky top-0 bg-background text-muted-foreground">
-              <tr>
-                {group && <th className="px-2 py-1 font-normal">#</th>}
-                <th className="px-2 py-1 font-normal">Ch</th>
-                <th className="px-2 py-1 font-normal">RSSI</th>
-                <th className="px-2 py-1 font-normal">Type</th>
-                <th className="px-2 py-1 font-normal">Src</th>
-                <th className="px-2 py-1 font-normal">Dst</th>
-                <th className="px-2 py-1 font-normal">Payload</th>
-              </tr>
-            </thead>
-            <tbody>
-              {packetRows.map(({ f, n }, i) => (
-                <tr key={group ? `${f.src}|${f.dst}|${f.type}|${f.payloadHex}` : i}
-                  className={`border-t ${f.tx ? "bg-primary/10" : ""}`}>
-                  {group && <td className="px-2 py-0.5 tabular-nums text-muted-foreground">{n}</td>}
-                  <td className="px-2 py-0.5 text-muted-foreground">{f.channel}</td>
-                  <td className="px-2 py-0.5 tabular-nums">{f.tx ? "TX" : f.rssi}</td>
-                  <td className="px-2 py-0.5 text-muted-foreground">
-                    {f.tx && <span className="mr-1 rounded bg-primary/20 px-1 text-[10px] text-primary">→ sent</span>}
-                    {f.type}
-                  </td>
-                  <td className="px-2 py-0.5">{f.src || "—"}</td>
-                  <td className="px-2 py-0.5">{f.dst || "—"}</td>
-                  <td className="whitespace-nowrap px-2 py-0.5 text-muted-foreground">{f.payloadHex}</td>
+          ) : (
+            <table className="w-full text-left font-mono text-xs">
+              <thead className="sticky top-0 bg-background text-muted-foreground">
+                <tr>
+                  <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("addr")}>Address{arrow("addr")}</th>
+                  <th className="px-2 py-1 font-normal">Role</th>
+                  <th className="px-2 py-1 font-normal">PAN</th>
+                  <th className="px-2 py-1 font-normal">Frame types</th>
+                  <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("rssi")}>RSSI{arrow("rssi")}</th>
+                  <th className="px-2 py-1 font-normal">Ch</th>
+                  <th className="cursor-pointer px-2 py-1 font-normal hover:text-foreground" onClick={() => toggleSort("count")}>#{arrow("count")}</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {nodeList.map((d) => (
+                  <tr key={d.addr}
+                    className={`cursor-pointer select-none border-t ${selected.has(d.addr) ? "bg-primary/15" : "hover:bg-accent/40"}`}
+                    title="Filter the Packets view: click = this node · Ctrl/⌘+click = toggle · Shift+click = range"
+                    onClick={(e) => clickNode(e, d.addr)}>
+                    <td className="px-2 py-0.5">{d.addr}</td>
+                    <td className="px-2 py-0.5"><span className={roleClass(nodeRole(d))}>{nodeRole(d)}</span></td>
+                    <td className="px-2 py-0.5 text-muted-foreground">{[...d.pans].join(",") || "—"}</td>
+                    <td className="px-2 py-0.5 text-muted-foreground">{[...d.types].join(", ")}</td>
+                    <td className="px-2 py-0.5 tabular-nums">{d.rssi} dBm</td>
+                    <td className="px-2 py-0.5 text-muted-foreground">{[...d.channels].sort((a, b) => a - b).join(",")}</td>
+                    <td className="px-2 py-0.5 tabular-nums">{d.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+        ) : mode === "packets" ? (
+          // Right-click any tagged cell ([data-filter]) to include/exclude its
+          // value. onContextMenuCapture runs before Radix opens, so ctxCell is set.
+          <ContextMenu>
+            <ContextMenuTrigger asChild>
+              <table className="w-full text-left font-mono text-xs"
+                onContextMenuCapture={(e) => {
+                  const el = (e.target as HTMLElement).closest<HTMLElement>("[data-filter]");
+                  setCtxCell({ key: el?.dataset.filterKey ?? "", value: el?.dataset.filter ?? "" });
+                }}>
+                <thead className="sticky top-0 z-10 bg-background text-muted-foreground">
+                  <tr>
+                    <th colSpan={group ? 7 : 6} className="p-1">
+                      <input
+                        className="h-6 w-full rounded border bg-transparent px-2 text-xs font-normal outline-none focus:border-primary"
+                        placeholder="filter src / dst / type / payload… (-term excludes)"
+                        value={pktFilter}
+                        spellCheck={false}
+                        onChange={(e) => setPktFilter(e.target.value)}
+                      />
+                    </th>
+                  </tr>
+                  <tr>
+                    {group && <th className="px-2 py-1 font-normal">#</th>}
+                    <th className="px-2 py-1 font-normal">Ch</th>
+                    <th className="px-2 py-1 font-normal">RSSI</th>
+                    <th className="px-2 py-1 font-normal">Type</th>
+                    <th className="px-2 py-1 font-normal">Src</th>
+                    <th className="px-2 py-1 font-normal">Dst</th>
+                    <th className="px-2 py-1 font-normal">Payload</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {packetRows.map(({ f, n }, i) => (
+                    <tr key={group ? `${f.src}|${f.dst}|${f.type}|${f.payloadHex}` : i}
+                      className={`border-t ${f.tx ? "bg-primary/10" : ""}`}>
+                      {group && <td className="px-2 py-0.5 tabular-nums text-muted-foreground">{n}</td>}
+                      <td data-filter={f.channel} data-filter-key="ch" className="px-2 py-0.5 text-muted-foreground">{f.channel}</td>
+                      <td className="px-2 py-0.5 tabular-nums">{f.tx ? "TX" : f.rssi}</td>
+                      <td data-filter={f.type} data-filter-key="type" className="px-2 py-0.5 text-muted-foreground">
+                        {f.tx && <span className="mr-1 rounded bg-primary/20 px-1 text-[10px] text-primary">→ sent</span>}
+                        {f.type}
+                      </td>
+                      <td data-filter={f.src} data-filter-key="src" className="px-2 py-0.5">{f.src || "—"}</td>
+                      <td data-filter={f.dst} data-filter-key="dst" className="px-2 py-0.5">{f.dst || "—"}</td>
+                      <td data-filter={f.payloadHex} data-filter-key="payload" className="whitespace-nowrap px-2 py-0.5 text-muted-foreground">{f.payloadHex}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              <ContextMenuItem disabled={!ctxCell.value}
+                onSelect={() => setPktFilter((q) => addFilterTerm(q, ctxCell.value, true))}>
+                Include “{ctxCell.value}”
+              </ContextMenuItem>
+              <ContextMenuItem disabled={!ctxCell.value}
+                onSelect={() => setPktFilter((q) => addFilterTerm(q, ctxCell.value, false))}>
+                Exclude “{ctxCell.value}”
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem disabled={!ctxCell.key}
+                onSelect={() => setPktFilter((q) => addFieldTerm(q, ctxCell.key, ctxCell.value, true))}>
+                {ctxCell.key || "field"} == “{ctxCell.value}”
+              </ContextMenuItem>
+              <ContextMenuItem disabled={!ctxCell.key}
+                onSelect={() => setPktFilter((q) => addFieldTerm(q, ctxCell.key, ctxCell.value, false))}>
+                {ctxCell.key || "field"} != “{ctxCell.value}”
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem disabled={!pktFilter} onSelect={() => setPktFilter("")}>
+                Clear filter
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         ) : (
           // Decoded: Wireshark (tshark) dissection of the capture — the real
           // upper-layer protocol (ZigBee/Thread/6LoWPAN/Matter) and a summary.
@@ -452,7 +555,18 @@ export function Ieee154Panel({
           <ContextMenu>
             <ContextMenuTrigger asChild>
               <table className="w-full text-left font-mono text-xs">
-                <thead className="sticky top-0 bg-background text-muted-foreground">
+                <thead className="sticky top-0 z-10 bg-background text-muted-foreground">
+                  <tr>
+                    <th colSpan={4} className="p-1">
+                      <input
+                        className="h-6 w-full rounded border bg-transparent px-2 text-xs font-normal outline-none focus:border-primary"
+                        placeholder="filter protocol / info…"
+                        value={decFilter}
+                        spellCheck={false}
+                        onChange={(e) => setDecFilter(e.target.value)}
+                      />
+                    </th>
+                  </tr>
                   <tr>
                     <th className="px-2 py-1 font-normal">#</th>
                     <th className="px-2 py-1 font-normal">Ch</th>
@@ -518,8 +632,13 @@ export function Ieee154Panel({
               <ContextMenuItem disabled={!ctxRow} onSelect={() => ctxRow && copyText(rowText(ctxRow))}>
                 Copy row
               </ContextMenuItem>
-              <ContextMenuItem disabled={!ctxRow} onSelect={() => ctxRow && setDecFilter(ctxRow.protocol)}>
-                Filter to “{ctxRow?.protocol}”
+              <ContextMenuItem disabled={!ctxRow}
+                onSelect={() => ctxRow && setDecFilter((q) => addFilterTerm(q, ctxRow.protocol, true))}>
+                Include “{ctxRow?.protocol}”
+              </ContextMenuItem>
+              <ContextMenuItem disabled={!ctxRow}
+                onSelect={() => ctxRow && setDecFilter((q) => addFilterTerm(q, ctxRow.protocol, false))}>
+                Exclude “{ctxRow?.protocol}”
               </ContextMenuItem>
               {onInject && (
                 <ContextMenuItem

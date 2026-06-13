@@ -1,19 +1,25 @@
-import { useEffect, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import {
-  Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth, Globe,
+  Usb, Plug, PlugZap, Play, Plus, Trash2, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth, Globe, ChevronDown, PanelRight,
   Radio, Activity, Terminal as TerminalIcon, FolderOpen, LayoutGrid,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { CodeTextarea } from "@/components/CodeTextarea";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuCheckboxItem, DropdownMenuSeparator, DropdownMenuSub,
+  DropdownMenuSubTrigger, DropdownMenuSubContent,
+} from "@/components/ui/dropdown-menu";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -22,6 +28,8 @@ import { MacroHelp } from "@/components/MacroHelp";
 import { MacroVars } from "@/components/MacroVars";
 import { clusterName } from "@/lib/zcl";
 import { RgbControl } from "@/components/RgbControl";
+import { WindowControls } from "@/components/WindowControls";
+import logoUrl from "../assets/logo.png";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { BleSnifferPanel } from "@/components/BleSnifferPanel";
@@ -85,6 +93,9 @@ import {
   listYantras,
   type YantraDoc,
   pickWorkspace,
+  setWorkspace as adoptWorkspace,
+  closeWorkspace as closeWorkspaceApi,
+  exportNetworks,
   rgbToHex,
   saveBlePcap,
   saveIeee154Pcap,
@@ -150,10 +161,12 @@ interface Settings {
   rememberLastPort: boolean;
   lastPort: string;
   tsharkPath: string; // optional override for Wireshark's tshark (empty = autodetect)
+  autoSave: boolean; // placeholder preference (not yet wired to a behavior)
   mcpTools: McpToolFlags;
 }
 const DEFAULT_SETTINGS: Settings = {
   autoStartMcp: false,
+  autoSave: false,
   mcpPort: 8551,
   rememberLastPort: true,
   lastPort: "auto",
@@ -206,12 +219,12 @@ const MCP_TOOL_OPTIONS: { key: keyof McpToolFlags; label: string; hint: string }
 ];
 
 // Sidebar sections for the settings view (replaces the old single-scroll modal).
-type SettingsTab = "mcp" | "connection" | "decode" | "tools";
+type SettingsTab = "general" | "mcp" | "connection" | "decode";
 const SETTINGS_SECTIONS: { id: SettingsTab; label: string; icon: typeof Bot }[] = [
-  { id: "mcp", label: "MCP server", icon: Bot },
+  { id: "general", label: "General", icon: Settings2 },
+  { id: "mcp", label: "MCP", icon: Bot },
   { id: "connection", label: "Connection", icon: Plug },
   { id: "decode", label: "Packet decode", icon: Radio },
-  { id: "tools", label: "MCP tools", icon: Settings2 },
 ];
 
 export default function App() {
@@ -286,6 +299,9 @@ export default function App() {
   const [draftKeyLabel, setDraftKeyLabel] = useState("");
   const [draftProtocol, setDraftProtocol] = useState(""); // "" = Zigbee, "thread" = Thread/Matter
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
+  const [recents, setRecents] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem("sutra.recentWorkspaces") || "[]"); } catch { return []; }
+  });
   const [i2cDefs, setI2cDefs] = useState<I2cDef[]>([]); // i2c device definitions from .sutra/i2c
   const [i2cPresent, setI2cPresent] = useState<Set<number>>(new Set()); // addresses seen in the last scan
   const [macros, setMacros] = useState<MacroRec[]>([]);
@@ -298,7 +314,33 @@ export default function App() {
   const [mcp, setMcp] = useState<McpStatus>({ running: false, url: null });
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("mcp");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [rightBarOpen, setRightBarOpen] = useState(() => localStorage.getItem("sutra.rightBar") !== "0");
+  const [rightBarWidth, setRightBarWidth] = useState(() => +(localStorage.getItem("sutra.rightBarWidth") || 320));
+  const resizingBar = useRef(false);
+  function toggleRightBar() {
+    setRightBarOpen((v) => {
+      const next = !v;
+      localStorage.setItem("sutra.rightBar", next ? "1" : "0");
+      return next;
+    });
+  }
+  // Drag the panel's left edge to resize. Width = panel's right inner edge
+  // (viewport minus the p-3 padding) minus the cursor x. Clamped + persisted.
+  function startBarResize(e: ReactPointerEvent) {
+    resizingBar.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+  function onBarResize(e: ReactPointerEvent) {
+    if (!resizingBar.current) return;
+    const w = Math.min(640, Math.max(240, window.innerWidth - 12 - e.clientX));
+    setRightBarWidth(w);
+  }
+  function endBarResize(e: ReactPointerEvent) {
+    resizingBar.current = false;
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
+    localStorage.setItem("sutra.rightBarWidth", String(rightBarWidth));
+  }
   const setSetting = <K extends keyof Settings>(k: K, v: Settings[K]) =>
     setSettings((s) => ({ ...s, [k]: v }));
 
@@ -851,19 +893,84 @@ export default function App() {
     }
   }
 
+  function rememberRecent(path: string) {
+    setRecents((r) => {
+      const next = [path, ...r.filter((p) => p !== path)].slice(0, 6);
+      localStorage.setItem("sutra.recentWorkspaces", JSON.stringify(next));
+      return next;
+    });
+  }
+  function forgetRecent(path: string) {
+    setRecents((r) => {
+      const next = r.filter((p) => p !== path);
+      localStorage.setItem("sutra.recentWorkspaces", JSON.stringify(next));
+      return next;
+    });
+  }
+  // Adopt a workspace (or clear it with null) and re-point everything that reads
+  // from .sutra/ (macros, i2c defs, yantra; the network model reloads via effect).
+  function applyWorkspace(path: string | null) {
+    setWorkspace(path);
+    if (path) rememberRecent(path);
+    macrosGet().then(setMacros).catch(() => {});
+    listI2cDefs().then(setI2cDefs).catch(() => {});
+    listYantras().then(setYantras).catch(() => {});
+  }
+
   /** Choose the workspace folder (.sutra/ for macros + captures). */
   async function chooseWorkspace() {
     try {
       const path = await pickWorkspace();
       if (path) {
-        setWorkspace(path);
-        macrosGet().then(setMacros).catch(() => {}); // store re-pointed into .sutra
-        listI2cDefs().then(setI2cDefs).catch(() => {}); // defs from the new .sutra/i2c
-        listYantras().then(setYantras).catch(() => {}); // control surfaces from .sutra/yantra
+        applyWorkspace(path);
         setStatus(`workspace: ${path}`);
       }
     } catch (e) {
       setStatus(`workspace failed: ${e}`);
+    }
+  }
+
+  /** Open a previously-used workspace by path (Open Recent). */
+  async function openRecent(path: string) {
+    try {
+      const set = await adoptWorkspace(path);
+      applyWorkspace(set);
+      setStatus(`workspace: ${set}`);
+    } catch (e) {
+      setStatus(`open recent failed: ${e}`);
+      forgetRecent(path); // path likely gone — drop it from the list
+    }
+  }
+
+  /** Forget the workspace; macros fall back to the app data dir. */
+  async function doCloseWorkspace() {
+    try {
+      await closeWorkspaceApi();
+      applyWorkspace(null);
+      setStatus("workspace closed");
+    } catch (e) {
+      setStatus(`close workspace failed: ${e}`);
+    }
+  }
+
+  /** Export the current capture as a pcap — whichever medium has frames. */
+  function exportCapturePcap() {
+    if (ieee154Frames.length) return saveIeee154();
+    if (blePackets.length) return saveSniffPcap();
+  }
+
+  /** Export the discovered-nodes network model to a JSON file. */
+  async function exportNodes() {
+    const path = await save({
+      defaultPath: "networks.json",
+      filters: [{ name: "Network model", extensions: ["json"] }],
+    });
+    if (!path) return;
+    try {
+      await exportNetworks(path);
+      setStatus(`exported network model → ${path}`);
+    } catch (e) {
+      setStatus(`export nodes failed: ${e}`);
     }
   }
 
@@ -1063,9 +1170,97 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
-      <header className="flex items-center gap-3 border-b px-4 py-2.5">
-        <Cpu className="size-5 text-primary" />
-        <span className="font-semibold tracking-tight">Sutra</span>
+      {/* title bar: app identity + status on the left, our own window controls on
+          the right (the window is frameless). The strip is a drag region. */}
+      <div data-tauri-drag-region className="relative flex h-9 items-center gap-2.5 border-b px-3">
+        {/* workspace name, centered — display only (open/close live in the Sutra menu);
+            hover shows the full path. Keep it a drag region so the center still drags. */}
+        <span
+          data-tauri-drag-region
+          title={workspace ?? "No workspace selected"}
+          className="absolute left-1/2 max-w-[40%] -translate-x-1/2 cursor-default truncate text-xs text-muted-foreground"
+        >
+          {workspace ? workspace.split(/[/\\]/).pop() : "No workspace"}
+        </span>
+        {/* app name → Sutra menu (workspace, import/export, preferences, exit) */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className="-mx-1 flex items-center gap-2 rounded px-1 py-0.5 hover:bg-accent"
+              title="Sutra menu"
+            >
+              <img src={logoUrl} alt="Sutra" className="size-5 object-contain" draggable={false} />
+              <span className="font-semibold tracking-tight">Sutra</span>
+              <ChevronDown className="size-3 text-muted-foreground" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
+            <DropdownMenuItem onSelect={chooseWorkspace}>
+              <FolderOpen className="size-3.5" /> Open workspace…
+            </DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger disabled={recents.length === 0}>
+                <FolderOpen className="size-3.5" /> Open Recent
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                {recents.map((p) => (
+                  <DropdownMenuItem key={p} onSelect={() => openRecent(p)} title={p}>
+                    <span className="truncate">{p.split(/[/\\]/).pop()}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuItem disabled={!workspace} onSelect={doCloseWorkspace}>
+              <X className="size-3.5" /> Close workspace
+            </DropdownMenuItem>
+
+            <DropdownMenuSeparator />
+
+            {/* Import — only what's actually importable today (macro sets) */}
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Upload className="size-3.5" /> Import
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuItem onSelect={doImport}>Macros…</DropdownMenuItem>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            {/* Export — show only the kinds we currently have data for */}
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Download className="size-3.5" /> Export
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuItem onSelect={doExport}>Macros…</DropdownMenuItem>
+                {(ieee154Frames.length > 0 || blePackets.length > 0) && (
+                  <DropdownMenuItem onSelect={exportCapturePcap}>Capture (.pcap)…</DropdownMenuItem>
+                )}
+                {ieee154Frames.length > 0 && (
+                  <DropdownMenuItem onSelect={exportNodes}>Nodes…</DropdownMenuItem>
+                )}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+
+            <DropdownMenuSeparator />
+
+            <DropdownMenuCheckboxItem
+              checked={settings.autoSave}
+              onCheckedChange={(v) => setSetting("autoSave", v)}
+            >
+              Auto-save
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
+              <Cog className="size-3.5" /> Preferences
+            </DropdownMenuItem>
+
+            <DropdownMenuSeparator />
+
+            <DropdownMenuItem onSelect={() => getCurrentWindow().close()}>
+              <X className="size-3.5" /> Exit
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Badge
           variant={!connected ? "secondary" : linkOnline ? "success" : "destructive"}
           className="ml-1"
@@ -1073,59 +1268,13 @@ export default function App() {
           {!connected ? "offline" : linkOnline ? "online" : "target offline"}
         </Badge>
         {deviceName && <span className="text-xs text-muted-foreground">· {deviceName}</span>}
+        <div className="ml-auto -mr-3 flex h-full items-stretch">
+          <WindowControls />
+        </div>
+      </div>
 
-        {/* workspace folder (macros + captures land in its .sutra/) */}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="ml-1 h-7 max-w-[14rem] gap-1.5 text-muted-foreground"
-          title={workspace ? `Workspace: ${workspace}\nMacros + captures save to .sutra/` : "Choose a workspace folder (.sutra/ for macros + captures)"}
-          onClick={chooseWorkspace}
-        >
-          <FolderOpen className="size-3.5 shrink-0" />
-          <span className="truncate">{workspace ? workspace.split(/[/\\]/).pop() : "No workspace"}</span>
-        </Button>
-
-        {/* MCP settings popover */}
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button variant="outline" size="sm" className="gap-1.5">
-              <Bot className="size-3.5" /> MCP
-              <span className={cn("size-1.5 rounded-full", mcp.running ? "bg-success" : "bg-muted-foreground/40")} />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent align="start" className="w-80">
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-2">
-                <Bot className="size-4" />
-                <span className="text-sm font-semibold">MCP server</span>
-                <Badge variant={mcp.running ? "success" : "secondary"} className="ml-auto">
-                  {mcp.running ? "on" : "off"}
-                </Badge>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">Port</span>
-                <Input type="number" className="h-8 w-24" value={settings.mcpPort} disabled={mcp.running} onChange={(e) => setSetting("mcpPort", +e.target.value)} />
-                <Button size="sm" className="ml-auto" variant={mcp.running ? "destructive" : "default"} onClick={toggleMcp}>
-                  {mcp.running ? "Stop" : "Start"}
-                </Button>
-              </div>
-              {mcp.url && (
-                <div className="flex items-center gap-1 rounded-md border px-2 py-1">
-                  <code className="min-w-0 flex-1 truncate text-[11px]">{mcp.url}</code>
-                  <Button variant="ghost" size="icon" className="size-6" title="Copy URL" onClick={() => mcp.url && navigator.clipboard.writeText(mcp.url)}>
-                    <Copy />
-                  </Button>
-                </div>
-              )}
-              <p className="text-[10px] leading-tight text-muted-foreground">
-                Lets an LLM read the console, run/author macros &amp; control outputs. Macro
-                contents (secrets) are never exposed; it can only run them by name.
-              </p>
-            </div>
-          </PopoverContent>
-        </Popover>
-
+      {/* toolbar strip: connection + tool controls, beneath the title bar */}
+      <header className="flex items-center gap-3 border-b px-4 py-2">
         {/* DATA serial settings popover */}
         <Popover>
           <PopoverTrigger asChild>
@@ -1276,8 +1425,6 @@ export default function App() {
           </PopoverContent>
         </Popover>
 
-        <span className="ml-1 truncate text-xs text-muted-foreground">{status}</span>
-
         <div className="ml-auto flex items-center gap-2">
           <Select value={selectedPort} onValueChange={setSelectedPort} disabled={connected}>
             <SelectTrigger className="w-44" title="Port to connect">
@@ -1382,8 +1529,14 @@ export default function App() {
               <Plug /> Connect
             </Button>
           )}
-          <Button variant="ghost" size="icon" className="size-8" title="Settings" onClick={() => setSettingsOpen(true)}>
-            <Cog />
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn("size-8", rightBarOpen && "text-primary")}
+            title={rightBarOpen ? "Hide panel" : "Show panel"}
+            onClick={toggleRightBar}
+          >
+            <PanelRight />
           </Button>
         </div>
       </header>
@@ -1520,7 +1673,17 @@ export default function App() {
           </CardContent>
         </Card>
 
-        <div className="flex w-80 shrink-0 flex-col gap-3 overflow-y-auto">
+        {rightBarOpen && (
+        <>
+        {/* drag the panel's left edge to resize */}
+        <div
+          onPointerDown={startBarResize}
+          onPointerMove={onBarResize}
+          onPointerUp={endBarResize}
+          title="Drag to resize"
+          className="-mx-1 w-1.5 shrink-0 cursor-col-resize rounded bg-transparent hover:bg-border"
+        />
+        <div style={{ width: rightBarWidth }} className="flex shrink-0 flex-col gap-3 overflow-y-auto">
           {/* controls: self-described by the device */}
           <Card>
             <CardHeader className="flex-row flex-wrap items-center gap-y-1.5 py-3">
@@ -1696,13 +1859,7 @@ export default function App() {
             <CardHeader className="flex-col items-stretch gap-2 py-3">
               <div className="flex items-center gap-1">
                 <CardTitle>Macros</CardTitle>
-                <Button size="icon" variant="ghost" className="ml-auto size-7" title="Import a set (.json)" onClick={doImport}>
-                  <Upload />
-                </Button>
-                <Button size="icon" variant="ghost" className="size-7" title="Export this set (.json)" onClick={doExport}>
-                  <Download />
-                </Button>
-                <Button size="icon" variant="ghost" className="size-7" title="New macro" onClick={openAdd}>
+                <Button size="icon" variant="ghost" className="ml-auto size-7" title="New macro" onClick={openAdd}>
                   <Plus />
                 </Button>
               </div>
@@ -1813,7 +1970,67 @@ export default function App() {
             </CardContent>
           </Card>
         </div>
+        </>
+        )}
       </div>
+
+      {/* status bar (VS Code-style): connection + data info on the left, the MCP
+          server control + macro count on the right. */}
+      <footer className="flex h-6 shrink-0 items-center gap-3 border-t bg-card px-3 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <span className={cn("size-1.5 rounded-full", !connected ? "bg-muted-foreground/40" : linkOnline ? "bg-success" : "bg-destructive")} />
+          {!connected ? "Disconnected" : linkOnline ? "Online" : "Target offline"}
+        </span>
+        {connected && dataPort && <span className="truncate">{dataPort}</span>}
+        {connected && dataDesc?.kind === DATA_KIND.UART && (
+          <span>{baud} 8{parity[0].toUpperCase()}{stopBits}</span>
+        )}
+        {connected && dataDesc?.kind === DATA_KIND.IEEE802154 && (
+          <span>802.15.4 · {ch154 ? `ch ${ch154}` : "hop"}</span>
+        )}
+        <span className="truncate">{status}</span>
+
+        {/* MCP server — relocated here as a clickable status item */}
+        <Popover>
+          <PopoverTrigger asChild>
+            <button type="button" className="ml-auto flex items-center gap-1.5 rounded px-1.5 hover:bg-accent hover:text-foreground" title="MCP server">
+              <Bot className="size-3" /> MCP
+              <span className={cn("size-1.5 rounded-full", mcp.running ? "bg-success" : "bg-muted-foreground/40")} />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="end" side="top" className="w-80">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Bot className="size-4" />
+                <span className="text-sm font-semibold">MCP server</span>
+                <Badge variant={mcp.running ? "success" : "secondary"} className="ml-auto">
+                  {mcp.running ? "on" : "off"}
+                </Badge>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">Port</span>
+                <Input type="number" className="h-8 w-24" value={settings.mcpPort} disabled={mcp.running} onChange={(e) => setSetting("mcpPort", +e.target.value)} />
+                <Button size="sm" className="ml-auto" variant={mcp.running ? "destructive" : "default"} onClick={toggleMcp}>
+                  {mcp.running ? "Stop" : "Start"}
+                </Button>
+              </div>
+              {mcp.url && (
+                <div className="flex items-center gap-1 rounded-md border px-2 py-1">
+                  <code className="min-w-0 flex-1 truncate text-[11px]">{mcp.url}</code>
+                  <Button variant="ghost" size="icon" className="size-6" title="Copy URL" onClick={() => mcp.url && navigator.clipboard.writeText(mcp.url)}>
+                    <Copy />
+                  </Button>
+                </div>
+              )}
+              <p className="text-[10px] leading-tight text-muted-foreground">
+                Lets an LLM read the console, run/author macros &amp; control outputs. Macro
+                contents (secrets) are never exposed; it can only run them by name.
+              </p>
+            </div>
+          </PopoverContent>
+        </Popover>
+        <span>{macros.length} macro{macros.length === 1 ? "" : "s"}</span>
+      </footer>
 
       {/* Configure-device (runtime IO provisioning) modal */}
       <ConfigureDevice
@@ -1937,7 +2154,7 @@ export default function App() {
 
       {/* add / edit macro modal */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className={cn(showHelp && "max-w-3xl")}>
+        <DialogContent className={cn("w-[92vw] sm:max-w-2xl lg:max-w-4xl", showHelp && "lg:max-w-6xl")}>
           <DialogHeader>
             <div className="flex items-center gap-2">
               <DialogTitle>{editOrig ? "Edit macro" : "New macro"}</DialogTitle>
@@ -1970,12 +2187,12 @@ export default function App() {
                   ))}
                 </datalist>
               </div>
-              <Textarea
+              <CodeTextarea
                 ref={macroTextRef}
                 placeholder={"login\nDELAY 1000\nSTRING whoami\nENTER"}
                 value={draftText}
                 onChange={(e) => setDraftText(e.target.value)}
-                className="h-44 resize-none font-mono text-xs"
+                className="h-44"
               />
               <MacroColorStrip text={draftText} onChange={setDraftText} />
               <MacroVars onInsert={insertMacroVar} active={networks.find((n) => n.key.trim()) ?? networks[0]} />
@@ -2010,7 +2227,8 @@ export default function App() {
 
       {/* settings view — a full-screen pane with a section sidebar (not a modal) */}
       {settingsOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-background text-foreground">
+        // start below the title bar (h-9) so the window controls stay reachable
+        <div className="fixed inset-x-0 bottom-0 top-9 z-50 flex flex-col bg-background text-foreground">
           <header className="flex items-center gap-3 border-b px-4 py-2.5">
             <Cog className="size-5 text-primary" />
             <span className="font-semibold tracking-tight">Settings</span>
@@ -2048,31 +2266,86 @@ export default function App() {
             {/* section content */}
             <div className="min-w-0 flex-1 overflow-auto p-6">
               <div className="mx-auto flex max-w-2xl flex-col gap-4">
-                {settingsTab === "mcp" && (
-                  <div className="flex flex-col gap-3">
-                    <div className="text-sm font-semibold">MCP server</div>
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-sm">Auto-start on launch</div>
-                        <div className="text-[11px] text-muted-foreground">
-                          Start the MCP server automatically when the app opens.
+                {settingsTab === "general" && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm">Workspace</CardTitle>
+                    </CardHeader>
+                    <CardContent className="flex flex-col gap-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm">Workspace folder</div>
+                          <div className="truncate text-[11px] text-muted-foreground">
+                            {workspace ?? "None selected"}
+                          </div>
                         </div>
+                        <Button variant="outline" size="sm" className="shrink-0 gap-1.5" onClick={chooseWorkspace}>
+                          <FolderOpen className="size-3.5" /> Change…
+                        </Button>
                       </div>
-                      <Switch
-                        checked={settings.autoStartMcp}
-                        onCheckedChange={(v) => setSetting("autoStartMcp", v)}
-                      />
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm">Port</div>
-                      <Input
-                        type="number"
-                        className="h-8 w-24"
-                        value={settings.mcpPort}
-                        onChange={(e) => setSetting("mcpPort", +e.target.value)}
-                      />
-                    </div>
-                  </div>
+                      <p className="text-[10px] leading-tight text-muted-foreground">
+                        Macros, captures, and network keys are saved under the workspace's{" "}
+                        <code>.sutra/</code> folder.
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {settingsTab === "mcp" && (
+                  <>
+                    <Card>
+                      <CardHeader className="pb-3">
+                        <CardTitle className="text-sm">MCP server</CardTitle>
+                      </CardHeader>
+                      <CardContent className="flex flex-col gap-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm">Auto-start on launch</div>
+                            <div className="text-[11px] text-muted-foreground">
+                              Start the MCP server automatically when the app opens.
+                            </div>
+                          </div>
+                          <Switch
+                            checked={settings.autoStartMcp}
+                            onCheckedChange={(v) => setSetting("autoStartMcp", v)}
+                          />
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm">Port</div>
+                          <Input
+                            type="number"
+                            className="h-8 w-24"
+                            value={settings.mcpPort}
+                            onChange={(e) => setSetting("mcpPort", +e.target.value)}
+                          />
+                        </div>
+                      </CardContent>
+                    </Card>
+
+                    <Card>
+                      <CardHeader className="pb-3">
+                        <CardTitle className="text-sm">Tools exposed to the LLM</CardTitle>
+                      </CardHeader>
+                      <CardContent className="flex flex-col gap-3">
+                        {MCP_TOOL_OPTIONS.map((o) => (
+                          <div key={o.key} className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-sm">{o.label}</div>
+                              <div className="font-mono text-[10px] text-muted-foreground">{o.hint}</div>
+                            </div>
+                            <Switch
+                              checked={settings.mcpTools[o.key]}
+                              onCheckedChange={(v) => setToolFlag(o.key, v)}
+                            />
+                          </div>
+                        ))}
+                        <p className="text-[10px] leading-tight text-muted-foreground">
+                          Disabled tools are hidden from the model entirely. Changing these restarts a
+                          running MCP server.
+                        </p>
+                      </CardContent>
+                    </Card>
+                  </>
                 )}
 
                 {settingsTab === "connection" && (
@@ -2185,27 +2458,6 @@ export default function App() {
                   </div>
                 )}
 
-                {settingsTab === "tools" && (
-                  <div className="flex flex-col gap-3">
-                    <div className="text-sm font-semibold">MCP tools exposed to the LLM</div>
-                    {MCP_TOOL_OPTIONS.map((o) => (
-                      <div key={o.key} className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="text-sm">{o.label}</div>
-                          <div className="font-mono text-[10px] text-muted-foreground">{o.hint}</div>
-                        </div>
-                        <Switch
-                          checked={settings.mcpTools[o.key]}
-                          onCheckedChange={(v) => setToolFlag(o.key, v)}
-                        />
-                      </div>
-                    ))}
-                    <p className="text-[10px] leading-tight text-muted-foreground">
-                      Disabled tools are hidden from the model entirely. Changing these restarts a running
-                      MCP server.
-                    </p>
-                  </div>
-                )}
               </div>
             </div>
           </div>

@@ -1,9 +1,9 @@
 // Controls panel widget for an rgb (addressable-LED) output. A single-pixel
 // output shows one swatch; a strip shows a swatch per pixel plus a "fill all".
 // Each swatch opens the color picker.
-import { ColorField } from "@/components/ColorField";
+import { ColorField, ledSwatchStyle } from "@/components/ColorField";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { type Rgb, rgbToHex } from "@/lib/skrit";
+import type { Rgb } from "@/lib/skrit";
 
 function Swatch({
   color,
@@ -25,7 +25,7 @@ function Swatch({
           title={label ? `Pixel ${label}` : "Color"}
           className="flex items-center gap-1 rounded border px-1.5 py-1 hover:bg-accent disabled:opacity-50"
         >
-          <span className="size-4 rounded-sm border" style={{ backgroundColor: rgbToHex(color) }} />
+          <span className="size-4 rounded-sm border" style={ledSwatchStyle(color)} />
           {label !== undefined && <span className="text-[10px] text-muted-foreground">{label}</span>}
         </button>
       </PopoverTrigger>
