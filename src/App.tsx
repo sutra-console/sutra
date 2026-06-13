@@ -277,6 +277,7 @@ export default function App() {
   const [attrs, setAttrs] = useState<Record<string, AttrObs>>({}); // live ZCL attribute values, keyed addr|ep|cluster|attr
   const [draftKey, setDraftKey] = useState("");
   const [draftKeyLabel, setDraftKeyLabel] = useState("");
+  const [draftProtocol, setDraftProtocol] = useState(""); // "" = Zigbee, "thread" = Thread/Matter
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
   const [i2cDefs, setI2cDefs] = useState<I2cDef[]>([]); // i2c device definitions from .sutra/i2c
   const [i2cPresent, setI2cPresent] = useState<Set<number>>(new Set()); // addresses seen in the last scan
@@ -799,13 +800,18 @@ export default function App() {
     // If we already discovered a network passively (a keyless PAN entry), drop the
     // key onto it — sniff → Save nodes → paste key lights up decryption in place.
     const label = draftKeyLabel.trim();
-    const keyless = networks.findIndex((n) => !n.key.trim());
+    // A Thread key starts a fresh network; a Zigbee key can drop onto a keyless
+    // PAN we discovered passively (sniff → Save nodes → paste key lights it up).
+    const keyless = draftProtocol === "thread" ? -1 : networks.findIndex((n) => !n.key.trim());
     if (keyless >= 0) {
       saveNetworks(networks.map((n, i) => (i === keyless ? { ...n, key, label: label || n.label } : n)));
     } else {
       saveNetworks([
         ...networks,
-        { label: label || `network ${networks.length + 1}`, key, pan: "", channel: 0, nodes: [] },
+        {
+          label: label || (draftProtocol === "thread" ? "thread" : `network ${networks.length + 1}`),
+          key, pan: "", channel: 0, protocol: draftProtocol, nodes: [],
+        },
       ]);
     }
     setDraftKey("");
@@ -2091,6 +2097,9 @@ export default function App() {
                     {networks.map((net, i) => (
                       <div key={i} className="flex items-center gap-2">
                         <span className="min-w-0 flex-1 truncate text-xs">
+                          {net.protocol === "thread" && (
+                            <span className="mr-1 rounded bg-accent px-1 text-[10px]">Thread</span>
+                          )}
                           <span className="text-muted-foreground">{net.label}</span>{" "}
                           {net.key
                             ? <span className="font-mono">{net.key.slice(0, 8)}…</span>
@@ -2106,9 +2115,16 @@ export default function App() {
                       </div>
                     ))}
                     <div className="flex items-center gap-1">
-                      <Input className="h-8 w-24 text-xs" placeholder="label"
+                      <button type="button"
+                        className="h-8 shrink-0 rounded border px-2 text-[11px] hover:bg-accent"
+                        title="Which protocol this key decrypts (Thread = Matter-over-Thread)"
+                        onClick={() => setDraftProtocol(draftProtocol === "thread" ? "" : "thread")}>
+                        {draftProtocol === "thread" ? "Thread" : "Zigbee"}
+                      </button>
+                      <Input className="h-8 w-20 text-xs" placeholder="label"
                         value={draftKeyLabel} onChange={(e) => setDraftKeyLabel(e.target.value)} />
-                      <Input className="h-8 min-w-0 flex-1 font-mono text-xs" placeholder="key: hex or 16-byte array"
+                      <Input className="h-8 min-w-0 flex-1 font-mono text-xs"
+                        placeholder={draftProtocol === "thread" ? "Thread network key (32 hex)" : "key: hex or 16-byte array"}
                         value={draftKey} spellCheck={false} onChange={(e) => setDraftKey(e.target.value)}
                         onKeyDown={(e) => e.key === "Enter" && addNetwork()} />
                       <Button size="sm" className="h-8" disabled={!workspace} onClick={addNetwork} title="Add network key">

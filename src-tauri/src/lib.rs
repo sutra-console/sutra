@@ -260,10 +260,7 @@ fn dissect_ieee154(
     records: Vec<Vec<u8>>,
     tshark_path: Option<String>,
 ) -> Result<Vec<workspace::DecodedRow>, String> {
-    let keys = workspace::dissect_keys(&app)
-        .into_iter()
-        .map(|k| (k.key, k.label))
-        .collect();
+    let keys = workspace::dissect_keys(&app); // (key, label, protocol) — Zigbee or Thread
     workspace::dissect_ieee154(records, tshark_path, keys)
 }
 

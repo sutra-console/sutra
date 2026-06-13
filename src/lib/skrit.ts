@@ -165,6 +165,7 @@ export interface Network {
   pan: string; // "0x39fd" or ""
   channel: number; // 0 = unknown
   key: string; // network/TC key, 32 hex (decryption)
+  protocol?: string; // "" / "zigbee" (default) or "thread" — picks the tshark key table
   nodes: NetNode[];
 }
 export interface Networks {

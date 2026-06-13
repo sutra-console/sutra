@@ -290,6 +290,8 @@ pub struct Network {
     #[serde(default)]
     pub key: String,              // network/trust-center key, 32 hex (decryption)
     #[serde(default)]
+    pub protocol: String,         // "" / "zigbee" (default) or "thread" — picks the tshark key table
+    #[serde(default)]
     pub nodes: Vec<NetNode>,
     // -- host-side injector state (phase B): when Sutra builds + transmits
     //    encrypted frames it acts as a member with its OWN identity. Persisted so
@@ -359,16 +361,16 @@ pub fn save_networks(app: &AppHandle, nets: &Networks) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
-/// The (key, label) pairs to hand tshark for decryption â€” every network that has
-/// a key set. This is what the network model unlocks.
-pub fn dissect_keys(app: &AppHandle) -> Vec<ZigbeeKey> {
+/// The (key, label, protocol) tuples to hand tshark for decryption — every
+/// network that has a key. Protocol picks the tshark key table (Zigbee vs Thread).
+pub fn dissect_keys(app: &AppHandle) -> Vec<(String, String, String)> {
     load_networks(app)
         .networks
         .into_iter()
         .filter(|n| !n.key.trim().is_empty())
-        .map(|n| ZigbeeKey {
-            key: n.key,
-            label: if n.label.is_empty() { n.pan } else { n.label },
+        .map(|n| {
+            let label = if n.label.is_empty() { n.pan.clone() } else { n.label.clone() };
+            (n.key, label, n.protocol)
         })
         .collect()
 }
@@ -429,10 +431,12 @@ pub struct DecodedRow {
 /// whether the payload is encrypted (most Zigbee is, so only the NWK header shows
 /// unless a network key is configured).
 const FIELD_WHITELIST: &[&str] = &[
-    "wpan.src16", "wpan.dst16", "wpan.dst_pan",
+    "wpan.src16", "wpan.dst16", "wpan.dst_pan", "wpan.src64", "wpan.dst64",
     "zbee_nwk.src", "zbee_nwk.dst", "zbee_nwk.radius", "zbee_nwk.seqno", "zbee_nwk.cmd",
     "zbee_aps.cluster", "zbee_aps.profile", "zbee_aps.src", "zbee_aps.dst", "zbee_aps.cmd",
-    "zbee_zcl.cmd.id", "zbee_zcl.attr.id", "coap.code", "coap.mid", "mle.cmd",
+    "zbee_zcl.cmd.id", "zbee_zcl.attr.id",
+    // Thread / Matter (Matter-over-Thread = 6LoWPAN · IPv6 · UDP · CoAP/Matter)
+    "mle.cmd", "coap.code", "coap.mid", "coap.token", "ipv6.src", "ipv6.dst", "udp.port",
 ];
 
 /// A Zigbee key as a tshark `uat:zigbee_pc_keys` preference (Key, Byte Order,
@@ -441,6 +445,13 @@ const FIELD_WHITELIST: &[&str] = &[
 fn zigbee_key_pref(key: &str, label: &str) -> String {
     let label = label.replace(['"', ','], " ");
     format!("uat:zigbee_pc_keys:\"{}\",\"Normal\",\"{}\"", key.trim(), label)
+}
+
+/// A Thread network (master) key as a tshark `uat:ieee802154_keys` entry with
+/// "Thread hash" — Wireshark derives the rotating MAC keys from it. Paired with
+/// thr_auto_acq_thr_seq_ctr so the key-sequence counter is picked up from MLE.
+fn thread_key_pref(key: &str) -> String {
+    format!("uat:ieee802154_keys:\"{}\",\"0\",\"Thread hash\"", key.trim())
 }
 
 /// Whether tshark is reachable (gates/loads the Decode action in the UI).
@@ -485,7 +496,7 @@ fn tshark_columns(
 pub fn dissect_ieee154(
     records: Vec<Vec<u8>>,
     tshark_path: Option<String>,
-    keys: Vec<(String, String)>,
+    keys: Vec<(String, String, String)>, // (hex key, label, protocol: ""/zigbee or thread)
 ) -> Result<Vec<DecodedRow>, String> {
     if records.is_empty() {
         return Ok(vec![]);
@@ -499,11 +510,22 @@ pub fn dissect_ieee154(
     std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
     let tmp_str = tmp.to_string_lossy().into_owned();
 
-    let key_prefs: Vec<String> = keys
+    let mut key_prefs: Vec<String> = keys
         .iter()
-        .filter(|(k, _)| !k.trim().is_empty())
-        .map(|(k, l)| zigbee_key_pref(k, l))
+        .filter(|(k, _, _)| !k.trim().is_empty())
+        .map(|(k, l, proto)| {
+            if proto.eq_ignore_ascii_case("thread") {
+                thread_key_pref(k)
+            } else {
+                zigbee_key_pref(k, l)
+            }
+        })
         .collect();
+    // Thread derives its MAC keys from a rotating sequence counter — let tshark
+    // auto-acquire it from MLE so the derived keys line up with the traffic.
+    if keys.iter().any(|(k, _, p)| !k.trim().is_empty() && p.eq_ignore_ascii_case("thread")) {
+        key_prefs.push("thread.thr_auto_acq_thr_seq_ctr:TRUE".to_string());
+    }
 
     // Field tree (rtshark), decrypted when a key matches. PATH points at the
     // resolved Wireshark dir so a non-PATH install + its DLLs both resolve.
@@ -601,7 +623,7 @@ mod tests {
 
         // A Zigbee key must be ACCEPTED by tshark (format check) even if it doesn't
         // decrypt this frame â€” a bad -o would make tshark exit non-zero -> Err.
-        let key = ("5A6967426565416C6C69616E63653039".to_string(), "ZLL".to_string());
+        let key = ("5A6967426565416C6C69616E63653039".to_string(), "ZLL".to_string(), String::new());
         match dissect_ieee154(vec![rec], None, vec![key]) {
             Ok(r) => eprintln!("with-key ok: protocol={} summary={}", r[0].protocol, r[0].summary),
             Err(e) => panic!("tshark rejected the zigbee key preference: {e}"),
