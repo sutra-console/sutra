@@ -245,6 +245,25 @@ export function YantraEditor({
   };
   const absRect = (n: Node & { tab?: string; frame?: string; parent?: string }): Rect =>
     relRect(n, contentBox(parentKeyOf(n)));
+
+  // Which container a canvas point lands in (innermost wins) — for drag-to-reparent.
+  // Candidates: root, every visible frame, and each visible tabs widget's ACTIVE pane.
+  const dropTarget = (cx: number, cy: number, cur: string): string => {
+    const cands: { key: string; box: Rect }[] = [{ key: "root", box: contentBox("root") }];
+    for (const f of frames) if (!frameHidden(f)) cands.push({ key: f.id, box: contentBox(f.id) });
+    widgets.forEach((w, i) => {
+      if (w.type === "tabs" && !paneHidden(w)) {
+        const a = activeTab[i] ?? w.tabs?.[0]?.id;
+        if (a) cands.push({ key: a, box: contentBox(a) });
+      }
+    });
+    const inside = cands.filter((c) => cx >= c.box.x && cx <= c.box.x + c.box.w && cy >= c.box.y && cy <= c.box.y + c.box.h);
+    if (!inside.length) return "root";
+    const area = (c: { box: Rect }) => c.box.w * c.box.h;
+    inside.sort((a, b) => area(a) - area(b) || (a.key === "root" ? 1 : 0) - (b.key === "root" ? 1 : 0));
+    const cc = inside.find((c) => c.key === cur);
+    return cc && area(cc) <= area(inside[0]) + 4 ? cur : inside[0].key; // prefer staying on ~tie
+  };
   const geom = (w: YantraWidget) => {
     const r = absRect(w);
     return { left: r.x, top: r.y, width: r.w, height: r.h };
@@ -548,13 +567,22 @@ export function YantraEditor({
         const el = widgetRefs.current[i];
         if (!el) continue;
         const w0 = ws[i];
-        const pb = contentBox(parentKeyOf(w0)); // parent content box (canvas px)
         const r = el.getBoundingClientRect();
-        const left = r.left - cr.left + cont.scrollLeft - pb.x;
-        const top = r.top - cr.top + cont.scrollTop - pb.y;
+        const absL = r.left - cr.left + cont.scrollLeft;
+        const absT = r.top - cr.top + cont.scrollTop;
+        // drag-to-reparent: which container does the widget's centre land in?
+        const target = dropTarget(absL + r.width / 2, absT + r.height / 2, parentKeyOf(w0));
+        const pb = contentBox(target);
+        const ptr = target === "root"
+          ? { frame: undefined, tab: undefined }
+          : frames.some((f) => f.id === target)
+            ? { frame: target, tab: undefined }
+            : { tab: target, frame: undefined };
+        const left = absL - pb.x, top = absT - pb.y;
         const uH = w0.unitH ?? "pct", uV = w0.unitV ?? "px";
         ws[i] = {
           ...w0,
+          ...ptr,
           x: uH === "pct" ? Math.max(0, r2(pb.w ? (left / pb.w) * 100 : 0)) : Math.max(0, Math.round(left)),
           w: uH === "pct" ? Math.max(1, r2(pb.w ? (r.width / pb.w) * 100 : 0)) : Math.max(8, Math.round(r.width)),
           y: uV === "pct" ? Math.max(0, r2(pb.h ? (top / pb.h) * 100 : 0)) : Math.max(0, Math.round(top)),
