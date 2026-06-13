@@ -3,7 +3,7 @@
 // and save back to the .yantra file. Pairs with YantraCanvas (the read-only
 // renderer); App switches between them with an "Edit" toggle.
 import { useEffect, useRef, useState } from "react";
-import { Plus, Save, Undo2, Trash2 } from "lucide-react";
+import { Plus, Save, Undo2, Trash2, Move } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -140,6 +140,7 @@ export function YantraEditor({
   const [sel, setSel] = useState<number | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const cols = draft.cols ?? 6;
+  const free = draft.layout === "free";
   const widgets = draft.widgets ?? [];
   const dirty = JSON.stringify(draft) !== JSON.stringify(spec);
 
@@ -155,11 +156,39 @@ export function YantraEditor({
   const addWidget = (type: string) =>
     setDraft((d) => {
       const ws = d.widgets ?? [];
-      const maxY = ws.reduce((m, w) => Math.max(m, (w.y ?? 0) + (w.h ?? 1)), 0);
-      return { ...d, widgets: [...ws, defaultWidget(type, maxY)] };
+      const w = defaultWidget(type, 0);
+      if (d.layout === "free") {
+        const bottom = ws.reduce((m, x) => Math.max(m, (x.y ?? 0) + (x.h ?? 0)), 0);
+        Object.assign(w, { x: 8, y: bottom + 8, w: type === "select" || type === "readout" ? 200 : 140, h: 48 });
+      } else {
+        w.y = ws.reduce((m, x) => Math.max(m, (x.y ?? 0) + (x.h ?? 1)), 0);
+      }
+      return { ...d, widgets: [...ws, w] };
     });
   const removeWidget = (i: number) =>
     setDraft((d) => ({ ...d, widgets: (d.widgets ?? []).filter((_, j) => j !== i) }));
+
+  // Flip grid⇄free, converting coordinates through the current cell size so
+  // widgets keep their on-screen position instead of jumping.
+  const toggleFree = () =>
+    setDraft((d) => {
+      const toFree = d.layout !== "free";
+      const { cw, ch } = cellSize();
+      const widgets = (d.widgets ?? []).map((w) =>
+        toFree
+          ? {
+              ...w,
+              x: Math.round((w.x ?? 0) * cw), y: Math.round((w.y ?? 0) * ch),
+              w: Math.round((w.w ?? 1) * cw), h: Math.round((w.h ?? 1) * ch),
+            }
+          : {
+              ...w,
+              x: Math.round((w.x ?? 0) / cw), y: Math.round((w.y ?? 0) / ch),
+              w: Math.max(1, Math.round((w.w ?? cw) / cw)), h: Math.max(1, Math.round((w.h ?? ch) / ch)),
+            },
+      );
+      return { ...d, layout: toFree ? "free" : "grid", widgets };
+    });
 
   // --- drag / resize -------------------------------------------------------
   const drag = useRef<null | {
@@ -177,11 +206,21 @@ export function YantraEditor({
     const move = (e: PointerEvent) => {
       const g = drag.current;
       if (!g) return;
+      const w0 = widgets[g.idx];
+      if (!w0) return;
+      if (free) {
+        // pixel-precise, no snapping
+        const dx = e.clientX - g.px, dy = e.clientY - g.py;
+        if (g.mode === "move") {
+          setWidget(g.idx, { x: Math.max(0, Math.round(g.x + dx)), y: Math.max(0, Math.round(g.y + dy)) });
+        } else {
+          setWidget(g.idx, { w: Math.max(24, Math.round(g.w + dx)), h: Math.max(24, Math.round(g.h + dy)) });
+        }
+        return;
+      }
       const { cw, ch } = cellSize();
       const dx = Math.round((e.clientX - g.px) / cw);
       const dy = Math.round((e.clientY - g.py) / ch);
-      const w0 = widgets[g.idx];
-      if (!w0) return;
       if (g.mode === "move") {
         const w = w0.w ?? 1;
         setWidget(g.idx, {
@@ -203,7 +242,7 @@ export function YantraEditor({
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
     };
-  }, [widgets, cols]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [widgets, cols, free]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startDrag = (mode: "move" | "resize", i: number, e: React.PointerEvent) => {
     e.preventDefault();
@@ -230,6 +269,11 @@ export function YantraEditor({
               <Plus className="size-3" /> {t}
             </Button>
           ))}
+          <Button size="sm" variant={free ? "default" : "outline"} className="h-7 gap-1 px-2 text-[11px]"
+            title="Freeflow: place widgets anywhere (pixels) instead of snapping to the grid"
+            onClick={toggleFree}>
+            <Move className="size-3" /> Freeflow
+          </Button>
           <div className="ml-auto flex items-center gap-1.5">
             {dirty && <span className="text-[11px] text-amber-600 dark:text-amber-400">unsaved</span>}
             <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
@@ -247,15 +291,23 @@ export function YantraEditor({
           ref={gridRef}
           className="relative flex-1 overflow-auto rounded border bg-muted/10"
           style={{
-            backgroundSize: `calc(100% / ${cols}) ${ROW_H}px`,
-            backgroundImage:
-              "linear-gradient(to right, hsl(var(--border)/0.5) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)/0.5) 1px, transparent 1px)",
-            minHeight: rows * ROW_H,
+            backgroundSize: free ? undefined : `calc(100% / ${cols}) ${ROW_H}px`,
+            backgroundImage: free
+              ? undefined
+              : "linear-gradient(to right, hsl(var(--border)/0.5) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)/0.5) 1px, transparent 1px)",
+            minHeight: free ? undefined : rows * ROW_H,
           }}
           onPointerDown={() => setSel(null)}
         >
           {widgets.map((w, i) => {
-            const cw = `calc(${((w.w ?? 1) / cols) * 100}% )`;
+            const pos = free
+              ? { left: w.x ?? 0, top: w.y ?? 0, width: w.w ?? 140, height: w.h ?? 48 }
+              : {
+                  left: `calc(${((w.x ?? 0) / cols) * 100}%)`,
+                  top: (w.y ?? 0) * ROW_H,
+                  width: `calc(${((w.w ?? 1) / cols) * 100}%)`,
+                  height: (w.h ?? 1) * ROW_H,
+                };
             return (
               <div
                 key={i}
@@ -263,13 +315,7 @@ export function YantraEditor({
                 className={`absolute cursor-move select-none rounded border bg-card p-1 text-[11px] shadow-sm ${
                   sel === i ? "ring-2 ring-primary" : ""
                 }`}
-                style={{
-                  left: `calc(${((w.x ?? 0) / cols) * 100}%)`,
-                  top: (w.y ?? 0) * ROW_H,
-                  width: cw,
-                  height: (w.h ?? 1) * ROW_H,
-                  padding: 4,
-                }}
+                style={{ ...pos, padding: 4 }}
               >
                 <div className="flex h-full flex-col overflow-hidden">
                   <span className="truncate font-medium">{w.label || w.type}</span>

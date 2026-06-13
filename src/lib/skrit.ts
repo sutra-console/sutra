@@ -665,6 +665,7 @@ export interface YantraSpec {
   name?: string;
   description?: string;
   cols?: number; // grid columns (default 6)
+  layout?: "grid" | "free"; // grid = snap to cells (default); free = absolute pixels
   widgets?: YantraWidget[];
 }
 export interface YantraDoc {

@@ -72,6 +72,23 @@ export function YantraCanvas({
     }
   };
 
+  // Free layout: widgets are absolutely positioned in pixels (x/y/w/h = px).
+  if (spec.layout === "free") {
+    return (
+      <div className="relative h-full overflow-auto p-1">
+        {widgets.map((w, i) => (
+          <div
+            key={i}
+            className="absolute"
+            style={{ left: w.x ?? 0, top: w.y ?? 0, width: w.w ?? 80, height: w.h ?? 48 }}
+          >
+            <Widget w={w} disabled={disabled} fire={fire} readout={readout} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div
       className="grid h-full content-start gap-2 overflow-auto p-1"
