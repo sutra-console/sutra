@@ -246,6 +246,18 @@ export function YantraEditor({
   // keep Moveable's box synced when geometry changes from outside a gesture
   useEffect(() => { moveableRef.current?.updateRect(); }, [draft, containerW, selected]);
 
+  // Capture the reference design size the first time any anchor goes non-default,
+  // so the renderer can resolve fixed/edge/stretch anchors against it.
+  useEffect(() => {
+    if (draft.design) return;
+    const anchored = (draft.widgets ?? []).some(
+      (w) => (w.anchorH && w.anchorH !== "scale") || (w.anchorV && w.anchorV !== "top"),
+    );
+    if (!anchored) return;
+    const el = gridRef.current;
+    setDraft((d) => (d.design ? d : { ...d, design: { w: el?.clientWidth ?? containerW, h: el?.clientHeight ?? 0 } }));
+  }, [draft.widgets]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Delete/Backspace removes the selection (unless a text field is focused)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -938,6 +950,26 @@ function WidgetProps({
               onChange={(e) => onChange({ [k]: Math.max(k === "w" || k === "h" ? 1 : 0, +e.target.value) })} />
           </Field>
         ))}
+      </div>
+
+      {/* responsive anchor: how the widget reacts when the window resizes */}
+      <div className="grid grid-cols-2 gap-1">
+        <Field label="Anchor X">
+          <Select value={w.anchorH ?? "scale"} onValueChange={(v) => onChange({ anchorH: v as YantraWidget["anchorH"] })}>
+            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {["scale", "left", "right", "center", "stretch"].map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Anchor Y">
+          <Select value={w.anchorV ?? "top"} onValueChange={(v) => onChange({ anchorV: v as YantraWidget["anchorV"] })}>
+            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {["top", "bottom", "middle", "scale", "stretch"].map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </Field>
       </div>
 
       {w.type === "button" && (

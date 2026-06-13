@@ -4,7 +4,7 @@
 // device INVOKE command, or a CFG set. Readouts watch the live console stream
 // and surface a regex capture. v1 = render + interact; scripts/plugins/visual-
 // editor come later.
-import { useEffect, useState } from "react";
+import { type CSSProperties, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -72,24 +72,38 @@ export function YantraCanvas({
     }
   };
 
-  // Coordinates are grid units (x/w in columns, y/h in rows) for BOTH layouts —
-  // grid mode keeps them whole, free mode allows fractions. We position absolutely
-  // (column % wide × ROW_H tall) so it matches the editor pixel-for-pixel. ROW_H
-  // must equal the editor's.
+  // Coordinates are grid units (x/w in columns, y/h in rows). We position absolutely
+  // (column % wide × ROW_H tall) so it matches the editor pixel-for-pixel. ROW_H must
+  // equal the editor's. Anchors (responsive) resolve against the design size; CSS
+  // positioning (left/right/top/bottom in px) then keeps fixed edges fixed as the
+  // window resizes — no measurement needed. Default H=scale (today's %), V=top (fixed).
   const ROW_H = 56;
+  const design = spec.design;
+  const widgetStyle = (w: YantraWidget): CSSProperties => {
+    const x = w.x ?? 0, y = w.y ?? 0, wc = w.w ?? 1, hc = w.h ?? 1;
+    const aH = design ? w.anchorH ?? "scale" : "scale";
+    const aV = design ? w.anchorV ?? "top" : "top";
+    const dW = design?.w ?? 0;
+    const dH = design?.h ?? 0;
+    const cw = cols > 0 ? dW / cols : 0;
+    const dx = x * cw, dw = wc * cw, dy = y * ROW_H, dh = hc * ROW_H;
+    const s: CSSProperties = {};
+    if (aH === "scale") { s.left = `${(x / cols) * 100}%`; s.width = `${(wc / cols) * 100}%`; }
+    else if (aH === "left") { s.left = dx; s.width = dw; }
+    else if (aH === "right") { s.right = dW - (dx + dw); s.width = dw; }
+    else if (aH === "center") { s.left = `calc(${((dx + dw / 2) / dW) * 100}% - ${dw / 2}px)`; s.width = dw; }
+    else { s.left = dx; s.right = dW - (dx + dw); } // stretch
+    if (aV === "top") { s.top = dy; s.height = dh; }
+    else if (aV === "scale") { s.top = `${(dy / dH) * 100}%`; s.height = `${(dh / dH) * 100}%`; }
+    else if (aV === "bottom") { s.bottom = dH - (dy + dh); s.height = dh; }
+    else if (aV === "middle") { s.top = `calc(${((dy + dh / 2) / dH) * 100}% - ${dh / 2}px)`; s.height = dh; }
+    else { s.top = dy; s.bottom = dH - (dy + dh); } // stretch
+    return s;
+  };
   return (
     <div className="relative h-full overflow-auto p-1">
       {widgets.map((w, i) => (
-        w.hidden ? null : <div
-          key={i}
-          className="absolute"
-          style={{
-            left: `${((w.x ?? 0) / cols) * 100}%`,
-            top: (w.y ?? 0) * ROW_H,
-            width: `${((w.w ?? 1) / cols) * 100}%`,
-            height: (w.h ?? 1) * ROW_H,
-          }}
-        >
+        w.hidden ? null : <div key={i} className="absolute" style={widgetStyle(w)}>
           <Widget w={w} disabled={disabled} fire={fire} readout={readout} />
         </div>
       ))}
