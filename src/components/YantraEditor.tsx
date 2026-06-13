@@ -702,6 +702,12 @@ export function YantraEditor({
   // Drag/resize apply Moveable's transform/size to the element. Holding Shift snaps
   // the result to the grid (cell size cw × ROW_H), relative to the element's base.
   const shiftOf = (e: unknown) => !!(e as { shiftKey?: boolean })?.shiftKey;
+  const ctrlOf = (e: unknown) => !!(e as { ctrlKey?: boolean; metaKey?: boolean })?.ctrlKey || !!(e as { metaKey?: boolean })?.metaKey;
+  const resizeCenters = useRef<Map<HTMLElement, { cx: number; cy: number }>>(new Map()); // center at resize-start
+  const captureCenter = (el: HTMLElement) => {
+    const l = parseFloat(el.style.left) || 0, t = parseFloat(el.style.top) || 0;
+    resizeCenters.current.set(el, { cx: l + el.offsetWidth / 2, cy: t + el.offsetHeight / 2 });
+  };
   const dragWidget = (el: HTMLElement, translate: number[], transform: string, snap: boolean) => {
     if (!snap) { el.style.transform = transform; return; }
     const baseLeft = parseFloat(el.style.left) || 0;
@@ -710,12 +716,19 @@ export function YantraEditor({
     const sy = Math.round((baseTop + translate[1]) / ROW_H) * ROW_H - baseTop;
     el.style.transform = `translate(${sx}px, ${sy}px)`;
   };
-  const resizeWidget = (el: HTMLElement, width: number, height: number, transform: string, snap: boolean) => {
+  // snap = Shift (snap size to grid); mirror = Ctrl (keep centre fixed → symmetric resize).
+  const resizeWidget = (el: HTMLElement, width: number, height: number, transform: string, snap: boolean, mirror: boolean) => {
     const w = snap ? Math.max(cw, Math.round(width / cw) * cw) : width;
     const h = snap ? Math.max(ROW_H, Math.round(height / ROW_H) * ROW_H) : height;
     el.style.width = `${w}px`;
     el.style.height = `${h}px`;
-    el.style.transform = transform;
+    const c = mirror ? resizeCenters.current.get(el) : undefined;
+    if (c) {
+      const baseLeft = parseFloat(el.style.left) || 0, baseTop = parseFloat(el.style.top) || 0;
+      el.style.transform = `translate(${c.cx - w / 2 - baseLeft}px, ${c.cy - h / 2 - baseTop}px)`;
+    } else {
+      el.style.transform = transform;
+    }
   };
 
   // sibling elements (for alignment/snap guidelines)
@@ -1009,9 +1022,11 @@ export function YantraEditor({
               onDragEnd={() => { if (moved.current) commit(selected); moved.current = false; }}
               onDragGroup={(e) => { moved.current = true; const s = shiftOf(e.inputEvent); e.events.forEach((ev) => dragWidget(ev.target as HTMLElement, ev.translate, ev.transform, s)); syncLiveBox(); }}
               onDragGroupEnd={() => { if (moved.current) commit(selected); moved.current = false; }}
-              onResize={(e) => { moved.current = true; resizeWidget(e.target as HTMLElement, e.width, e.height, e.drag.transform, shiftOf(e.inputEvent)); syncLiveBox(); }}
+              onResizeStart={(e) => captureCenter(e.target as HTMLElement)}
+              onResize={(e) => { moved.current = true; resizeWidget(e.target as HTMLElement, e.width, e.height, e.drag.transform, shiftOf(e.inputEvent), ctrlOf(e.inputEvent)); syncLiveBox(); }}
               onResizeEnd={() => { if (moved.current) commit(selected); moved.current = false; }}
-              onResizeGroup={(e) => { moved.current = true; const s = shiftOf(e.inputEvent); e.events.forEach((ev) => resizeWidget(ev.target as HTMLElement, ev.width, ev.height, ev.drag.transform, s)); syncLiveBox(); }}
+              onResizeGroupStart={(e) => e.events.forEach((ev) => captureCenter(ev.target as HTMLElement))}
+              onResizeGroup={(e) => { moved.current = true; const s = shiftOf(e.inputEvent); const c = ctrlOf(e.inputEvent); e.events.forEach((ev) => resizeWidget(ev.target as HTMLElement, ev.width, ev.height, ev.drag.transform, s, c)); syncLiveBox(); }}
               onResizeGroupEnd={() => { if (moved.current) commit(selected); moved.current = false; }}
             />
           )}
