@@ -522,22 +522,16 @@ export function YantraEditor({
   const ungroupSelected = () => ungroupFrames(selectionFrames());
   const selectionHasGroup = selectionFrames().length > 0;
 
-  // resize the selection to a cell size, or snap its position+size to whole cells
-  const resizeSelected = (w: number, h: number) =>
-    setDraft((d) => {
-      const ws = [...(d.widgets ?? [])];
-      for (const i of selected) if (ws[i]) ws[i] = { ...ws[i], w, h };
-      return { ...d, widgets: ws };
-    });
-  const snapSelected = () =>
-    setDraft((d) => {
-      const ws = [...(d.widgets ?? [])];
-      for (const i of selected) {
-        const w = ws[i];
-        if (w) ws[i] = { ...w, x: Math.round(w.x ?? 0), y: Math.round(w.y ?? 0), w: Math.max(1, Math.round(w.w ?? 1)), h: Math.max(1, Math.round(w.h ?? 1)) };
-      }
-      return { ...d, widgets: ws };
-    });
+  // anchor-aware size presets for the selection (% of parent / stretch / reset)
+  const sizePreset = (patch: Partial<YantraWidget>) =>
+    setDraft((d) => ({ ...d, widgets: (d.widgets ?? []).map((w, i) => (selected.includes(i) ? { ...w, ...patch } : w)) }));
+  const SIZE_PRESETS: { label: string; patch: Partial<YantraWidget> }[] = [
+    { label: "Fill width", patch: { anchorH: "scale", x: 0, w: 100 } },
+    { label: "Fill height", patch: { anchorV: "scale", y: 0, h: 100 } },
+    { label: "Fill parent", patch: { anchorH: "scale", anchorV: "scale", x: 0, y: 0, w: 100, h: 100 } },
+    { label: "Stretch (margins)", patch: { anchorH: "stretch", anchorV: "stretch", x: 0, y: 0, w: 0, h: 0 } },
+    { label: "Reset size", patch: { anchorH: "scale", anchorV: "start", w: 30, h: 48 } },
+  ];
   // right-click selects the widget (and its frame) if it isn't already selected
   const ensureSelected = (i: number) => { if (!selected.includes(i)) { setSelectedFrames([]); setSelected([i]); } };
   // frame helpers (layer tree)
@@ -558,7 +552,6 @@ export function YantraEditor({
       widgets: (d.widgets ?? []).map((w, i) => (idxs.has(i) ? { ...w, hidden: anyVisible } : w)),
     }));
   };
-  const RESIZE_PRESETS: [number, number][] = [[1, 1], [2, 1], [2, 2], [3, 1], [3, 2], [4, 2]];
   const addWidget = (type: string) => {
     const newIdx = widgets.length;
     setDraft((d) => {
@@ -764,49 +757,74 @@ export function YantraEditor({
     const w = widgets[i];
     if (w.type === "tabs") return tabsNode(i, depth);
     return (
-      <div key={`w${i}`} draggable onDragStart={() => { dragRef.current = { kind: "w", key: String(i) }; }}
-        style={{ paddingLeft: depth * 12 + 4 }}
-        className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selected.includes(i) && !selectedFrames.length ? "bg-primary/15" : "hover:bg-accent/50"}`}
-        onClick={(e) => { setSelectedFrames([]); setSelected((sel) => (e.shiftKey ? (sel.includes(i) ? sel.filter((s) => s !== i) : [...sel, i]) : [i])); }}>
-        <button type="button" title={w.hidden ? "Show" : "Hide"} className="text-muted-foreground hover:text-foreground"
-          onClick={(e) => { e.stopPropagation(); toggleHidden(i); }}>
-          {w.hidden ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
-        </button>
-        <span className="min-w-0 flex-1 truncate" title={w.label || w.type}>{w.label || w.type}</span>
-        <button type="button" title={w.locked ? "Unlock" : "Lock"} className="text-muted-foreground hover:text-foreground"
-          onClick={(e) => { e.stopPropagation(); toggleLock(i); }}>
-          {w.locked ? <Lock className="size-3" /> : <LockOpen className="size-3 opacity-40" />}
-        </button>
-        <button type="button" title="Bring forward" disabled={i === widgets.length - 1}
-          className="text-muted-foreground hover:text-foreground disabled:opacity-30"
-          onClick={(e) => { e.stopPropagation(); moveLayer(i, 1); }}><ChevronUp className="size-3" /></button>
-        <button type="button" title="Send backward" disabled={i === 0}
-          className="text-muted-foreground hover:text-foreground disabled:opacity-30"
-          onClick={(e) => { e.stopPropagation(); moveLayer(i, -1); }}><ChevronDown className="size-3" /></button>
-      </div>
+      <ContextMenu key={`w${i}`}>
+        <ContextMenuTrigger asChild>
+          <div draggable onDragStart={() => { dragRef.current = { kind: "w", key: String(i) }; }}
+            style={{ paddingLeft: depth * 12 + 4 }}
+            className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selected.includes(i) && !selectedFrames.length ? "bg-primary/15" : "hover:bg-accent/50"}`}
+            onClick={(e) => { setSelectedFrames([]); setSelected((sel) => (e.shiftKey ? (sel.includes(i) ? sel.filter((s) => s !== i) : [...sel, i]) : [i])); }}>
+            <button type="button" title={w.hidden ? "Show" : "Hide"} className="text-muted-foreground hover:text-foreground"
+              onClick={(e) => { e.stopPropagation(); toggleHidden(i); }}>
+              {w.hidden ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
+            </button>
+            <span className="min-w-0 flex-1 truncate" title={w.label || w.type}>{w.label || w.type}</span>
+            <button type="button" title={w.locked ? "Unlock" : "Lock"} className="text-muted-foreground hover:text-foreground"
+              onClick={(e) => { e.stopPropagation(); toggleLock(i); }}>
+              {w.locked ? <Lock className="size-3" /> : <LockOpen className="size-3 opacity-40" />}
+            </button>
+            <button type="button" title="Bring forward" disabled={i === widgets.length - 1}
+              className="text-muted-foreground hover:text-foreground disabled:opacity-30"
+              onClick={(e) => { e.stopPropagation(); moveLayer(i, 1); }}><ChevronUp className="size-3" /></button>
+            <button type="button" title="Send backward" disabled={i === 0}
+              className="text-muted-foreground hover:text-foreground disabled:opacity-30"
+              onClick={(e) => { e.stopPropagation(); moveLayer(i, -1); }}><ChevronDown className="size-3" /></button>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="w-40">
+          <ContextMenuItem onSelect={() => { setSelectedFrames([]); setSelected([i]); }}>Select</ContextMenuItem>
+          <ContextMenuItem onSelect={() => toggleLock(i)}>{w.locked ? "Unlock" : "Lock"}</ContextMenuItem>
+          <ContextMenuItem onSelect={() => toggleHidden(i)}>{w.hidden ? "Show" : "Hide"}</ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem disabled={i === widgets.length - 1} onSelect={() => moveLayer(i, 1)}>Bring forward</ContextMenuItem>
+          <ContextMenuItem disabled={i === 0} onSelect={() => moveLayer(i, -1)}>Send backward</ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => { removeMany([i]); setSelected([]); }}>Delete</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     );
   };
   const frameNode = (f: YantraFrame, depth: number): React.ReactNode => (
     <div key={f.id}>
-      <div draggable onDragStart={() => { dragRef.current = { kind: "f", key: f.id }; }}
-        style={{ paddingLeft: depth * 12 }} {...dropProps({ frame: f.id })}
-        className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selectedFrames.includes(f.id) ? "bg-primary/20" : "hover:bg-accent/50"}`}
-        onClick={(e) => selectFrame(f.id, e.shiftKey)}>
-        <button type="button" className="text-muted-foreground" title={f.collapsed ? "Expand" : "Collapse"}
-          onClick={(e) => { e.stopPropagation(); toggleCollapse(f.id); }}>
-          {f.collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
-        </button>
-        <Layers className="size-3 text-muted-foreground" />
-        <input value={f.name ?? "Frame"} onClick={(e) => e.stopPropagation()}
-          onChange={(e) => renameFrame(f.id, e.target.value)}
-          className="min-w-0 flex-1 bg-transparent outline-none focus:underline" />
-        <button type="button" className="text-muted-foreground hover:text-foreground" title={f.locked ? "Unlock frame" : "Lock frame"}
-          onClick={(e) => { e.stopPropagation(); toggleFrameLock(f.id); }}>
-          {f.locked ? <Lock className="size-3" /> : <LockOpen className="size-3 opacity-40" />}
-        </button>
-        <button type="button" className="text-muted-foreground hover:text-foreground" title="Hide / show frame"
-          onClick={(e) => { e.stopPropagation(); toggleFrameHidden(f.id); }}><Eye className="size-3" /></button>
-      </div>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div draggable onDragStart={() => { dragRef.current = { kind: "f", key: f.id }; }}
+            style={{ paddingLeft: depth * 12 }} {...dropProps({ frame: f.id })}
+            className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selectedFrames.includes(f.id) ? "bg-primary/20" : "hover:bg-accent/50"}`}
+            onClick={(e) => selectFrame(f.id, e.shiftKey)}>
+            <button type="button" className="text-muted-foreground" title={f.collapsed ? "Expand" : "Collapse"}
+              onClick={(e) => { e.stopPropagation(); toggleCollapse(f.id); }}>
+              {f.collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+            </button>
+            <Layers className="size-3 text-muted-foreground" />
+            <input value={f.name ?? "Frame"} onClick={(e) => e.stopPropagation()}
+              onChange={(e) => renameFrame(f.id, e.target.value)}
+              className="min-w-0 flex-1 bg-transparent outline-none focus:underline" />
+            <button type="button" className="text-muted-foreground hover:text-foreground" title={f.locked ? "Unlock frame" : "Lock frame"}
+              onClick={(e) => { e.stopPropagation(); toggleFrameLock(f.id); }}>
+              {f.locked ? <Lock className="size-3" /> : <LockOpen className="size-3 opacity-40" />}
+            </button>
+            <button type="button" className="text-muted-foreground hover:text-foreground" title="Hide / show frame"
+              onClick={(e) => { e.stopPropagation(); toggleFrameHidden(f.id); }}><Eye className="size-3" /></button>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="w-40">
+          <ContextMenuItem onSelect={() => selectFrame(f.id, false)}>Select contents</ContextMenuItem>
+          <ContextMenuItem onSelect={() => toggleFrameLock(f.id)}>{f.locked ? "Unlock" : "Lock"}</ContextMenuItem>
+          <ContextMenuItem onSelect={() => toggleFrameHidden(f.id)}>Hide / show</ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => ungroupFrames([f.id])}>Ungroup (dissolve)</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {!f.collapsed && renderChildren(f.id, depth + 1)}
     </div>
   );
@@ -966,11 +984,8 @@ export function YantraEditor({
                   {selected.some((j) => !widgets[j]?.locked) ? "Lock" : "Unlock"}
                 </ContextMenuItem>
                 <ContextMenuSeparator />
-                <ContextMenuItem onSelect={snapSelected}>Snap to grid</ContextMenuItem>
-                {RESIZE_PRESETS.map(([rw, rh]) => (
-                  <ContextMenuItem key={`${rw}x${rh}`} onSelect={() => resizeSelected(rw, rh)}>
-                    Resize {rw}×{rh}
-                  </ContextMenuItem>
+                {SIZE_PRESETS.map((p) => (
+                  <ContextMenuItem key={p.label} onSelect={() => sizePreset(p.patch)}>{p.label}</ContextMenuItem>
                 ))}
               </ContextMenuContent>
             </ContextMenu>
