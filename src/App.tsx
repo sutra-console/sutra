@@ -20,6 +20,8 @@ import {
 import { Terminal, type TerminalHandle } from "@/components/Terminal";
 import { MacroHelp } from "@/components/MacroHelp";
 import { MacroVars } from "@/components/MacroVars";
+import { NetworkDevices } from "@/components/NetworkDevices";
+import { clusterName } from "@/lib/zcl";
 import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
@@ -716,6 +718,16 @@ export default function App() {
   useEffect(() => {
     getNetworks().then((n) => { setNetworks(n.networks ?? []); setNetworksActive(n.active ?? ""); }).catch(() => setNetworks([]));
   }, [workspace]);
+
+  // Inject a ZCL command at a peer via the {$zcl} macro var (build + send).
+  function runZcl(addr: string, endpoint: number, cluster: number, cmd: number, payloadHex?: string) {
+    const a = addr.replace(/^0x/i, "");
+    const cl = cluster.toString(16).padStart(4, "0");
+    const cm = cmd.toString(16).padStart(2, "0");
+    const pl = payloadHex ? ` ${payloadHex}` : "";
+    runText(`HEX {$zcl ${a} ${endpoint} ${cl} ${cm}${pl}}`, "zcl").catch((e) => setStatus(`zcl failed: ${e}`));
+    setStatus(`sent ${clusterName(cluster)} cmd 0x${cm} → ${addr}`);
+  }
 
   async function saveNetworks(next: Network[]) {
     setNetworks(next);
@@ -2083,6 +2095,18 @@ export default function App() {
                         </Button>
                       </div>
                     ))}
+                    {/* Per-peer commands for the active (first keyed) network. */}
+                    {(() => {
+                      const active = networks.find((n) => n.key.trim());
+                      return active && active.nodes.some((n) => n.endpoints?.length) ? (
+                        <div className="mt-1 flex flex-col gap-1">
+                          <div className="text-[11px] font-medium text-muted-foreground">
+                            Peers on {active.label || "network"}
+                          </div>
+                          <NetworkDevices net={active} disabled={!connected} onCommand={runZcl} />
+                        </div>
+                      ) : null;
+                    })()}
                     <div className="flex items-center gap-1">
                       <Input className="h-8 w-24 text-xs" placeholder="label"
                         value={draftKeyLabel} onChange={(e) => setDraftKeyLabel(e.target.value)} />
