@@ -588,11 +588,34 @@ export function YantraEditor({
 
   const rows = Math.max(4, widgets.reduce((m, w) => Math.max(m, (w.y ?? 0) + (w.h ?? 1)), 0) + 1);
 
-  // --- layer tree rows --------------------------------------------------------
-  const widgetRow = (i: number, depth: number) => {
+  // --- layer tree (frames + tabs panes; drag rows to reparent) ----------------
+  const dragRef = useRef<{ kind: "w" | "f"; key: string } | null>(null);
+  // Drop a dragged widget/frame into a container: {tab} (a pane), {frame}, or {} (root).
+  const moveItem = (target: { tab?: string; frame?: string }) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    if (!d) return;
+    if (d.kind === "w") {
+      setWidget(+d.key, { tab: target.tab, frame: target.frame });
+    } else {
+      if (target.frame && subtreeFrames(d.key).includes(target.frame)) return; // no cycles
+      setDraft((dr) => ({
+        ...dr,
+        frames: (dr.frames ?? []).map((f) => (f.id === d.key ? { ...f, tab: target.tab, parent: target.frame } : f)),
+      }));
+    }
+  };
+  const dropProps = (target: { tab?: string; frame?: string }) => ({
+    onDragOver: (e: React.DragEvent) => e.preventDefault(),
+    onDrop: (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); moveItem(target); },
+  });
+
+  const widgetRow = (i: number, depth: number): React.ReactNode => {
     const w = widgets[i];
+    if (w.type === "tabs") return tabsNode(i, depth);
     return (
-      <div key={`w${i}`} style={{ paddingLeft: depth * 12 + 4 }}
+      <div key={`w${i}`} draggable onDragStart={() => { dragRef.current = { kind: "w", key: String(i) }; }}
+        style={{ paddingLeft: depth * 12 + 4 }}
         className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selected.includes(i) && !selectedFrames.length ? "bg-primary/15" : "hover:bg-accent/50"}`}
         onClick={(e) => { setSelectedFrames([]); setSelected((sel) => (e.shiftKey ? (sel.includes(i) ? sel.filter((s) => s !== i) : [...sel, i]) : [i])); }}>
         <button type="button" title={w.hidden ? "Show" : "Hide"} className="text-muted-foreground hover:text-foreground"
@@ -609,32 +632,63 @@ export function YantraEditor({
       </div>
     );
   };
-  const renderLayer = (parent: string | undefined, depth: number): React.ReactNode => {
-    const childFrames = frames.filter((f) => f.parent === parent);
-    const childWidgets = widgets.map((w, i) => (w.frame === parent ? i : -1)).filter((i) => i >= 0).reverse();
+  const frameNode = (f: YantraFrame, depth: number): React.ReactNode => (
+    <div key={f.id}>
+      <div draggable onDragStart={() => { dragRef.current = { kind: "f", key: f.id }; }}
+        style={{ paddingLeft: depth * 12 }} {...dropProps({ frame: f.id })}
+        className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selectedFrames.includes(f.id) ? "bg-primary/20" : "hover:bg-accent/50"}`}
+        onClick={(e) => selectFrame(f.id, e.shiftKey)}>
+        <button type="button" className="text-muted-foreground" title={f.collapsed ? "Expand" : "Collapse"}
+          onClick={(e) => { e.stopPropagation(); toggleCollapse(f.id); }}>
+          {f.collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+        </button>
+        <Layers className="size-3 text-muted-foreground" />
+        <input value={f.name ?? "Frame"} onClick={(e) => e.stopPropagation()}
+          onChange={(e) => renameFrame(f.id, e.target.value)}
+          className="min-w-0 flex-1 bg-transparent outline-none focus:underline" />
+        <button type="button" className="text-muted-foreground hover:text-foreground" title="Hide / show frame"
+          onClick={(e) => { e.stopPropagation(); toggleFrameHidden(f.id); }}><Eye className="size-3" /></button>
+      </div>
+      {!f.collapsed && renderChildren(f.id, depth + 1)}
+    </div>
+  );
+  const tabsNode = (i: number, depth: number): React.ReactNode => {
+    const w = widgets[i];
     return (
-      <>
-        {childFrames.map((f) => (
-          <div key={f.id}>
-            <div style={{ paddingLeft: depth * 12 }}
-              className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selectedFrames.includes(f.id) ? "bg-primary/20" : "hover:bg-accent/50"}`}
-              onClick={(e) => selectFrame(f.id, e.shiftKey)}>
-              <button type="button" className="text-muted-foreground" title={f.collapsed ? "Expand" : "Collapse"}
-                onClick={(e) => { e.stopPropagation(); toggleCollapse(f.id); }}>
-                {f.collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
-              </button>
-              <Layers className="size-3 text-muted-foreground" />
-              <input value={f.name ?? "Frame"} onClick={(e) => e.stopPropagation()}
-                onChange={(e) => renameFrame(f.id, e.target.value)}
-                className="min-w-0 flex-1 bg-transparent outline-none focus:underline" />
-              <button type="button" className="text-muted-foreground hover:text-foreground" title="Hide / show frame"
-                onClick={(e) => { e.stopPropagation(); toggleFrameHidden(f.id); }}>
-                <Eye className="size-3" />
-              </button>
+      <div key={`w${i}`}>
+        <div draggable onDragStart={() => { dragRef.current = { kind: "w", key: String(i) }; }}
+          style={{ paddingLeft: depth * 12 }}
+          className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selected.includes(i) && !selectedFrames.length ? "bg-primary/15" : "hover:bg-accent/50"}`}
+          onClick={() => { setSelectedFrames([]); setSelected([i]); }}>
+          <Layers className="size-3 text-primary" />
+          <span className="min-w-0 flex-1 truncate font-medium">{w.name || w.label || "tabs"}</span>
+          <button type="button" title="Bring forward" disabled={i === widgets.length - 1}
+            className="text-muted-foreground hover:text-foreground disabled:opacity-30"
+            onClick={(e) => { e.stopPropagation(); moveLayer(i, 1); }}><ChevronUp className="size-3" /></button>
+          <button type="button" title="Send backward" disabled={i === 0}
+            className="text-muted-foreground hover:text-foreground disabled:opacity-30"
+            onClick={(e) => { e.stopPropagation(); moveLayer(i, -1); }}><ChevronDown className="size-3" /></button>
+        </div>
+        {(w.tabs ?? []).map((pane) => (
+          <div key={pane.id}>
+            <div style={{ paddingLeft: (depth + 1) * 12 }} {...dropProps({ tab: pane.id })}
+              className="flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-accent/40"
+              title="Drop a control or frame here to put it in this tab">
+              <ChevronRight className="size-3" /> {pane.label}
             </div>
-            {!f.collapsed && renderLayer(f.id, depth + 1)}
+            {frames.filter((f) => f.tab === pane.id).map((f) => frameNode(f, depth + 2))}
+            {widgets.map((cw, ci) => (cw.tab === pane.id ? ci : -1)).filter((ci) => ci >= 0).reverse().map((ci) => widgetRow(ci, depth + 2))}
           </div>
         ))}
+      </div>
+    );
+  };
+  const renderChildren = (parent: string | undefined, depth: number): React.ReactNode => {
+    const childFrames = frames.filter((f) => f.parent === parent && !f.tab);
+    const childWidgets = widgets.map((w, i) => (w.frame === parent && !w.tab ? i : -1)).filter((i) => i >= 0).reverse();
+    return (
+      <>
+        {childFrames.map((f) => frameNode(f, depth))}
         {childWidgets.map((i) => widgetRow(i, depth))}
       </>
     );
@@ -645,12 +699,14 @@ export function YantraEditor({
       {/* layers tree: frames (nestable) + widgets. Tree = hierarchy; z-order is
           still the flat widget array (the chevrons reorder it). */}
       {showLayers && (
-        <div className="flex w-48 shrink-0 flex-col overflow-auto rounded border bg-muted/10 p-2">
+        <div className="flex w-48 shrink-0 flex-col overflow-auto rounded border bg-muted/10 p-2"
+          {...dropProps({})}>
           <div className="mb-1 text-[11px] font-medium text-muted-foreground">Layers</div>
           {widgets.length === 0 && frames.length === 0 && (
             <div className="text-[10px] text-muted-foreground">No widgets yet.</div>
           )}
-          {renderLayer(undefined, 0)}
+          {renderChildren(undefined, 0)}
+          <div className="mt-1 flex-1" {...dropProps({})} /> {/* drop here = move to top level */}
         </div>
       )}
 

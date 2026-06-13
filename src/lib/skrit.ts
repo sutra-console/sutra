@@ -678,6 +678,7 @@ export interface YantraFrame {
   id: string;
   name?: string;
   parent?: string; // parent frame id (nesting); absent = top level
+  tab?: string; // if set, this frame lives inside a tabs pane (id of that tab)
   collapsed?: boolean; // layer-tree collapse (UI only)
 }
 export interface YantraSpec {

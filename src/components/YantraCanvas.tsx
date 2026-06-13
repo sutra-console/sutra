@@ -51,12 +51,28 @@ export function YantraCanvas({
   const widgets = spec.widgets ?? [];
   const hasReadout = widgets.some((w) => w.type === "readout");
 
+  const frames = spec.frames ?? [];
   // active tab per `tabs` widget (keyed by its index); default = first pane
   const [activeTabs, setActiveTabs] = useState<Record<number, string>>({});
   const activeTabOf = (i: number) => activeTabs[i] ?? widgets[i].tabs?.[0]?.id;
-  const tabVisible = (tabId: string): boolean => {
+  const tabActive = (tabId: string): boolean => {
     const owner = widgets.findIndex((w) => w.type === "tabs" && (w.tabs ?? []).some((t) => t.id === tabId));
     return owner < 0 || activeTabOf(owner) === tabId; // orphan tab → always shown
+  };
+  // panes gating a widget: its own tab plus any tab on its frame-parent chain.
+  const panesFor = (w: YantraWidget): string[] => {
+    const out: string[] = [];
+    if (w.tab) out.push(w.tab);
+    let fid = w.frame;
+    const seen = new Set<string>();
+    while (fid && !seen.has(fid)) {
+      seen.add(fid);
+      const f = frames.find((x) => x.id === fid);
+      if (!f) break;
+      if (f.tab) out.push(f.tab);
+      fid = f.parent;
+    }
+    return out;
   };
 
   // Rolling console buffer for readout regex matches (only while readouts exist).
@@ -112,7 +128,7 @@ export function YantraCanvas({
     <div className="relative h-full overflow-auto p-1">
       {widgets.map((w, i) => {
         if (w.hidden) return null;
-        if (w.tab && !tabVisible(w.tab)) return null;
+        if (panesFor(w).some((p) => !tabActive(p))) return null;
         return (
           <div key={i} className="absolute" style={widgetStyle(w)}>
             {w.type === "tabs" ? (
