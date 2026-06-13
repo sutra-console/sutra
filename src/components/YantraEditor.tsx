@@ -283,6 +283,32 @@ export function YantraEditor({
       ws[i] = { ...ws[i], hidden: !ws[i].hidden };
       return { ...d, widgets: ws };
     });
+
+  // --- grouping: a shared `group` id ties widgets together ---------------------
+  // Expand a raw selection to whole groups (clicking one grouped widget selects all).
+  const expandGroups = (idxs: number[]): number[] => {
+    const groups = new Set(idxs.map((i) => widgets[i]?.group).filter(Boolean) as string[]);
+    if (!groups.size) return idxs;
+    const out = new Set(idxs);
+    widgets.forEach((w, i) => { if (w.group && groups.has(w.group)) out.add(i); });
+    return [...out];
+  };
+  const groupSelected = () => {
+    if (selected.length < 2) return;
+    const id = `g${crypto.randomUUID().slice(0, 6)}`;
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      for (const i of selected) if (ws[i]) ws[i] = { ...ws[i], group: id };
+      return { ...d, widgets: ws };
+    });
+  };
+  const ungroupSelected = () =>
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      for (const i of selected) if (ws[i]) { const w = { ...ws[i] }; delete w.group; ws[i] = w; }
+      return { ...d, widgets: ws };
+    });
+  const selectionHasGroup = selected.some((i) => widgets[i]?.group);
   const addWidget = (type: string) => {
     const newIdx = widgets.length;
     setDraft((d) => {
@@ -620,7 +646,7 @@ export function YantraEditor({
                 const idxs = e.selected
                   .map((el) => Number((el as HTMLElement).dataset.idx))
                   .filter((n) => !Number.isNaN(n));
-                setSelected(idxs);
+                setSelected(expandGroups(idxs)); // selecting one grouped widget selects its group
               }}
             />
           )}
@@ -636,6 +662,15 @@ export function YantraEditor({
               <Button size="sm" variant="ghost" className="h-6 px-1 text-destructive"
                 title="Delete selected" onClick={() => { removeMany(selected); setSelected([]); }}>
                 <Trash2 className="size-3.5" />
+              </Button>
+            </div>
+            <div className="flex gap-1">
+              <Button size="sm" variant="outline" className="h-7 flex-1 gap-1 text-[11px]" onClick={groupSelected}>
+                <Layers className="size-3" /> Group
+              </Button>
+              <Button size="sm" variant="outline" className="h-7 flex-1 text-[11px]"
+                disabled={!selectionHasGroup} onClick={ungroupSelected}>
+                Ungroup
               </Button>
             </div>
             <div>
