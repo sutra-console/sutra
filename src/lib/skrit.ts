@@ -1159,6 +1159,50 @@ export async function onMacros(cb: (list: MacroRec[]) => void): Promise<Unlisten
   return listen<MacroRec[]>("sutra://macros", (e) => cb(e.payload));
 }
 
+// ---- security: at-rest secret encryption ----
+export interface SecurityStatus {
+  hasWorkspace: boolean;
+  enabled: boolean;        // encryption configured for this workspace
+  vaultPresent: boolean;   // secrets.age exists
+  unlocked: boolean;       // session holds the decrypted secrets
+  hasPassword: boolean;    // the app key is password-protected
+  appKeyPub: string;       // "age1…" public key (empty if none yet)
+  gitTrackVault: boolean;
+  gitTrackCaptures: boolean;
+}
+// Rust serializes snake_case; map to our camelCase shape.
+interface SecurityStatusRaw {
+  has_workspace: boolean; enabled: boolean; vault_present: boolean; unlocked: boolean;
+  has_password: boolean; app_key_pub: string; git_track_vault: boolean; git_track_captures: boolean;
+}
+const mapStatus = (r: SecurityStatusRaw): SecurityStatus => ({
+  hasWorkspace: r.has_workspace, enabled: r.enabled, vaultPresent: r.vault_present,
+  unlocked: r.unlocked, hasPassword: r.has_password, appKeyPub: r.app_key_pub,
+  gitTrackVault: r.git_track_vault, gitTrackCaptures: r.git_track_captures,
+});
+
+export const securityStatus = () =>
+  invoke<SecurityStatusRaw>("security_status").then(mapStatus);
+export const securityEnable = (password?: string) =>
+  invoke<SecurityStatusRaw>("security_enable", { password: password || null }).then(mapStatus);
+export const securityDisable = () =>
+  invoke<SecurityStatusRaw>("security_disable").then(mapStatus);
+export const vaultUnlock = (password?: string) =>
+  invoke<SecurityStatusRaw>("vault_unlock", { password: password || null }).then(mapStatus);
+export const vaultLock = () => invoke<SecurityStatusRaw>("vault_lock").then(mapStatus);
+export const securitySetPassword = (oldPw: string | null, newPw: string | null) =>
+  invoke<SecurityStatusRaw>("security_set_password", { old: oldPw, new: newPw }).then(mapStatus);
+export const appKeyRegenerate = () =>
+  invoke<SecurityStatusRaw>("app_key_regenerate").then(mapStatus);
+export const securitySetGitTrack = (vault: boolean | null, captures: boolean | null) =>
+  invoke<SecurityStatusRaw>("security_set_git_track", {
+    vaultTracked: vault, capturesTracked: captures,
+  }).then(mapStatus);
+/** Fires when the vault is enabled/disabled/locked/unlocked. */
+export async function onVault(cb: () => void): Promise<UnlistenFn> {
+  return listen("sutra://vault", () => cb());
+}
+
 // ---- macro -> device EEPROM (Save to buddi) ----
 export function statusText(s: number | null): string {
   switch (s) {

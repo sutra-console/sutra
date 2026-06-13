@@ -880,42 +880,68 @@ fn console_seq(shared: &Arc<Shared>) -> u64 {
 
 // ---- macro store (backend-owned, persisted, mirrored to UI + MCP) --------
 
-/// Wire up the persistence path + app handle and load macros from disk.
+/// Wire up the persistence path + app handle and load macros from disk (via the
+/// vault layer — an encrypted+locked workspace yields an empty set until unlocked).
 pub fn init_macros(shared: &Arc<Shared>, app: AppHandle, path: std::path::PathBuf) {
-    *shared.app.lock().unwrap() = Some(app);
-    if let Ok(data) = std::fs::read(&path) {
-        if let Ok(list) = serde_json::from_slice::<Vec<MacroRec>>(&data) {
-            *shared.macros.lock().unwrap() = list;
+    if let Some(dir) = path.parent() {
+        if let Some(data) = crate::vault::read_secret(&app, dir, "macros.json") {
+            if let Ok(list) = serde_json::from_slice::<Vec<MacroRec>>(&data) {
+                *shared.macros.lock().unwrap() = list;
+            }
         }
     }
+    *shared.app.lock().unwrap() = Some(app);
     *shared.macros_path.lock().unwrap() = Some(path);
 }
 
-/// Re-point the macro store at a new path (workspace change). If the new file
-/// exists, its macros replace the in-memory set; otherwise the current set is
-/// migrated to it. Persists + notifies the UI either way.
+/// Re-point the macro store at a new path (workspace change). If the new location
+/// has macros, they replace the in-memory set; otherwise the current set is migrated
+/// to it. Persists + notifies the UI either way.
 pub fn relocate_macros(shared: &Arc<Shared>, path: std::path::PathBuf) {
-    if let Ok(data) = std::fs::read(&path) {
-        if let Ok(list) = serde_json::from_slice::<Vec<MacroRec>>(&data) {
-            *shared.macros.lock().unwrap() = list;
+    let app = shared.app.lock().unwrap().clone();
+    if let (Some(app), Some(dir)) = (app.as_ref(), path.parent()) {
+        if let Some(data) = crate::vault::read_secret(app, dir, "macros.json") {
+            if let Ok(list) = serde_json::from_slice::<Vec<MacroRec>>(&data) {
+                *shared.macros.lock().unwrap() = list;
+            }
         }
+        // else: keep the current set so persist() migrates it to the new location
     }
     *shared.macros_path.lock().unwrap() = Some(path);
     persist(shared); // writes the (possibly migrated) set + emits sutra://macros
 }
 
+/// Reload the macro set from the current store (used after a vault lock/unlock):
+/// locked/empty ⇒ the in-memory set is cleared. Notifies the UI; does not persist.
+pub fn reload_macros(shared: &Arc<Shared>) {
+    let app = shared.app.lock().unwrap().clone();
+    let path = shared.macros_path.lock().unwrap().clone();
+    if let (Some(app), Some(path)) = (app.as_ref(), path.as_ref()) {
+        if let Some(dir) = path.parent() {
+            match crate::vault::read_secret(app, dir, "macros.json") {
+                Some(data) => *shared.macros.lock().unwrap() = serde_json::from_slice(&data).unwrap_or_default(),
+                None => shared.macros.lock().unwrap().clear(),
+            }
+        }
+    }
+    let list = shared.macros.lock().unwrap().clone();
+    if let Some(app) = app {
+        let _ = app.emit("sutra://macros", &tiered(&list));
+    }
+}
+
 fn persist(shared: &Arc<Shared>) {
     let list = shared.macros.lock().unwrap().clone();
-    if let Some(path) = shared.macros_path.lock().unwrap().clone() {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_vec_pretty(&list) {
-            let _ = std::fs::write(&path, json);
+    let app = shared.app.lock().unwrap().clone();
+    let path = shared.macros_path.lock().unwrap().clone();
+    if let (Some(app), Some(path)) = (&app, &path) {
+        if let (Some(dir), Ok(json)) = (path.parent(), serde_json::to_vec_pretty(&list)) {
+            // vault layer: plaintext write, or update the encrypted vault if unlocked
+            let _ = crate::vault::write_secret(app, dir, "macros.json", &json);
         }
     }
     // notify the UI so LLM-created/changed macros appear live (with fresh tiers)
-    if let Some(app) = shared.app.lock().unwrap().clone() {
+    if let Some(app) = &app {
         let _ = app.emit("sutra://macros", &tiered(&list));
     }
 }

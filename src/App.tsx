@@ -1,7 +1,7 @@
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import {
   Usb, Plug, PlugZap, Play, Plus, Trash2, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth, Globe, ChevronDown, PanelRight,
-  Radio, Activity, Terminal as TerminalIcon, FolderOpen, LayoutGrid,
+  Radio, Activity, Terminal as TerminalIcon, FolderOpen, LayoutGrid, ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -88,6 +88,16 @@ import {
   pwmConfigGet,
   pwmConfigSet,
   getWorkspace,
+  type SecurityStatus,
+  securityStatus,
+  securityEnable,
+  securityDisable,
+  vaultUnlock,
+  vaultLock,
+  securitySetPassword,
+  appKeyRegenerate,
+  securitySetGitTrack,
+  onVault,
   type I2cDef,
   listI2cDefs,
   listYantras,
@@ -219,9 +229,10 @@ const MCP_TOOL_OPTIONS: { key: keyof McpToolFlags; label: string; hint: string }
 ];
 
 // Sidebar sections for the settings view (replaces the old single-scroll modal).
-type SettingsTab = "general" | "mcp" | "connection" | "decode";
+type SettingsTab = "general" | "security" | "mcp" | "connection" | "decode";
 const SETTINGS_SECTIONS: { id: SettingsTab; label: string; icon: typeof Bot }[] = [
   { id: "general", label: "General", icon: Settings2 },
+  { id: "security", label: "Security", icon: ShieldCheck },
   { id: "mcp", label: "MCP", icon: Bot },
   { id: "connection", label: "Connection", icon: Plug },
   { id: "decode", label: "Packet decode", icon: Radio },
@@ -299,6 +310,10 @@ export default function App() {
   const [draftKeyLabel, setDraftKeyLabel] = useState("");
   const [draftProtocol, setDraftProtocol] = useState(""); // "" = Zigbee, "thread" = Thread/Matter
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
+  const [security, setSecurity] = useState<SecurityStatus | null>(null); // at-rest encryption state
+  const [unlockPw, setUnlockPw] = useState(""); // password entry for the locked-workspace banner
+  const [pwOld, setPwOld] = useState(""); // current password (change/remove)
+  const [pwNew, setPwNew] = useState(""); // new password (set/change)
   const [recents, setRecents] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("sutra.recentWorkspaces") || "[]"); } catch { return []; }
   });
@@ -776,6 +791,33 @@ export default function App() {
   useEffect(() => {
     getNetworks().then((n) => { setNetworks(n.networks ?? []); setNetworksActive(n.active ?? ""); }).catch(() => setNetworks([]));
   }, [workspace]);
+
+  // Load the at-rest encryption status (reload when the workspace changes).
+  useEffect(() => {
+    securityStatus().then(setSecurity).catch(() => setSecurity(null));
+  }, [workspace]);
+
+  // React to vault enable/disable/lock/unlock: refetch the secret-backed model.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    onVault(() => {
+      securityStatus().then(setSecurity).catch(() => {});
+      getNetworks().then((n) => { setNetworks(n.networks ?? []); setNetworksActive(n.active ?? ""); }).catch(() => {});
+      macrosGet().then(setMacros).catch(() => {});
+    }).then((u) => (un = u));
+    return () => un?.();
+  }, []);
+
+  /** Run a Security action, update the panel, and surface the outcome. */
+  async function runSecurity(fn: () => Promise<SecurityStatus>, ok: string) {
+    try {
+      setSecurity(await fn());
+      setUnlockPw("");
+      setStatus(ok);
+    } catch (e) {
+      setStatus(`security: ${e}`);
+    }
+  }
 
   // Inject a ZCL command at a peer via the {$zcl} macro var (build + send).
   function runZcl(addr: string, endpoint: number, cluster: number, cmd: number, payloadHex?: string) {
@@ -1272,6 +1314,30 @@ export default function App() {
           <WindowControls />
         </div>
       </div>
+
+      {/* locked-workspace banner: secrets are hidden until the password unlocks them */}
+      {security?.vaultPresent && !security?.unlocked && (
+        <div className="flex items-center gap-2 border-b border-amber-500/40 bg-amber-500/10 px-4 py-1.5 text-xs">
+          <Lock className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+          <span className="text-amber-700 dark:text-amber-300">
+            Workspace locked — secrets (keys, networks, macros) are hidden.
+          </span>
+          <Input
+            type="password"
+            className="ml-auto h-6 w-44 text-xs"
+            placeholder="password"
+            value={unlockPw}
+            onChange={(e) => setUnlockPw(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") runSecurity(() => vaultUnlock(unlockPw), "unlocked");
+            }}
+          />
+          <Button size="sm" className="h-6 px-2 text-xs"
+            onClick={() => runSecurity(() => vaultUnlock(unlockPw), "unlocked")}>
+            <LockOpen className="size-3" /> Unlock
+          </Button>
+        </div>
+      )}
 
       {/* toolbar strip: connection + tool controls, beneath the title bar */}
       <header className="flex items-center gap-3 border-b px-4 py-2">
@@ -2287,6 +2353,183 @@ export default function App() {
                         Macros, captures, and network keys are saved under the workspace's{" "}
                         <code>.sutra/</code> folder.
                       </p>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {settingsTab === "security" && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm">Encrypt local secrets</CardTitle>
+                    </CardHeader>
+                    <CardContent className="flex flex-col gap-4">
+                      {!workspace && (
+                        <p className="text-[11px] text-muted-foreground">
+                          Select a workspace to encrypt its secrets.
+                        </p>
+                      )}
+
+                      {workspace && (
+                        <>
+                          {/* master switch: bundle keys/networks/macros into an encrypted vault */}
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm">Encrypt secrets at rest</div>
+                              <div className="text-[11px] text-muted-foreground">
+                                Bundles keys, networks, and macros into an encrypted{" "}
+                                <code>secrets.age</code> vault. Unlocked by this app's key.
+                              </div>
+                            </div>
+                            <Switch
+                              checked={!!security?.enabled}
+                              onCheckedChange={(v) =>
+                                v
+                                  ? runSecurity(() => securityEnable(), "secrets encrypted")
+                                  : runSecurity(() => securityDisable(), "encryption disabled")
+                              }
+                            />
+                          </div>
+
+                          {/* locked: needs the password (or the cleartext app key is missing) */}
+                          {security?.vaultPresent && !security?.unlocked && (
+                            <div className="flex items-end gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2">
+                              <div className="flex-1">
+                                <div className="mb-1 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+                                  <Lock className="size-3" /> Locked — enter password to unlock
+                                </div>
+                                <Input
+                                  type="password"
+                                  className="h-8"
+                                  placeholder="password"
+                                  value={unlockPw}
+                                  onChange={(e) => setUnlockPw(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter")
+                                      runSecurity(() => vaultUnlock(unlockPw), "unlocked");
+                                  }}
+                                />
+                              </div>
+                              <Button size="sm" className="h-8"
+                                onClick={() => runSecurity(() => vaultUnlock(unlockPw), "unlocked")}>
+                                Unlock
+                              </Button>
+                            </div>
+                          )}
+
+                          {security?.unlocked && security?.vaultPresent && (
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-[11px] text-muted-foreground">
+                                Workspace is unlocked for this session.
+                              </div>
+                              <Button variant="outline" size="sm" className="h-8 gap-1.5"
+                                onClick={() => runSecurity(() => vaultLock(), "locked")}>
+                                <Lock className="size-3.5" /> Lock now
+                              </Button>
+                            </div>
+                          )}
+
+                          {/* password: protects the app key (set / change / remove) */}
+                          <div className="flex flex-col gap-2 border-t pt-3">
+                            <div className="text-sm">
+                              {security?.hasPassword ? "Change password" : "Set a password"}
+                              <span className="ml-1 text-[11px] text-muted-foreground">
+                                (protects this app's key)
+                              </span>
+                            </div>
+                            {security?.hasPassword && (
+                              <Input type="password" className="h-8" placeholder="current password"
+                                value={pwOld} onChange={(e) => setPwOld(e.target.value)} />
+                            )}
+                            <div className="flex gap-2">
+                              <Input type="password" className="h-8 flex-1" placeholder="new password"
+                                value={pwNew} onChange={(e) => setPwNew(e.target.value)} />
+                              <Button size="sm" className="h-8" disabled={!pwNew}
+                                onClick={() =>
+                                  runSecurity(
+                                    () => securitySetPassword(pwOld || null, pwNew).then((s) => { setPwOld(""); setPwNew(""); return s; }),
+                                    "password set",
+                                  )
+                                }>
+                                Apply
+                              </Button>
+                              {security?.hasPassword && (
+                                <Button variant="outline" size="sm" className="h-8"
+                                  onClick={() =>
+                                    runSecurity(
+                                      () => securitySetPassword(pwOld || null, null).then((s) => { setPwOld(""); setPwNew(""); return s; }),
+                                      "password removed",
+                                    )
+                                  }>
+                                  Remove
+                                </Button>
+                              )}
+                            </div>
+                            <p className="text-[10px] leading-tight text-muted-foreground">
+                              {security?.hasPassword
+                                ? "A password is set: the app prompts to unlock on launch."
+                                : "No password: the key is stored locally and unlocks silently."}
+                            </p>
+                          </div>
+
+                          {/* the app's public key — share it so others can encrypt to you (Phase B) */}
+                          {security?.appKeyPub && (
+                            <div className="flex flex-col gap-2 border-t pt-3">
+                              <div className="text-sm">Your public key</div>
+                              <div className="flex gap-2">
+                                <code className="flex-1 truncate rounded bg-muted/40 px-2 py-1.5 font-mono text-[11px]"
+                                  title={security.appKeyPub}>
+                                  {security.appKeyPub}
+                                </code>
+                                <Button variant="outline" size="sm" className="h-8 gap-1.5"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(security.appKeyPub).catch(() => {});
+                                    setStatus("public key copied");
+                                  }}>
+                                  <Copy className="size-3.5" /> Copy
+                                </Button>
+                                <Button variant="outline" size="sm" className="h-8"
+                                  disabled={security.hasPassword}
+                                  title={security.hasPassword ? "remove the password first" : "generate a new key"}
+                                  onClick={() => runSecurity(() => appKeyRegenerate(), "app key regenerated")}>
+                                  Regenerate
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* git tracking toggles */}
+                          <div className="flex flex-col gap-3 border-t pt-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm">Allow committing the encrypted vault</div>
+                                <div className="text-[11px] text-muted-foreground">
+                                  <code>secrets.age</code> is safe to share once encrypted.
+                                </div>
+                              </div>
+                              <Switch
+                                checked={!!security?.gitTrackVault}
+                                onCheckedChange={(v) =>
+                                  runSecurity(() => securitySetGitTrack(v, null), "git tracking updated")
+                                }
+                              />
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm">Allow committing captures (pcaps)</div>
+                                <div className="text-[11px] text-amber-600 dark:text-amber-400">
+                                  ⚠ pcaps can contain unencrypted frames that expose keys.
+                                </div>
+                              </div>
+                              <Switch
+                                checked={!!security?.gitTrackCaptures}
+                                onCheckedChange={(v) =>
+                                  runSecurity(() => securitySetGitTrack(null, v), "git tracking updated")
+                                }
+                              />
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </CardContent>
                   </Card>
                 )}

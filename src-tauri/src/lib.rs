@@ -4,6 +4,7 @@ pub mod macrovars; // {$name} macro-variable substitution (Zigbee inject + gener
 mod mcp;
 pub mod protocol;
 pub mod serial;
+pub mod vault; // at-rest secret encryption (the "Security" subsystem)
 mod workspace;
 pub mod ws;
 pub mod zigbee; // Zigbee NWK/APS AES-CCM* security (network-model phase B)
@@ -12,8 +13,9 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serial::{ConnState, McpToolFlags, PortDesc, RespFrame, SerialParams, Shared, MacroRec};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio_util::sync::CancellationToken;
+use vault::{SecurityStatus, Vault};
 
 #[derive(Default)]
 struct AppState {
@@ -228,6 +230,11 @@ fn get_workspace(app: tauri::AppHandle) -> Option<String> {
 fn pick_workspace(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Option<String>, String> {
     let picked = workspace::pick(&app)?;
     if picked.is_some() {
+        // Silent unlock with the cleartext app key (no-op if no vault / password set),
+        // then load macros from the (now-unlocked) store.
+        if let Some(dot) = workspace::dot_sutra_existing(&app) {
+            vault::auto_unlock(&app, &dot);
+        }
         serial::relocate_macros(&state.shared, workspace::macros_path(&app));
     }
     Ok(picked)
@@ -333,6 +340,96 @@ fn list_yantras(app: tauri::AppHandle) -> Vec<workspace::YantraDoc> {
     workspace::list_yantras(&app)
 }
 
+// ---- security: at-rest secret encryption ----
+
+/// Current Security panel state for the active workspace.
+#[tauri::command]
+fn security_status(app: tauri::AppHandle) -> SecurityStatus {
+    vault::status(&app, workspace::dot_sutra_existing(&app).as_deref())
+}
+
+/// Encrypt the workspace's secrets into the vault (optionally password-protecting the
+/// app key). Removes the plaintext, unlocks the session, refreshes the .gitignore.
+#[tauri::command]
+fn security_enable(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    password: Option<String>,
+) -> Result<SecurityStatus, String> {
+    let dot = workspace::dot_sutra_existing(&app).ok_or("select a workspace first")?;
+    vault::enable(&app, &dot, password)?;
+    workspace::refresh_gitignore(&app);
+    serial::reload_macros(&state.shared);
+    let _ = app.emit("sutra://vault", ());
+    Ok(vault::status(&app, Some(&dot)))
+}
+
+/// Decrypt the vault back to plaintext files and turn encryption off (needs unlock).
+#[tauri::command]
+fn security_disable(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<SecurityStatus, String> {
+    let dot = workspace::dot_sutra_existing(&app).ok_or("select a workspace first")?;
+    vault::disable(&app, &dot)?;
+    workspace::refresh_gitignore(&app);
+    serial::reload_macros(&state.shared);
+    let _ = app.emit("sutra://vault", ());
+    Ok(vault::status(&app, Some(&dot)))
+}
+
+/// Unlock the active workspace's vault (password required iff the app key is protected).
+#[tauri::command]
+fn vault_unlock(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    password: Option<String>,
+) -> Result<SecurityStatus, String> {
+    let dot = workspace::dot_sutra_existing(&app).ok_or("select a workspace first")?;
+    vault::unlock(&app, &dot, password)?;
+    serial::reload_macros(&state.shared);
+    let _ = app.emit("sutra://vault", ());
+    Ok(vault::status(&app, Some(&dot)))
+}
+
+/// Forget the decrypted session (lock the workspace; secrets become unreadable).
+#[tauri::command]
+fn vault_lock(app: tauri::AppHandle, state: tauri::State<AppState>) -> SecurityStatus {
+    vault::lock(&app);
+    serial::reload_macros(&state.shared);
+    let _ = app.emit("sutra://vault", ());
+    vault::status(&app, workspace::dot_sutra_existing(&app).as_deref())
+}
+
+/// Set, change, or clear the app-key password (`new` empty/None clears it).
+#[tauri::command]
+fn security_set_password(
+    app: tauri::AppHandle,
+    old: Option<String>,
+    new: Option<String>,
+) -> Result<SecurityStatus, String> {
+    vault::set_password(&app, old, new)?;
+    Ok(vault::status(&app, workspace::dot_sutra_existing(&app).as_deref()))
+}
+
+/// Generate a fresh app key (re-keys an encrypted workspace; needs unlock + no password).
+#[tauri::command]
+fn app_key_regenerate(app: tauri::AppHandle) -> Result<SecurityStatus, String> {
+    let dot = workspace::dot_sutra_existing(&app);
+    vault::regenerate_app_key(&app, dot.as_deref())?;
+    Ok(vault::status(&app, dot.as_deref()))
+}
+
+/// Toggle whether git tracks the encrypted vault and/or captures (re-runs .gitignore).
+#[tauri::command]
+fn security_set_git_track(
+    app: tauri::AppHandle,
+    vault_tracked: Option<bool>,
+    captures_tracked: Option<bool>,
+) -> Result<SecurityStatus, String> {
+    let dot = workspace::dot_sutra_existing(&app).ok_or("select a workspace first")?;
+    vault::set_git_track(&dot, vault_tracked, captures_tracked)?;
+    workspace::refresh_gitignore(&app);
+    Ok(vault::status(&app, Some(&dot)))
+}
+
 #[tauri::command]
 fn macros_set(state: tauri::State<AppState>, macros: Vec<MacroRec>) {
     serial::macros_set(&state.shared, macros);
@@ -395,7 +492,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(Vault::default())
         .setup(|app| {
+            // silent unlock with the cleartext app key (no-op if no vault / password set)
+            if let Some(dot) = workspace::dot_sutra_existing(app.handle()) {
+                vault::auto_unlock(app.handle(), &dot);
+            }
             let state = app.state::<AppState>();
             // macros live in the workspace's .sutra/ if one is selected, else app data
             let path = workspace::macros_path(app.handle());
@@ -442,6 +544,14 @@ pub fn run() {
             observe_frames,
             list_i2c_defs,
             list_yantras,
+            security_status,
+            security_enable,
+            security_disable,
+            vault_unlock,
+            vault_lock,
+            security_set_password,
+            app_key_regenerate,
+            security_set_git_track,
             export_set,
             import_set,
             mcp_start,

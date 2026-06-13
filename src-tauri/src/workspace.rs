@@ -29,6 +29,19 @@ fn dot_sutra(app: &AppHandle) -> Option<PathBuf> {
     Some(dot)
 }
 
+/// The `.sutra/` path if a workspace is selected, *without* creating anything
+/// (for read-only status checks — e.g. the vault layer).
+pub fn dot_sutra_existing(app: &AppHandle) -> Option<PathBuf> {
+    current(app).map(|ws| ws.join(".sutra"))
+}
+
+/// Recompute the workspace's managed `.gitignore` block (security config changed).
+pub fn refresh_gitignore(app: &AppHandle) {
+    if let Some(dot) = dot_sutra(app) {
+        rewrite_gitignore(&dot);
+    }
+}
+
 /// Where the macro store lives: `<ws>/.sutra/macros.json`, else the app data dir.
 pub fn macros_path(app: &AppHandle) -> PathBuf {
     if let Some(dot) = dot_sutra(app) {
@@ -52,30 +65,56 @@ fn set(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
     std::fs::write(&marker, path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
     let dot = path.join(".sutra");
     let _ = std::fs::create_dir_all(dot.join("captures"));
-    ensure_gitignore(&dot);
+    rewrite_gitignore(&dot);
     seed_i2c_example(&dot.join("i2c"));
     seed_yantra_example(&dot.join("yantra"));
     Ok(path.to_path_buf())
 }
 
-// Keep workspace secrets out of version control if the folder is a git repo.
-// Git honors this nested .gitignore; we only create it (never clobber a user's).
-const SUTRA_GITIGNORE: &str = "# Sutra: keep device secrets out of version control.\n\
-# Network keys + the discovered model:\n\
-networks.json\n\
-networks.json.bak\n\
-keys.json\n\
-# Macros — some are marked secret:\n\
-macros.json\n\
-# Captured traffic — can hold decrypted/sensitive frames:\n\
-captures/\n\
-# NOT ignored (shareable, no secrets): i2c/ device defs, yantra/ control surfaces.\n";
+// Keep workspace secrets out of version control if the folder is a git repo. The
+// block is regenerated from the security config (see vault::gitignore_flags); we
+// only manage the marked region, so user-added lines outside it are preserved.
+const GI_BEGIN: &str = "# >>> sutra managed (do not edit this block)";
+const GI_END: &str = "# <<< sutra managed";
 
-fn ensure_gitignore(dot: &Path) {
+fn rewrite_gitignore(dot: &Path) {
     let _ = std::fs::create_dir_all(dot);
-    let gi = dot.join(".gitignore");
-    if !gi.exists() {
-        let _ = std::fs::write(&gi, SUTRA_GITIGNORE);
+    let (ignore_secrets, ignore_vault, ignore_captures) = crate::vault::gitignore_flags(dot);
+    let mut b = String::new();
+    b.push_str(GI_BEGIN);
+    b.push_str("\n# Sutra keeps device secrets out of version control.\n");
+    if ignore_secrets {
+        b.push_str("keys.json\nnetworks.json\nnetworks.json.bak\nmacros.json\n");
+    }
+    if ignore_vault {
+        b.push_str("# Encrypted vault — enable git tracking in Security to share it:\nsecrets.age\n");
+    }
+    if ignore_captures {
+        b.push_str("# Captures can contain unencrypted frames/packets:\ncaptures/\n");
+    }
+    b.push_str("# Shareable (no secrets): i2c/ and yantra/ are NOT ignored.\n");
+    b.push_str(GI_END);
+    b.push('\n');
+
+    let existing = std::fs::read_to_string(dot.join(".gitignore")).unwrap_or_default();
+    let _ = std::fs::write(dot.join(".gitignore"), merge_managed_block(&existing, &b));
+}
+
+/// Splice the managed block into `existing`, replacing any prior managed region
+/// and preserving everything outside it.
+fn merge_managed_block(existing: &str, block: &str) -> String {
+    if let (Some(start), Some(end)) = (existing.find(GI_BEGIN), existing.find(GI_END)) {
+        if start < end {
+            let after = end + GI_END.len();
+            let tail = existing[after..].trim_start_matches('\n');
+            let head = &existing[..start];
+            return format!("{head}{block}{tail}");
+        }
+    }
+    if existing.trim().is_empty() {
+        block.to_string()
+    } else {
+        format!("{}\n\n{block}", existing.trim_end())
     }
 }
 
@@ -353,9 +392,8 @@ pub struct WorkspaceKeys {
 /// Load the workspace key store (empty if no workspace or no file yet).
 pub fn load_keys(app: &AppHandle) -> WorkspaceKeys {
     dot_sutra(app)
-        .map(|d| d.join("keys.json"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|d| crate::vault::read_secret(app, &d, "keys.json"))
+        .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
@@ -449,8 +487,8 @@ pub fn active_network_index(nets: &Networks) -> Option<usize> {
 /// no decryption key is lost in the move.
 pub fn load_networks(app: &AppHandle) -> Networks {
     if let Some(dir) = dot_sutra(app) {
-        if let Ok(s) = std::fs::read_to_string(dir.join("networks.json")) {
-            if let Ok(n) = serde_json::from_str::<Networks>(&s) {
+        if let Some(b) = crate::vault::read_secret(app, &dir, "networks.json") {
+            if let Ok(n) = serde_json::from_slice::<Networks>(&b) {
                 return n;
             }
         }
@@ -487,9 +525,9 @@ pub fn set_node_name(app: &AppHandle, addr: &str, name: &str) -> Result<(), Stri
 
 /// Persist the workspace network model to `<ws>/.sutra/networks.json`.
 pub fn save_networks(app: &AppHandle, nets: &Networks) -> Result<(), String> {
-    let path = dot_sutra(app).ok_or("no workspace selected")?.join("networks.json");
-    let json = serde_json::to_string_pretty(nets).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    let dot = dot_sutra(app).ok_or("no workspace selected")?;
+    let json = serde_json::to_vec_pretty(nets).map_err(|e| e.to_string())?;
+    crate::vault::write_secret(app, &dot, "networks.json", &json)
 }
 
 /// The (key, label, protocol) tuples to hand tshark for decryption — every
