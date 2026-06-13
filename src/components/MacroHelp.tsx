@@ -40,6 +40,16 @@ const SECTIONS: { title: string; items: [string, string][] }[] = [
     ],
   },
   {
+    title: "Variables",
+    items: [
+      ["{$key} {$pan} {$channel}", "active network's key / PAN / channel"],
+      ["{$src} {$eui}", "our injector short addr / EUI-64"],
+      ["{$fc} {$seq}", "frame counter (auto-increments) · seq byte"],
+      ["{$zdp <cmd> <addr> [ep]}", "build an encrypted ZDP frame (active_ep/node_desc/simple_desc)"],
+      ["VAR NAME <value>", "set a user variable, used as {$NAME}"],
+    ],
+  },
+  {
     title: "Misc",
     items: [
       ["REM <t> · # <t>", "comment"],
@@ -48,6 +58,11 @@ const SECTIONS: { title: string; items: [string, string][] }[] = [
     ],
   },
 ];
+
+// Interview a node on the active Zigbee network by injecting an encrypted
+// ZDP Active-Endpoints request, then watch the sniffer panel for the reply.
+const ZIGBEE_EXAMPLE = `# active network is set in the Networks panel
+HEX {$zdp active_ep abcd}`;
 
 const EXAMPLE = `$Login
 SET Relay1 1
@@ -85,6 +100,18 @@ export function MacroHelp() {
           {EXAMPLE}
         </pre>
         <p className="text-[10px] text-muted-foreground">RUN needs a POSIX shell on the target.</p>
+      </div>
+      <div className="flex flex-col gap-1">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Zigbee interview
+        </div>
+        <pre className="overflow-x-auto rounded-md border bg-muted/40 p-2 font-mono text-[10px] leading-snug">
+          {ZIGBEE_EXAMPLE}
+        </pre>
+        <p className="text-[10px] text-muted-foreground">
+          Injects an encrypted ZDP request over the sniffer radio; watch the 802.15.4 panel for the
+          reply. Set the active network (key/PAN/channel) in the Networks panel first.
+        </p>
       </div>
     </div>
   );

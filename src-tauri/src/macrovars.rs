@@ -120,11 +120,23 @@ pub fn resolve_line(ctx: &mut VarContext, line: &str) -> Result<String, String> 
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'$' {
-            let close = line[i..]
-                .find('}')
-                .map(|rel| i + rel)
-                .ok_or("unterminated {$…} (missing '}')")?;
-            let inner = &line[i + 2..close]; // between "{$" and "}"
+            // find the matching '}', depth-aware so nested {$…} can be an argument
+            let mut depth = 0usize;
+            let mut close = None;
+            for (j, &b) in bytes.iter().enumerate().skip(i + 2) {
+                match b {
+                    b'{' => depth += 1,
+                    b'}' if depth == 0 => {
+                        close = Some(j);
+                        break;
+                    }
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            let close = close.ok_or("unterminated {$…} (missing '}')")?;
+            // resolve any nested {$…} in the args first, then split name + args
+            let inner = resolve_line(ctx, &line[i + 2..close])?;
             let mut toks = inner.split_whitespace();
             let name = toks.next().unwrap_or("");
             let args: Vec<&str> = toks.collect();
@@ -136,6 +148,36 @@ pub fn resolve_line(ctx: &mut VarContext, line: &str) -> Result<String, String> 
         }
     }
     Ok(out)
+}
+
+/// Resolve a whole macro: each line through `resolve_line`, plus the `VAR NAME
+/// value` directive (sets a user variable, usable later as `{$NAME}`; the value
+/// may itself contain `{$…}`). A consumed `VAR` line is replaced by a comment so
+/// the macro parser skips it. Left-to-right with side effects, so a `{$fc}` /
+/// `VAR` earlier in the macro is visible to lines below it.
+pub fn resolve_text(ctx: &mut VarContext, text: &str) -> Result<String, String> {
+    let mut out = Vec::new();
+    for line in text.split('\n') {
+        let mut w = line.trim_start().splitn(2, char::is_whitespace);
+        let kw = w.next().unwrap_or("");
+        if kw.eq_ignore_ascii_case("VAR") {
+            let rest = w.next().unwrap_or("").trim();
+            match rest.split_once(char::is_whitespace) {
+                Some((name, val)) => {
+                    let v = resolve_line(ctx, val.trim())?;
+                    ctx.vars.insert(name.to_string(), v);
+                }
+                None if !rest.is_empty() => {
+                    ctx.vars.insert(rest.to_string(), String::new());
+                }
+                None => {}
+            }
+            out.push("#".to_string()); // consumed — parser treats it as a comment
+        } else {
+            out.push(resolve_line(ctx, line)?);
+        }
+    }
+    Ok(out.join("\n"))
 }
 
 fn hex_str<const N: usize>(b: [u8; N]) -> String {
@@ -228,6 +270,18 @@ mod tests {
         assert_eq!(&aps[9..11], &[0xcd, 0xab], "ZDP target = abcd");
         // the frame counter advanced
         assert_eq!(c.frame_counter, 1001);
+    }
+
+    #[test]
+    fn var_directive_sets_and_uses() {
+        let mut c = ctx();
+        let text = "VAR node abcd\nVAR label n-{$node}\nHEX {$zdp active_ep {$node}}\nSTRING {$label}";
+        let out = resolve_text(&mut c, text).unwrap();
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines[0], "#", "VAR line consumed to a comment");
+        assert_eq!(lines[1], "#");
+        assert!(lines[2].starts_with("HEX 61 88"), "zdp used {{$node}}");
+        assert_eq!(lines[3], "STRING n-abcd", "nested {{$node}} inside VAR value");
     }
 
     #[test]

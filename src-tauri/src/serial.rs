@@ -1707,9 +1707,13 @@ fn parse_u16_prefixed(s: &str) -> u16 {
 /// advanced frame counter + assigned injector identity. A macro with no `{$`
 /// is returned unchanged and touches no workspace state.
 fn resolve_macro_text(shared: &Arc<Shared>, text: &str) -> Result<String, String> {
-    use crate::macrovars::{resolve_line, VarContext};
-    if !text.contains("{$") {
-        return Ok(text.to_string()); // fast path: no variables
+    use crate::macrovars::{resolve_text, VarContext};
+    // fast path: nothing to resolve and no VAR directive → no workspace I/O.
+    let has_var = text
+        .lines()
+        .any(|l| l.split_whitespace().next().is_some_and(|w| w.eq_ignore_ascii_case("VAR")));
+    if !text.contains("{$") && !has_var {
+        return Ok(text.to_string());
     }
     let app = shared
         .app
@@ -1743,11 +1747,7 @@ fn resolve_macro_text(shared: &Arc<Shared>, text: &str) -> Result<String, String
         VarContext::default() // no network → network vars error helpfully
     };
 
-    let resolved = text
-        .split('\n')
-        .map(|line| resolve_line(&mut ctx, line))
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\n");
+    let resolved = resolve_text(&mut ctx, text)?;
 
     // Persist the advanced counter + assigned identity for the next run.
     if let Some(i) = idx {
