@@ -169,6 +169,8 @@ export interface Network {
 }
 export interface Networks {
   networks: Network[];
+  /** label of the active network {$…} macro vars resolve against (else first keyed). */
+  active?: string;
 }
 /** Read the workspace network model from .sutra/networks.json (migrates keys.json). */
 export const getNetworks = () => invoke<Networks>("get_networks");
@@ -188,6 +190,13 @@ export async function onData(cb: (bytes: Uint8Array) => void): Promise<UnlistenF
  *  reset) and true when it auto-recovers. The connection stays open throughout. */
 export async function onLink(cb: (online: boolean) => void): Promise<UnlistenFn> {
   return listen<boolean>("sutra://link", (e) => cb(e.payload));
+}
+
+/** Fires when the backend establishes a connection — including one initiated
+ *  over MCP (not the UI). Lets the UI re-sync instead of showing a stale/errored
+ *  state while the backend actually holds the port. */
+export async function onConnected(cb: () => void): Promise<UnlistenFn> {
+  return listen("sutra://connected", () => cb());
 }
 
 // ---- high-level helpers ----

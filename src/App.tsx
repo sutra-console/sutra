@@ -114,6 +114,7 @@ import {
   cancelRun,
   onRuns,
   onLink,
+  onConnected,
   mcpStart,
   mcpStop,
   mcpStatus,
@@ -267,6 +268,7 @@ export default function App() {
   const [ch154, setCh154] = useState(0); // 802.15.4 sniffer channel (0 = auto-hop, 11..26 = pinned)
   const [tsharkOk, setTsharkOk] = useState(false); // Wireshark tshark present (enables in-app decode)
   const [networks, setNetworks] = useState<Network[]>([]); // workspace network model (keys + nodes)
+  const [networksActive, setNetworksActive] = useState(""); // active-network label (preserved on save)
   const [draftKey, setDraftKey] = useState("");
   const [draftKeyLabel, setDraftKeyLabel] = useState("");
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
@@ -374,10 +376,14 @@ export default function App() {
       setLinkOnline(online);
       setStatus(online ? "target online" : "target offline: link lost, retrying…");
     });
+    // A connect initiated over MCP (or any backend-side connect) → re-sync the UI
+    // so it never shows a stale/errored state while the backend holds the port.
+    const unConn = onConnected(() => syncConnState());
     return () => {
       un.then((f) => f()).catch(() => {});
       unRuns.then((f) => f()).catch(() => {});
       unLink.then((f) => f()).catch(() => {});
+      unConn.then((f) => f()).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -440,6 +446,23 @@ export default function App() {
           setStatus(`Duta (muxed): ${muxPort}`);
         }
         loadDevice();
+      } else if (ports.some((p) => p.name === selectedPort && p.is_duta)) {
+        // A manually-picked Duta: connect MUXED so CMD + the proper viewer
+        // (802.15.4 / I²C / BLE) light up — don't treat it as a dumb serial port.
+        // Fall back to raw serial if the mux PING fails (not actually muxed).
+        try {
+          await connectMuxed(selectedPort);
+          setHasCmd(true);
+          setDataPort(selectedPort);
+          setStatus(`Duta (muxed): ${selectedPort}`);
+          loadDevice();
+        } catch {
+          await serialConnect(selectedPort, null);
+          setHasCmd(false);
+          setDataPort(selectedPort);
+          clearDevice();
+          setStatus(`serial: ${selectedPort} @ ${baud}`);
+        }
       } else {
         await serialConnect(selectedPort, null);
         setHasCmd(false);
@@ -646,7 +669,7 @@ export default function App() {
           Promise.all(replies.map((f) => zdpIngest(f.mac).catch(() => null))).then((ds) => {
             const got = ds.filter((d): d is ZdpDiscovery => d != null);
             if (got.length) {
-              getNetworks().then((n) => setNetworks(n.networks ?? [])).catch(() => {});
+              getNetworks().then((n) => { setNetworks(n.networks ?? []); setNetworksActive(n.active ?? ""); }).catch(() => {});
               setStatus(`interviewed ${got.map((d) => `${d.addr} ${d.kind}`).join(", ")}`);
             }
           });
@@ -677,13 +700,13 @@ export default function App() {
 
   // Load the workspace's network model — keys + discovered nodes (reload on change).
   useEffect(() => {
-    getNetworks().then((n) => setNetworks(n.networks ?? [])).catch(() => setNetworks([]));
+    getNetworks().then((n) => { setNetworks(n.networks ?? []); setNetworksActive(n.active ?? ""); }).catch(() => setNetworks([]));
   }, [workspace]);
 
   async function saveNetworks(next: Network[]) {
     setNetworks(next);
     try {
-      await saveNetworksApi({ networks: next });
+      await saveNetworksApi({ networks: next, active: networksActive });
     } catch (e) {
       setStatus(`save network failed: ${e}`);
     }

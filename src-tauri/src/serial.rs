@@ -449,13 +449,14 @@ pub fn connect(
 
     let reader = data.try_clone().map_err(|e| format!("clone data: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
-    let handle = spawn_data_reader(app, reader, stop.clone(), shared.clone());
+    let handle = spawn_data_reader(app.clone(), reader, stop.clone(), shared.clone());
 
     *shared.mux_rx.lock().unwrap() = None;
     *shared.data_name.lock().unwrap() = Some(data_name.to_string());
     *shared.cmd_name.lock().unwrap() = cmd_name.map(|s| s.to_string());
     *shared.conn.lock().unwrap() =
         Some(Connection { cmd, data_writer: data, stop, muxed: false, reader: Some(handle) });
+    let _ = app.emit("sutra://connected", ()); // sync the UI (esp. for MCP-initiated connects)
     Ok(())
 }
 
@@ -598,13 +599,14 @@ pub fn connect_muxed(shared: &Arc<Shared>, app: AppHandle, name: &str) -> Result
     let reader = port.try_clone().map_err(|e| format!("clone port: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel();
-    let handle = spawn_mux_reader(app, reader, tx, stop.clone(), shared.clone());
+    let handle = spawn_mux_reader(app.clone(), reader, tx, stop.clone(), shared.clone());
 
     *shared.mux_rx.lock().unwrap() = Some(rx);
     *shared.data_name.lock().unwrap() = Some(name.to_string());
     *shared.cmd_name.lock().unwrap() = Some(name.to_string());
     *shared.conn.lock().unwrap() =
         Some(Connection { cmd: None, data_writer: port, stop, muxed: true, reader: Some(handle) });
+    let _ = app.emit("sutra://connected", ()); // sync the UI (esp. for MCP-initiated connects)
     Ok(())
 }
 
