@@ -4,7 +4,7 @@
 // renderer); App switches between them with an "Edit" toggle.
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Plus, Save, Undo2, Trash2, Move,
+  Plus, Save, Undo2, Redo2, RotateCcw, Trash2, Move,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalSpaceBetween, AlignVerticalSpaceBetween,
@@ -148,6 +148,9 @@ export function YantraEditor({
   const [containerW, setContainerW] = useState(0);
   const [ready, setReady] = useState(false);
   const [toolMenu, setToolMenu] = useState<"a" | "s" | null>(null); // open align/spacing submenu
+  const [past, setPast] = useState<YantraSpec[]>([]); // undo stack (checkpoints before each change)
+  const [future, setFuture] = useState<YantraSpec[]>([]); // redo stack
+  const committed = useRef<YantraSpec>(clone(spec)); // last history checkpoint
   const gridRef = useRef<HTMLDivElement>(null);
   const moveableRef = useRef<Moveable>(null);
   const toolbarRef = useRef<HTMLDivElement>(null); // floating toolbar, repositioned live during a gesture
@@ -171,7 +174,42 @@ export function YantraEditor({
   });
 
   // re-seed when the file prop changes (App also remounts via key, but be safe)
-  useEffect(() => { setDraft(clone(spec)); setSelected([]); }, [file]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    setDraft(clone(spec)); setSelected([]);
+    committed.current = clone(spec); setPast([]); setFuture([]);
+  }, [file]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Snapshot draft into the undo stack once edits settle (coalesces rapid changes
+  // like dragging or typing into a single history step).
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (JSON.stringify(draft) !== JSON.stringify(committed.current)) {
+        setPast((p) => [...p, committed.current].slice(-100));
+        committed.current = clone(draft);
+        setFuture([]);
+      }
+    }, 350);
+    return () => clearTimeout(id);
+  }, [draft]);
+
+  const undo = () => {
+    if (!past.length) return;
+    const prev = past[past.length - 1];
+    setPast((p) => p.slice(0, -1));
+    setFuture((f) => [committed.current, ...f]);
+    committed.current = clone(prev);
+    setDraft(clone(prev));
+    setSelected([]);
+  };
+  const redo = () => {
+    if (!future.length) return;
+    const next = future[0];
+    setFuture((f) => f.slice(1));
+    setPast((p) => [...p, committed.current]);
+    committed.current = clone(next);
+    setDraft(clone(next));
+    setSelected([]);
+  };
 
   // measure the canvas so grid cells map to pixels (Moveable works in px)
   useEffect(() => {
@@ -190,18 +228,32 @@ export function YantraEditor({
   // Delete/Backspace removes the selection (unless a text field is focused)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Delete" && e.key !== "Backspace") return;
       const ae = document.activeElement;
-      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
-      if (selected.length) {
+      const typing = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA");
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        if (typing) return; // let the text field handle its own undo
         e.preventDefault();
-        removeMany(selected);
-        setSelected([]);
+        if (e.shiftKey) redo(); else undo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        if (typing) return;
+        e.preventDefault();
+        redo();
+        return;
+      }
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (typing) return;
+        if (selected.length) {
+          e.preventDefault();
+          removeMany(selected);
+          setSelected([]);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selected, past, future]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setWidget = (i: number, patch: Partial<YantraWidget>) =>
     setDraft((d) => {
@@ -386,9 +438,17 @@ export function YantraEditor({
           <span className="ml-1 text-[10px] text-muted-foreground">hold ⇧ to snap to grid</span>
           <div className="ml-auto flex items-center gap-1.5">
             {dirty && <span className="text-[11px] text-amber-600 dark:text-amber-400">unsaved</span>}
+            <Button size="sm" variant="outline" className="h-7 px-1.5" title="Undo (Ctrl+Z)"
+              disabled={!past.length} onClick={undo}>
+              <Undo2 className="size-3.5" />
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 px-1.5" title="Redo (Ctrl+Shift+Z)"
+              disabled={!future.length} onClick={redo}>
+              <Redo2 className="size-3.5" />
+            </Button>
             <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
-              disabled={!dirty} onClick={() => { setDraft(clone(spec)); setSelected([]); }}>
-              <Undo2 className="size-3" /> Revert
+              disabled={!dirty} onClick={() => { setDraft(clone(spec)); setSelected([]); }} title="Revert to saved">
+              <RotateCcw className="size-3" /> Revert
             </Button>
             <Button size="sm" className="h-7 gap-1 px-2 text-[11px]"
               disabled={!dirty || saving} onClick={() => onSave(draft)}>
