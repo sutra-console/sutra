@@ -305,6 +305,12 @@ fn list_i2c_defs(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     workspace::list_i2c_defs(&app)
 }
 
+/// The .yantra control surfaces in the workspace's .sutra/yantra/ (parsed YAML→JSON).
+#[tauri::command]
+fn list_yantras(app: tauri::AppHandle) -> Vec<workspace::YantraDoc> {
+    workspace::list_yantras(&app)
+}
+
 #[tauri::command]
 fn macros_set(state: tauri::State<AppState>, macros: Vec<MacroRec>) {
     serial::macros_set(&state.shared, macros);
@@ -410,6 +416,7 @@ pub fn run() {
             zdp_ingest,
             observe_frames,
             list_i2c_defs,
+            list_yantras,
             export_set,
             import_set,
             mcp_start,

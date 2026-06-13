@@ -630,6 +630,33 @@ export async function i2cScan(): Promise<number[]> {
   return found;
 }
 
+// ---- .yantra control surfaces (workspace .sutra/yantra/*.yantra) ----
+/** A widget in a .yantra control surface. Loose by design — new types/fields
+ *  (scripts, plugins) slot in without breaking the renderer. */
+export interface YantraWidget {
+  type: string; // button | select | slider | toggle | readout | label | …
+  label?: string;
+  help?: string;
+  x?: number; y?: number; w?: number; h?: number; // grid placement (cells)
+  send?: string; // button/slider: text to send ({value} → the slider value)
+  on?: string; off?: string; // toggle
+  min?: number; max?: number; step?: number; // slider
+  options?: { label: string; send: string }[]; // select
+  match?: string; // readout: regex over the console; capture group 1 is shown
+}
+export interface YantraSpec {
+  name?: string;
+  description?: string;
+  cols?: number; // grid columns (default 6)
+  widgets?: YantraWidget[];
+}
+export interface YantraDoc {
+  file: string; // "gps.yantra"
+  doc: YantraSpec;
+}
+/** Load the workspace's .yantra control surfaces (parsed YAML→JSON). */
+export const listYantras = () => invoke<YantraDoc[]>("list_yantras");
+
 // ---- I2C device definitions (workspace .sutra/i2c/*.json) ----
 export interface I2cReg {
   name: string;

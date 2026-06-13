@@ -52,6 +52,7 @@ fn set(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
     std::fs::write(&marker, path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
     let _ = std::fs::create_dir_all(path.join(".sutra").join("captures"));
     seed_i2c_example(&path.join(".sutra").join("i2c"));
+    seed_yantra_example(&path.join(".sutra").join("yantra"));
     Ok(path.to_path_buf())
 }
 
@@ -69,6 +70,43 @@ const I2C_EXAMPLE: &str = r#"{
     { "name": "Reset",   "reg": 255, "bytes": 0, "access": "w",  "control": "button", "desc": "command, no value" }
   ]
 }
+"#;
+
+// Starter .yantra: a generic MTK/NMEA GPS over UART. Each widget sends UART text;
+// readouts match a capture group on the live console stream. Hand-editable —
+// this is what a vendor would ship to make Sutra their device's config app.
+const GPS_YANTRA: &str = r#"# GPS module control surface (generic MTK / NMEA over UART).
+# Widgets send the `send:` text to the device; readouts watch the console for `match`.
+name: GPS Module
+description: Configure an MTK/NMEA GPS over UART.
+cols: 6
+widgets:
+  - { type: button, label: Hot Start,     x: 0, y: 0, w: 2, h: 1, send: "$PMTK101*32\r\n" }
+  - { type: button, label: Cold Start,    x: 2, y: 0, w: 2, h: 1, send: "$PMTK103*30\r\n" }
+  - { type: button, label: Factory Reset, x: 4, y: 0, w: 2, h: 1, send: "$PMTK104*37\r\n" }
+  - type: select
+    label: Update rate
+    x: 0
+    y: 1
+    w: 3
+    h: 1
+    options:
+      - { label: "1 Hz",  send: "$PMTK220,1000*1F\r\n" }
+      - { label: "5 Hz",  send: "$PMTK220,200*2C\r\n" }
+      - { label: "10 Hz", send: "$PMTK220,100*2F\r\n" }
+  - type: select
+    label: NMEA output
+    x: 3
+    y: 1
+    w: 3
+    h: 1
+    options:
+      - { label: "RMC + GGA", send: "$PMTK314,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28\r\n" }
+      - { label: "All",       send: "$PMTK314,-1*04\r\n" }
+  - { type: readout, label: Fix quality, x: 0, y: 2, w: 3, h: 1, match: "GGA,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,([0-9])", help: "0 none · 1 GPS · 2 DGPS" }
+  - { type: readout, label: Satellites,  x: 3, y: 2, w: 3, h: 1, match: "GGA(?:,[^,]*){6},0*([0-9]+)" }
+# Future: a `transform:` / `script:` block (Lua) per widget for richer message
+# parsing/formatting, and plugin widget `type`s beyond the built-ins.
 "#;
 
 /// Drop a starter def into an empty i2c/ dir so the controls view has something
@@ -99,6 +137,50 @@ pub fn list_i2c_defs(app: &AppHandle) -> Vec<serde_json::Value> {
         }
     }
     out
+}
+
+// ---- .yantra control surfaces (.sutra/yantra/*.yantra) ---------------------
+// A .yantra is a YAML doc describing a device's controls: a list of widgets,
+// each bound to a command/macro it sends (and optionally a value it reads). Sutra
+// renders it as a panel — ship a .yantra and Sutra becomes that device's config
+// app. Parsed YAML→JSON here (loose, so the schema can grow widget types/scripts/
+// plugins without a rigid Rust struct); the frontend renders from the JSON.
+
+#[derive(serde::Serialize)]
+pub struct YantraDoc {
+    pub file: String,             // filename, e.g. "gps.yantra"
+    pub doc: serde_json::Value,   // the parsed spec
+}
+
+/// Every .yantra in `<ws>/.sutra/yantra/`, parsed YAML→JSON. Invalid files are
+/// skipped (a bad one shouldn't hide the rest).
+pub fn list_yantras(app: &AppHandle) -> Vec<YantraDoc> {
+    let Some(dot) = dot_sutra(app) else { return Vec::new() };
+    let dir = dot.join("yantra");
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "yantra" || x == "yaml" || x == "yml") {
+                if let Some(doc) = std::fs::read_to_string(&p)
+                    .ok()
+                    .and_then(|s| serde_yaml::from_str::<serde_json::Value>(&s).ok())
+                {
+                    out.push(YantraDoc { file: e.file_name().to_string_lossy().into_owned(), doc });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.file.cmp(&b.file));
+    out
+}
+
+fn seed_yantra_example(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let empty = std::fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+    if empty {
+        let _ = std::fs::write(dir.join("gps.yantra"), GPS_YANTRA);
+    }
 }
 
 // ---- pcap export -----------------------------------------------------------

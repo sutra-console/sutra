@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Usb, Plug, PlugZap, Play, Plus, Trash2, Cpu, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth, Globe,
-  Radio, Activity, Terminal as TerminalIcon, FolderOpen,
+  Radio, Activity, Terminal as TerminalIcon, FolderOpen, LayoutGrid,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,7 @@ import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { BleSnifferPanel } from "@/components/BleSnifferPanel";
 import { Ieee154Panel, type NodeSnapshot } from "@/components/Ieee154Panel";
+import { YantraCanvas } from "@/components/YantraCanvas";
 import { ConfigureDevice } from "@/components/ConfigureDevice";
 import { I2cPanel } from "@/components/I2cPanel";
 import { NetworkConfig } from "@/components/NetworkConfig";
@@ -81,6 +82,8 @@ import {
   getWorkspace,
   type I2cDef,
   listI2cDefs,
+  listYantras,
+  type YantraDoc,
   pickWorkspace,
   rgbToHex,
   saveBlePcap,
@@ -250,6 +253,9 @@ export default function App() {
     setProfilesOpen(false);
   }
   const [status, setStatus] = useState("disconnected");
+  const [mainView, setMainView] = useState<"data" | "controls">("data"); // card view: data stream vs .yantra controls
+  const [yantras, setYantras] = useState<YantraDoc[]>([]); // workspace .yantra control surfaces
+  const [yantraSel, setYantraSel] = useState(0); // which .yantra is shown
   const [outBitmap, setOutBitmap] = useState(0); // device output states (bit i = control i)
   const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
   const [pwmVals, setPwmVals] = useState<Record<number, number>>({}); // index -> duty 0..1023
@@ -359,6 +365,7 @@ export default function App() {
     refreshPorts();
     getWorkspace().then(setWorkspace).catch(() => {});
     listI2cDefs().then(setI2cDefs).catch(() => {});
+    listYantras().then(setYantras).catch(() => {});
     macrosGet().then(setMacros).catch(() => {});
     syncConnState(); // adopt a connection the backend already holds (after a reload)
 
@@ -852,6 +859,7 @@ export default function App() {
         setWorkspace(path);
         macrosGet().then(setMacros).catch(() => {}); // store re-pointed into .sutra
         listI2cDefs().then(setI2cDefs).catch(() => {}); // defs from the new .sutra/i2c
+        listYantras().then(setYantras).catch(() => {}); // control surfaces from .sutra/yantra
         setStatus(`workspace: ${path}`);
       }
     } catch (e) {
@@ -1402,15 +1410,32 @@ export default function App() {
                       : kind === DATA_KIND.I2C
                         ? "I²C"
                         : "Console";
+                const tab = (active: boolean) =>
+                  `flex items-center gap-1.5 border-b-2 px-2 py-2 text-sm font-medium ${active ? "border-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`;
                 return (
-                  <div className="flex items-center gap-1.5 border-b-2 border-primary px-2 py-2 text-sm font-medium">
-                    <Icon className="size-3.5" /> {label}
-                  </div>
+                  <>
+                    <button type="button" className={tab(mainView === "data")} onClick={() => setMainView("data")}>
+                      <Icon className="size-3.5" /> {label}
+                    </button>
+                    {yantras.length > 0 && (
+                      <button type="button" className={tab(mainView === "controls")} onClick={() => setMainView("controls")}>
+                        <LayoutGrid className="size-3.5" /> Controls
+                      </button>
+                    )}
+                  </>
                 );
               })()}
             </div>
             <div className="ml-auto flex items-center gap-2 self-center">
-              {dataSrcPins && dataDesc?.kind === DATA_KIND.UART && (
+              {mainView === "controls" && yantras.length > 1 && (
+                <select className="h-7 rounded border bg-background px-1 text-xs"
+                  value={yantraSel} onChange={(e) => setYantraSel(Number(e.target.value))}>
+                  {yantras.map((y, i) => (
+                    <option key={y.file} value={i}>{y.doc.name || y.file}</option>
+                  ))}
+                </select>
+              )}
+              {mainView === "data" && dataSrcPins && dataDesc?.kind === DATA_KIND.UART && (
                 <span className="font-mono text-[10px] text-muted-foreground"
                   title={`bridged into the Duta on TX GPIO${dataSrcPins.tx} · RX GPIO${dataSrcPins.rx}`}>
                   TX {dataSrcPins.tx >= 0 ? `GPIO${dataSrcPins.tx}` : "—"} · RX {dataSrcPins.rx >= 0 ? `GPIO${dataSrcPins.rx}` : "—"}
@@ -1419,7 +1444,7 @@ export default function App() {
               {/* Bridge-medium selector — only for UART/I²C bridges. A sniffer's
                   medium is the radio (not switchable); never offer it there, or
                   switching to I²C strands the view with no way back. */}
-              {hasKindSwitch && connected &&
+              {mainView === "data" && hasKindSwitch && connected &&
                 (dataDesc?.kind === DATA_KIND.UART || dataDesc?.kind === DATA_KIND.I2C) && (
                   <div className="flex items-center overflow-hidden rounded border text-[10px]">
                     {[
@@ -1435,7 +1460,7 @@ export default function App() {
                     ))}
                   </div>
                 )}
-              {dataDesc?.kind === DATA_KIND.UART && (
+              {mainView === "data" && dataDesc?.kind === DATA_KIND.UART && (
                 <span className="text-xs text-muted-foreground">
                   {baud} 8{parity[0].toUpperCase()}{stopBits}
                 </span>
@@ -1446,7 +1471,19 @@ export default function App() {
               constrains its height — otherwise a tall list (802.15.4 grouped)
               overflows with no scroll instead of scrolling internally. */}
           <CardContent className="flex min-h-0 flex-1 flex-col bg-[#0a0a0b] p-2">
-            {dataDesc?.kind === DATA_KIND.I2C ? (
+            {mainView === "controls" ? (
+              yantras[yantraSel] ? (
+                <YantraCanvas
+                  spec={yantras[yantraSel].doc}
+                  disabled={!connected}
+                  onSend={(text) => dataWrite(Array.from(new TextEncoder().encode(text)))}
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                  Drop a .yantra in the workspace's .sutra/yantra/ to add a control surface.
+                </div>
+              )
+            ) : dataDesc?.kind === DATA_KIND.I2C ? (
               <I2cPanel
                 records={i2cRecords}
                 defs={i2cDefs}
