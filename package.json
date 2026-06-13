@@ -29,6 +29,9 @@
     "react": "^19.1.0",
     "react-colorful": "^5.7.0",
     "react-dom": "^19.1.0",
+    "react-moveable": "^0.56.0",
+    "react-selecto": "^1.26.3",
+    "selecto": "^1.26.3",
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {

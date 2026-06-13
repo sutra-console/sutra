@@ -2,8 +2,10 @@
 // edit their properties (incl. the transport-agnostic action), add/remove widgets,
 // and save back to the .yantra file. Pairs with YantraCanvas (the read-only
 // renderer); App switches between them with an "Edit" toggle.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Save, Undo2, Trash2, Move } from "lucide-react";
+import Moveable from "react-moveable";
+import Selecto from "react-selecto";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -137,15 +139,59 @@ export function YantraEditor({
   saving?: boolean;
 }) {
   const [draft, setDraft] = useState<YantraSpec>(() => clone(spec));
-  const [sel, setSel] = useState<number | null>(null);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [containerW, setContainerW] = useState(0);
+  const [ready, setReady] = useState(false);
   const gridRef = useRef<HTMLDivElement>(null);
+  const moveableRef = useRef<Moveable>(null);
+  const widgetRefs = useRef<(HTMLDivElement | null)[]>([]);
+
   const cols = draft.cols ?? 6;
   const free = draft.layout === "free";
   const widgets = draft.widgets ?? [];
+  widgetRefs.current.length = widgets.length;
+  const cw = containerW > 0 ? containerW / cols : 80;
   const dirty = JSON.stringify(draft) !== JSON.stringify(spec);
+  const sel = selected.length ? selected[0] : null;
 
-  // re-seed when the file prop changes (App passes key=file too, but be safe)
-  useEffect(() => { setDraft(clone(spec)); setSel(null); }, [file]); // eslint-disable-line react-hooks/exhaustive-deps
+  // px geometry of a widget (grid cells × cell size, or absolute pixels in free mode)
+  const geom = (w: YantraWidget) =>
+    free
+      ? { left: w.x ?? 0, top: w.y ?? 0, width: w.w ?? 140, height: w.h ?? 48 }
+      : { left: (w.x ?? 0) * cw, top: (w.y ?? 0) * ROW_H, width: (w.w ?? 1) * cw, height: (w.h ?? 1) * ROW_H };
+
+  // re-seed when the file prop changes (App also remounts via key, but be safe)
+  useEffect(() => { setDraft(clone(spec)); setSelected([]); }, [file]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // measure the canvas so grid cells map to pixels (Moveable works in px)
+  useEffect(() => {
+    setReady(true);
+    const el = gridRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setContainerW(el.clientWidth));
+    ro.observe(el);
+    setContainerW(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
+
+  // keep Moveable's box synced when geometry changes from outside a gesture
+  useEffect(() => { moveableRef.current?.updateRect(); }, [draft, containerW, free, selected]);
+
+  // Delete/Backspace removes the selection (unless a text field is focused)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+      if (selected.length) {
+        e.preventDefault();
+        removeMany(selected);
+        setSelected([]);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setWidget = (i: number, patch: Partial<YantraWidget>) =>
     setDraft((d) => {
@@ -153,7 +199,10 @@ export function YantraEditor({
       ws[i] = { ...ws[i], ...patch };
       return { ...d, widgets: ws };
     });
-  const addWidget = (type: string) =>
+  const removeMany = (indices: number[]) =>
+    setDraft((d) => ({ ...d, widgets: (d.widgets ?? []).filter((_, j) => !indices.includes(j)) }));
+  const addWidget = (type: string) => {
+    const newIdx = widgets.length;
     setDraft((d) => {
       const ws = d.widgets ?? [];
       const w = defaultWidget(type, 0);
@@ -165,95 +214,73 @@ export function YantraEditor({
       }
       return { ...d, widgets: [...ws, w] };
     });
-  const removeWidget = (i: number) =>
-    setDraft((d) => ({ ...d, widgets: (d.widgets ?? []).filter((_, j) => j !== i) }));
+    setSelected([newIdx]);
+  };
 
   // Flip grid⇄free, converting coordinates through the current cell size so
   // widgets keep their on-screen position instead of jumping.
   const toggleFree = () =>
     setDraft((d) => {
       const toFree = d.layout !== "free";
-      const { cw, ch } = cellSize();
-      const widgets = (d.widgets ?? []).map((w) =>
+      const cwNow = containerW > 0 ? containerW / (d.cols ?? 6) : 80;
+      const ws = (d.widgets ?? []).map((w) =>
         toFree
           ? {
               ...w,
-              x: Math.round((w.x ?? 0) * cw), y: Math.round((w.y ?? 0) * ch),
-              w: Math.round((w.w ?? 1) * cw), h: Math.round((w.h ?? 1) * ch),
+              x: Math.round((w.x ?? 0) * cwNow), y: Math.round((w.y ?? 0) * ROW_H),
+              w: Math.round((w.w ?? 1) * cwNow), h: Math.round((w.h ?? 1) * ROW_H),
             }
           : {
               ...w,
-              x: Math.round((w.x ?? 0) / cw), y: Math.round((w.y ?? 0) / ch),
-              w: Math.max(1, Math.round((w.w ?? cw) / cw)), h: Math.max(1, Math.round((w.h ?? ch) / ch)),
+              x: Math.round((w.x ?? 0) / cwNow), y: Math.round((w.y ?? 0) / ROW_H),
+              w: Math.max(1, Math.round((w.w ?? cwNow) / cwNow)), h: Math.max(1, Math.round((w.h ?? ROW_H) / ROW_H)),
             },
       );
-      return { ...d, layout: toFree ? "free" : "grid", widgets };
+      return { ...d, layout: toFree ? "free" : "grid", widgets: ws };
     });
 
-  // --- drag / resize -------------------------------------------------------
-  const drag = useRef<null | {
-    mode: "move" | "resize"; idx: number;
-    px: number; py: number; x: number; y: number; w: number; h: number;
-  }>(null);
-
-  const cellSize = () => {
-    const el = gridRef.current;
-    const cw = el ? el.clientWidth / cols : 80;
-    return { cw, ch: ROW_H };
+  // Read the final DOM geometry of the dragged/resized widgets back into the spec
+  // (cells in grid mode, pixels in free mode), then clear the gesture transforms.
+  const commit = (indices: number[]) => {
+    const cont = gridRef.current;
+    if (!cont) return;
+    const cr = cont.getBoundingClientRect();
+    const cwNow = containerW > 0 ? containerW / cols : 80;
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      for (const i of indices) {
+        const el = widgetRefs.current[i];
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        const left = r.left - cr.left + cont.scrollLeft;
+        const top = r.top - cr.top + cont.scrollTop;
+        ws[i] = d.layout === "free"
+          ? { ...ws[i], x: Math.max(0, Math.round(left)), y: Math.max(0, Math.round(top)), w: Math.round(r.width), h: Math.round(r.height) }
+          : {
+              ...ws[i],
+              x: Math.max(0, Math.round(left / cwNow)),
+              y: Math.max(0, Math.round(top / ROW_H)),
+              w: Math.max(1, Math.round(r.width / cwNow)),
+              h: Math.max(1, Math.round(r.height / ROW_H)),
+            };
+      }
+      return { ...d, widgets: ws };
+    });
+    for (const i of indices) {
+      const el = widgetRefs.current[i];
+      if (el) el.style.transform = "";
+    }
   };
 
-  useEffect(() => {
-    const move = (e: PointerEvent) => {
-      const g = drag.current;
-      if (!g) return;
-      const w0 = widgets[g.idx];
-      if (!w0) return;
-      if (free) {
-        // pixel-precise, no snapping
-        const dx = e.clientX - g.px, dy = e.clientY - g.py;
-        if (g.mode === "move") {
-          setWidget(g.idx, { x: Math.max(0, Math.round(g.x + dx)), y: Math.max(0, Math.round(g.y + dy)) });
-        } else {
-          setWidget(g.idx, { w: Math.max(24, Math.round(g.w + dx)), h: Math.max(24, Math.round(g.h + dy)) });
-        }
-        return;
-      }
-      const { cw, ch } = cellSize();
-      const dx = Math.round((e.clientX - g.px) / cw);
-      const dy = Math.round((e.clientY - g.py) / ch);
-      if (g.mode === "move") {
-        const w = w0.w ?? 1;
-        setWidget(g.idx, {
-          x: Math.max(0, Math.min(cols - w, g.x + dx)),
-          y: Math.max(0, g.y + dy),
-        });
-      } else {
-        const x = w0.x ?? 0;
-        setWidget(g.idx, {
-          w: Math.max(1, Math.min(cols - x, g.w + dx)),
-          h: Math.max(1, g.h + dy),
-        });
-      }
-    };
-    const up = () => { drag.current = null; };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    return () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-  }, [widgets, cols, free]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const startDrag = (mode: "move" | "resize", i: number, e: React.PointerEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const w = widgets[i];
-    setSel(i);
-    drag.current = {
-      mode, idx: i, px: e.clientX, py: e.clientY,
-      x: w.x ?? 0, y: w.y ?? 0, w: w.w ?? 1, h: w.h ?? 1,
-    };
-  };
+  // sibling elements (for alignment/snap guidelines)
+  const guidelines = useMemo(
+    () => widgetRefs.current.filter((el, i) => !!el && !selected.includes(i)) as HTMLElement[],
+    [selected, draft, containerW], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const targets = useMemo(
+    () => selected.map((i) => widgetRefs.current[i]).filter(Boolean) as HTMLElement[],
+    [selected, draft, containerW], // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const rows = Math.max(4, widgets.reduce((m, w) => Math.max(m, (w.y ?? 0) + (w.h ?? 1)), 0) + 1);
 
@@ -277,7 +304,7 @@ export function YantraEditor({
           <div className="ml-auto flex items-center gap-1.5">
             {dirty && <span className="text-[11px] text-amber-600 dark:text-amber-400">unsaved</span>}
             <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
-              disabled={!dirty} onClick={() => { setDraft(clone(spec)); setSel(null); }}>
+              disabled={!dirty} onClick={() => { setDraft(clone(spec)); setSelected([]); }}>
               <Undo2 className="size-3" /> Revert
             </Button>
             <Button size="sm" className="h-7 gap-1 px-2 text-[11px]"
@@ -289,46 +316,90 @@ export function YantraEditor({
 
         <div
           ref={gridRef}
-          className="relative flex-1 overflow-auto rounded border bg-muted/10"
+          className="yantra-canvas relative flex-1 overflow-auto rounded border bg-muted/10"
           style={{
-            backgroundSize: free ? undefined : `calc(100% / ${cols}) ${ROW_H}px`,
+            backgroundSize: free ? undefined : `${cw}px ${ROW_H}px`,
             backgroundImage: free
               ? undefined
               : "linear-gradient(to right, hsl(var(--border)/0.5) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)/0.5) 1px, transparent 1px)",
             minHeight: free ? undefined : rows * ROW_H,
           }}
-          onPointerDown={() => setSel(null)}
         >
-          {widgets.map((w, i) => {
-            const pos = free
-              ? { left: w.x ?? 0, top: w.y ?? 0, width: w.w ?? 140, height: w.h ?? 48 }
-              : {
-                  left: `calc(${((w.x ?? 0) / cols) * 100}%)`,
-                  top: (w.y ?? 0) * ROW_H,
-                  width: `calc(${((w.w ?? 1) / cols) * 100}%)`,
-                  height: (w.h ?? 1) * ROW_H,
-                };
-            return (
-              <div
-                key={i}
-                onPointerDown={(e) => startDrag("move", i, e)}
-                className={`absolute cursor-move select-none rounded border bg-card p-1 text-[11px] shadow-sm ${
-                  sel === i ? "ring-2 ring-primary" : ""
-                }`}
-                style={{ ...pos, padding: 4 }}
-              >
-                <div className="flex h-full flex-col overflow-hidden">
-                  <span className="truncate font-medium">{w.label || w.type}</span>
-                  <span className="truncate text-[10px] text-muted-foreground">{w.type}</span>
-                </div>
-                {/* resize handle */}
-                <div
-                  onPointerDown={(e) => startDrag("resize", i, e)}
-                  className="absolute bottom-0 right-0 size-3 cursor-se-resize rounded-tl bg-primary/40"
-                />
+          {widgets.map((w, i) => (
+            <div
+              key={i}
+              data-idx={i}
+              ref={(el) => { widgetRefs.current[i] = el; }}
+              className={`yantra-widget absolute select-none rounded border bg-card text-[11px] shadow-sm ${
+                selected.includes(i) ? "ring-2 ring-primary" : ""
+              }`}
+              style={{ ...geom(w), padding: 4 }}
+            >
+              <div className="flex h-full flex-col overflow-hidden">
+                <span className="truncate font-medium">{w.label || w.type}</span>
+                <span className="truncate text-[10px] text-muted-foreground">{w.type}</span>
               </div>
-            );
-          })}
+            </div>
+          ))}
+
+          {ready && (
+            <Moveable
+              ref={moveableRef}
+              target={targets}
+              draggable
+              resizable
+              rotatable={false}
+              snappable
+              elementGuidelines={guidelines}
+              snapGridWidth={free ? undefined : cw}
+              snapGridHeight={free ? undefined : ROW_H}
+              bounds={{ left: 0, top: 0, position: "css" }}
+              throttleDrag={0}
+              throttleResize={0}
+              onDrag={({ target, transform }) => { (target as HTMLElement).style.transform = transform; }}
+              onDragEnd={() => commit(selected)}
+              onDragGroup={({ events }) => events.forEach((ev) => { (ev.target as HTMLElement).style.transform = ev.transform; })}
+              onDragGroupEnd={() => commit(selected)}
+              onResize={({ target, width, height, drag }) => {
+                const el = target as HTMLElement;
+                el.style.width = `${width}px`;
+                el.style.height = `${height}px`;
+                el.style.transform = drag.transform;
+              }}
+              onResizeEnd={() => commit(selected)}
+              onResizeGroup={({ events }) => events.forEach((ev) => {
+                const el = ev.target as HTMLElement;
+                el.style.width = `${ev.width}px`;
+                el.style.height = `${ev.height}px`;
+                el.style.transform = ev.drag.transform;
+              })}
+              onResizeGroupEnd={() => commit(selected)}
+            />
+          )}
+          {ready && (
+            <Selecto
+              dragContainer={gridRef.current}
+              selectableTargets={[".yantra-widget"]}
+              hitRate={0}
+              selectByClick
+              selectFromInside={false}
+              toggleContinueSelect={["shift"]}
+              onDragStart={(e) => {
+                const t = e.inputEvent.target as HTMLElement;
+                const mv = moveableRef.current;
+                if (mv?.isMoveableElement(t)) { e.stop(); return; }
+                if (selected.some((i) => { const el = widgetRefs.current[i]; return !!el && (el === t || el.contains(t)); })) {
+                  e.stop();
+                }
+              }}
+              onSelectEnd={(e) => {
+                const idxs = e.selected
+                  .map((el) => Number((el as HTMLElement).dataset.idx))
+                  .filter((n) => !Number.isNaN(n));
+                setSelected(idxs);
+              }}
+            />
+          )}
         </div>
       </div>
 
@@ -349,13 +420,15 @@ export function YantraEditor({
               <Input className="h-7 w-20 text-xs" type="number" min={1} max={24} value={cols}
                 onChange={(e) => setDraft((d) => ({ ...d, cols: Math.max(1, +e.target.value) }))} />
             </Field>
-            <p className="text-[10px] text-muted-foreground">Select a widget to edit it, or drag one on the canvas.</p>
+            <p className="text-[10px] text-muted-foreground">
+              Click a widget to edit it (shift-click or marquee for many); drag to move, handles to resize.
+            </p>
           </div>
         ) : (
           <WidgetProps
             w={widgets[sel]}
             onChange={(p) => setWidget(sel, p)}
-            onDelete={() => { removeWidget(sel); setSel(null); }}
+            onDelete={() => { removeMany([sel]); setSelected([]); }}
           />
         )}
       </div>
