@@ -1013,10 +1013,7 @@ pub fn run_macro(shared: &Arc<Shared>, name: &str) -> Result<(), String> {
         .find(|s| s.name == name)
         .map(|s| s.text.clone());
     match text {
-        Some(t) => {
-            play(shared, name, &t);
-            Ok(())
-        }
+        Some(t) => play(shared, name, &t),
         None => Err(format!("no macro named '{name}'")),
     }
 }
@@ -1683,8 +1680,86 @@ fn run_steps(ctx: &MacroCtx, steps: &[Step], depth: u32) {
 
 /// Execute a macro against the DATA port on a background thread, tracked as a
 /// cancellable run in the registry.
-pub fn play(shared: &Arc<Shared>, name: &str, text: &str) {
-    let steps = parse_macro(text);
+// Sutra's host-side injector identity, assigned to a network on first use. The
+// short address is high (unlikely to collide with an assigned node); the EUI-64
+// is locally-administered (bit 1 of the first octet set) and spells "SUTRA".
+// Coordinator-safety: these must differ from every real node on the network.
+const DEFAULT_INJECT_SRC: u16 = 0x7fff;
+const DEFAULT_INJECT_EUI: &str = "0253555452410001"; // 02:53('S')55('U')54('T')52('R')41('A')00 01
+
+fn parse_fixed_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
+    let t = s.trim().trim_start_matches("0x");
+    if t.len() != N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+fn parse_u16_prefixed(s: &str) -> u16 {
+    u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).unwrap_or(0)
+}
+
+/// Resolve every `{$…}` in `text` against the active network, persisting the
+/// advanced frame counter + assigned injector identity. A macro with no `{$`
+/// is returned unchanged and touches no workspace state.
+fn resolve_macro_text(shared: &Arc<Shared>, text: &str) -> Result<String, String> {
+    use crate::macrovars::{resolve_line, VarContext};
+    if !text.contains("{$") {
+        return Ok(text.to_string()); // fast path: no variables
+    }
+    let app = shared
+        .app
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("macro variables need a workspace (no app handle)")?;
+    let mut nets = crate::workspace::load_networks(&app);
+    let idx = crate::workspace::active_network_index(&nets);
+
+    let mut ctx = if let Some(i) = idx {
+        let n = &mut nets.networks[i];
+        // assign a stable injector identity on first use (coordinator-safety).
+        if n.inject_src == 0 {
+            n.inject_src = DEFAULT_INJECT_SRC;
+        }
+        if n.inject_eui.trim().is_empty() {
+            n.inject_eui = DEFAULT_INJECT_EUI.to_string();
+        }
+        VarContext {
+            key: parse_fixed_hex::<16>(&n.key),
+            pan: parse_u16_prefixed(&n.pan),
+            channel: n.channel,
+            src_short: n.inject_src,
+            src_eui64: parse_fixed_hex::<8>(&n.inject_eui).unwrap_or_default(),
+            frame_counter: n.frame_counter,
+            seq: 0,
+            vars: Default::default(),
+        }
+    } else {
+        VarContext::default() // no network → network vars error helpfully
+    };
+
+    let resolved = text
+        .split('\n')
+        .map(|line| resolve_line(&mut ctx, line))
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+
+    // Persist the advanced counter + assigned identity for the next run.
+    if let Some(i) = idx {
+        nets.networks[i].frame_counter = ctx.frame_counter;
+        let _ = crate::workspace::save_networks(&app, &nets);
+    }
+    Ok(resolved)
+}
+
+pub fn play(shared: &Arc<Shared>, name: &str, text: &str) -> Result<(), String> {
+    let text = resolve_macro_text(shared, text)?; // {$…} → resolved (counter consumed once)
+    let steps = parse_macro(&text);
     let shared = shared.clone();
     let app = shared.app.lock().unwrap().clone();
     let id = next_run_id();
@@ -1702,6 +1777,7 @@ pub fn play(shared: &Arc<Shared>, name: &str, text: &str) {
         shared.runs.lock().unwrap().retain(|r| r.id != id);
         emit_runs(&shared, &app);
     });
+    Ok(())
 }
 
 #[cfg(test)]

@@ -135,8 +135,8 @@ fn data_write(state: tauri::State<AppState>, bytes: Vec<u8>) -> Result<(), Strin
 
 /// Run macro text through the macro player (escapes + `+++DELAY/ENTER/CTRL...+++`).
 #[tauri::command]
-fn run_text(state: tauri::State<AppState>, text: String, name: Option<String>) {
-    serial::play(&state.shared, name.as_deref().unwrap_or("macro"), &text);
+fn run_text(state: tauri::State<AppState>, text: String, name: Option<String>) -> Result<(), String> {
+    serial::play(&state.shared, name.as_deref().unwrap_or("macro"), &text)
 }
 
 /// In-flight macro runs (for the queue panel).

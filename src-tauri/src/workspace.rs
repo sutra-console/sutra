@@ -291,11 +291,42 @@ pub struct Network {
     pub key: String,              // network/trust-center key, 32 hex (decryption)
     #[serde(default)]
     pub nodes: Vec<NetNode>,
+    // -- host-side injector state (phase B): when Sutra builds + transmits
+    //    encrypted frames it acts as a member with its OWN identity. Persisted so
+    //    the frame counter advances monotonically across runs (anti-replay) and we
+    //    never reuse a (key, counter) pair. Coordinator-safety: src/eui must stay
+    //    distinct from any real node's. Assigned on first use (see serial.rs).
+    #[serde(default)]
+    pub inject_src: u16,          // our short address (0 = unassigned)
+    #[serde(default)]
+    pub inject_eui: String,       // our EUI-64, 16 hex ("" = unassigned)
+    #[serde(default)]
+    pub frame_counter: u32,       // next NWK frame counter to use
 }
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Networks {
     #[serde(default)]
     pub networks: Vec<Network>,
+    /// Label of the network macro `{$…}` variables resolve against. Empty ⇒ the
+    /// first network with a key. This is the "active network" session config.
+    #[serde(default)]
+    pub active: String,
+}
+
+/// Index of the active network for macro-variable resolution: the one whose
+/// label matches `active`, else the first that actually has a key.
+pub fn active_network_index(nets: &Networks) -> Option<usize> {
+    let want = nets.active.trim().to_lowercase();
+    if !want.is_empty() {
+        if let Some(i) = nets
+            .networks
+            .iter()
+            .position(|n| n.label.trim().to_lowercase() == want)
+        {
+            return Some(i);
+        }
+    }
+    nets.networks.iter().position(|n| !n.key.trim().is_empty())
 }
 
 /// Load the workspace network model. If `networks.json` doesn't exist yet but a
@@ -317,6 +348,7 @@ pub fn load_networks(app: &AppHandle) -> Networks {
             .into_iter()
             .map(|k| Network { label: k.label, key: k.key, ..Default::default() })
             .collect(),
+        ..Default::default()
     }
 }
 
