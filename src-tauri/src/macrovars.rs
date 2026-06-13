@@ -21,7 +21,9 @@
 use std::collections::HashMap;
 
 use crate::zigbee::{
-    build_zdp_inject, ZdpInject, ZDP_ACTIVE_EP_REQ, ZDP_NODE_DESC_REQ, ZDP_SIMPLE_DESC_REQ,
+    build_zcl_inject, build_zdp_inject, ZclInject, ZdpInject, CLUSTER_COLOR, CLUSTER_LEVEL,
+    CLUSTER_ON_OFF, ONOFF_OFF, ONOFF_ON, ONOFF_TOGGLE, ZCL_PROFILE_HA, ZDP_ACTIVE_EP_REQ,
+    ZDP_NODE_DESC_REQ, ZDP_SIMPLE_DESC_REQ,
 };
 
 /// Everything `{$…}` resolves against. Scalars are supplied by the caller; the
@@ -66,6 +68,7 @@ impl VarContext {
             "fc" => Ok(self.take_fc().to_string()),
             "seq" => Ok(format!("{:02x}", self.take_seq())),
             "zdp" => self.eval_zdp(args),
+            "zcl" => self.eval_zcl(args),
             other => self
                 .vars
                 .get(other)
@@ -76,6 +79,52 @@ impl VarContext {
 
     /// `{$zdp <cmd> <target-hex> [endpoint]}` → the full injectable MAC frame as
     /// space-separated hex. cmd ∈ active_ep | node_desc | simple_desc.
+    /// `{$zcl <target> <endpoint> <cluster> <cmd> [payload hex…]}` → an injectable
+    /// ZCL command frame. cluster/cmd accept names (onoff/level/color, on/off/toggle)
+    /// or hex. The "type a command at a peer" path — e.g. turn a light on.
+    fn eval_zcl(&mut self, args: &[&str]) -> Result<String, String> {
+        let target = parse_u16_hex(args.first().ok_or("zcl: missing target")?)?;
+        let endpoint = parse_u8(args.get(1).ok_or("zcl: missing endpoint")?)?;
+        let cluster = match args.get(2).ok_or("zcl: missing cluster")?.to_ascii_lowercase().as_str() {
+            "onoff" | "on_off" => CLUSTER_ON_OFF,
+            "level" => CLUSTER_LEVEL,
+            "color" => CLUSTER_COLOR,
+            h => parse_u16_hex(h)?,
+        };
+        let cmd = match args.get(3).ok_or("zcl: missing command")?.to_ascii_lowercase().as_str() {
+            "off" => ONOFF_OFF,
+            "on" => ONOFF_ON,
+            "toggle" => ONOFF_TOGGLE,
+            h => parse_u8(h)?,
+        };
+        let payload: Vec<u8> = args.get(4..).unwrap_or(&[]).iter().map(|a| parse_u8(a)).collect::<Result<_, _>>()?;
+        let key = self.key.ok_or("zcl: no network key set (use NET <label>)")?;
+        let fc = self.take_fc();
+        let seq = self.take_seq();
+        let frame = build_zcl_inject(&ZclInject {
+            key: &key,
+            src_eui64: &self.src_eui64,
+            pan: self.pan,
+            target,
+            src_short: self.src_short,
+            frame_counter: fc,
+            mac_seq: fc as u8,
+            nwk_seq: (fc >> 8) as u8,
+            aps_counter: seq,
+            zcl_seq: seq,
+            radius: 30,
+            key_seq: 0,
+            profile: ZCL_PROFILE_HA,
+            cluster,
+            src_endpoint: 1,
+            dst_endpoint: endpoint,
+            cmd,
+            cluster_specific: true,
+            payload: &payload,
+        })?;
+        Ok(hex_bytes(&frame))
+    }
+
     fn eval_zdp(&mut self, args: &[&str]) -> Result<String, String> {
         let cmd = args.first().ok_or("zdp: missing command")?;
         let target = parse_u16_hex(args.get(1).ok_or("zdp: missing target address")?)?;
@@ -305,6 +354,22 @@ mod tests {
         assert_eq!(lines[1], "#");
         assert!(lines[2].starts_with("HEX 61 88"), "zdp used {{$node}}");
         assert_eq!(lines[3], "STRING n-abcd", "nested {{$node}} inside VAR value");
+    }
+
+    #[test]
+    fn zcl_turn_on_a_light() {
+        let mut c = ctx();
+        // "turn the light at 0xabcd, endpoint 1, on"
+        let line = resolve_line(&mut c, "HEX {$zcl abcd 1 onoff on}").unwrap();
+        let frame: Vec<u8> = line["HEX ".len()..]
+            .split_whitespace()
+            .map(|h| u8::from_str_radix(h, 16).unwrap())
+            .collect();
+        assert_eq!(&frame[5..7], &[0xcd, 0xab], "MAC dst = the light");
+        let aps = unsecure_nwk(&c.key.unwrap(), &frame[9..], 8, SEC_LEVEL_ENC_MIC32).unwrap();
+        assert_eq!(&aps[2..4], &[0x06, 0x00], "cluster = On/Off");
+        assert_eq!(&aps[4..6], &[0x04, 0x01], "profile = HA");
+        assert_eq!(aps[10], 0x01, "ZCL command = On");
     }
 
     #[test]
