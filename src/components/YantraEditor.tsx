@@ -328,17 +328,30 @@ export function YantraEditor({
   // keep Moveable's box synced when geometry changes from outside a gesture
   useEffect(() => { moveableRef.current?.updateRect(); }, [draft, containerW, selected]);
 
-  // Capture the reference design size the first time any anchor goes non-default,
-  // so the renderer can resolve fixed/edge/stretch anchors against it.
-  useEffect(() => {
-    if (draft.design) return;
-    const anchored = (draft.widgets ?? []).some(
-      (w) => (w.anchorH && w.anchorH !== "scale") || (w.anchorV && w.anchorV !== "top"),
-    );
-    if (!anchored) return;
-    const el = gridRef.current;
-    setDraft((d) => (d.design ? d : { ...d, design: { w: el?.clientWidth ?? containerW, h: el?.clientHeight ?? 0 } }));
-  }, [draft.widgets]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Switch a selected widget's axis unit (pct↔px), converting the stored value
+  // through the measured parent so it doesn't jump on screen.
+  const setUnit = (axis: "H" | "V", unit: "pct" | "px") => {
+    if (sel == null) return;
+    const w = widgets[sel];
+    const pb = contentBox(parentKeyOf(w));
+    if (axis === "H") {
+      if ((w.unitH ?? "pct") === unit) return;
+      const px = unit === "px";
+      setWidget(sel, {
+        unitH: unit,
+        x: px ? Math.round((w.x ?? 0) / 100 * pb.w) : (pb.w ? Math.round((w.x ?? 0) / pb.w * 1000) / 10 : 0),
+        w: px ? Math.round((w.w ?? 0) / 100 * pb.w) : (pb.w ? Math.round((w.w ?? 0) / pb.w * 1000) / 10 : 0),
+      });
+    } else {
+      if ((w.unitV ?? "px") === unit) return;
+      const px = unit === "px";
+      setWidget(sel, {
+        unitV: unit,
+        y: px ? Math.round((w.y ?? 0) / 100 * pb.h) : (pb.h ? Math.round((w.y ?? 0) / pb.h * 1000) / 10 : 0),
+        h: px ? Math.round((w.h ?? 0) / 100 * pb.h) : (pb.h ? Math.round((w.h ?? 0) / pb.h * 1000) / 10 : 0),
+      });
+    }
+  };
 
   // Delete/Backspace removes the selection (unless a text field is focused)
   useEffect(() => {
@@ -1051,6 +1064,7 @@ export function YantraEditor({
             w={widgets[sel]}
             tabOptions={widgets.flatMap((x) => (x.tabs ?? []).map((t) => ({ id: t.id, label: `${x.name || x.label || "tabs"} · ${t.label}` })))}
             onChange={(p) => setWidget(sel, p)}
+            onUnit={setUnit}
             onDelete={() => { removeMany([sel]); setSelected([]); }}
           />
         )}
@@ -1084,11 +1098,12 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function WidgetProps({
-  w, tabOptions, onChange, onDelete,
+  w, tabOptions, onChange, onUnit, onDelete,
 }: {
   w: YantraWidget;
   tabOptions: { id: string; label: string }[];
   onChange: (patch: Partial<YantraWidget>) => void;
+  onUnit: (axis: "H" | "V", unit: "pct" | "px") => void;
   onDelete: () => void;
 }) {
   return (
@@ -1163,22 +1178,18 @@ function WidgetProps({
         ))}
       </div>
 
-      {/* responsive anchor: how the widget reacts when the window resizes */}
+      {/* sizing units: pct = % of parent (responsive), px = fixed */}
       <div className="grid grid-cols-2 gap-1">
-        <Field label="Anchor X">
-          <Select value={w.anchorH ?? "scale"} onValueChange={(v) => onChange({ anchorH: v as YantraWidget["anchorH"] })}>
+        <Field label="X / W unit">
+          <Select value={w.unitH ?? "pct"} onValueChange={(v) => onUnit("H", v as "pct" | "px")}>
             <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {["scale", "left", "right", "center", "stretch"].map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
-            </SelectContent>
+            <SelectContent><SelectItem value="pct">% of parent</SelectItem><SelectItem value="px">px (fixed)</SelectItem></SelectContent>
           </Select>
         </Field>
-        <Field label="Anchor Y">
-          <Select value={w.anchorV ?? "top"} onValueChange={(v) => onChange({ anchorV: v as YantraWidget["anchorV"] })}>
+        <Field label="Y / H unit">
+          <Select value={w.unitV ?? "px"} onValueChange={(v) => onUnit("V", v as "pct" | "px")}>
             <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {["top", "bottom", "middle", "scale", "stretch"].map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
-            </SelectContent>
+            <SelectContent><SelectItem value="pct">% of parent</SelectItem><SelectItem value="px">px (fixed)</SelectItem></SelectContent>
           </Select>
         </Field>
       </div>
