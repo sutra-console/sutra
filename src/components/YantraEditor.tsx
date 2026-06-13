@@ -933,7 +933,7 @@ export function YantraEditor({
                   onContextMenu={() => ensureSelected(i)}
                   className={`yantra-widget absolute overflow-hidden rounded ${
                     selected.includes(i) ? "ring-2 ring-primary" : ""
-                  } ${w.hidden ? "opacity-40" : ""}`}
+                  } ${w.hidden ? "opacity-40" : ""} ${w.locked ? "pointer-events-none" : ""}`}
                   style={geom(w)}
                 >
                   {w.type === "tabs" ? (

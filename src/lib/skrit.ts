@@ -668,7 +668,7 @@ export interface YantraWidget {
   options?: { label: string; send: YantraAction }[]; // select
   match?: string; // readout: regex over the console; capture group 1 is shown
   hidden?: boolean; // layer hidden from the rendered surface
-  locked?: boolean; // editor: can't be moved/resized (still selectable)
+  locked?: boolean; // editor: not selectable on the canvas (clicks pass to children); still in the layer tree
   frame?: string; // parent frame id (container); coords are relative to it
   group?: string; // legacy flat group id — migrated to `frame` on load
   // Phase C: x/y/w/h are relative to the parent container's content box. The per-axis
@@ -727,7 +727,7 @@ export interface YantraFrame {
   parent?: string; // parent frame id (nesting); absent = top level
   tab?: string; // if set, this frame lives inside a tabs pane (id of that tab)
   collapsed?: boolean; // layer-tree collapse (UI only)
-  locked?: boolean; // editor: can't be moved/resized (still selectable)
+  locked?: boolean; // editor: not selectable on the canvas; still in the layer tree
   // Phase C: the frame's own rect, relative to ITS parent container's content box.
   x?: number; y?: number; w?: number; h?: number;
   anchorH?: AnchorMode;
