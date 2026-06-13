@@ -153,9 +153,11 @@ pub fn observe_into_node(net: &mut Network, addr: &str, endpoint: u8, cluster: u
 }
 
 /// Pure: decrypt a sniffed application (non-ZDP) APS frame and return the
-/// (node, endpoint, cluster) associations it reveals — source end always, and
-/// the dest end when it's a unicast (not broadcast). Empty for anything that
-/// isn't a decryptable application APS data frame.
+/// (node, endpoint, cluster) association it reveals. We record only the SOURCE —
+/// the node that hosts/operates the cluster (its reports/responses) — not the
+/// destination, which would attribute clusters to the coordinator and conjure
+/// phantom nodes from frames we never saw originate. Empty unless it's a
+/// decryptable, standard unicast application APS data frame.
 pub fn observe_frame(key: &[u8; 16], mac: &[u8], level: u8) -> Vec<(u16, u8, u16)> {
     let mut out = Vec::new();
     let Some((mlen, _)) = mac_data_header(mac) else { return out };
@@ -163,7 +165,6 @@ pub fn observe_frame(key: &[u8; 16], mac: &[u8], level: u8) -> Vec<(u16, u8, u16
     if nwk.len() < 6 {
         return out;
     }
-    let nwk_dst = u16::from_le_bytes([nwk[2], nwk[3]]);
     let nwk_src = u16::from_le_bytes([nwk[4], nwk[5]]);
     let Ok(aps_bytes) = decrypt_nwk(key, nwk, level) else { return out };
     let Some(aps) = parse_aps_data(&aps_bytes) else { return out };
@@ -171,9 +172,6 @@ pub fn observe_frame(key: &[u8; 16], mac: &[u8], level: u8) -> Vec<(u16, u8, u16
         return out; // ZDP / NWK-mgmt, not application clusters
     }
     out.push((nwk_src, aps.src_ep, aps.cluster));
-    if nwk_dst != 0xfffc && nwk_dst != 0xffff {
-        out.push((nwk_dst, aps.dst_ep, aps.cluster));
-    }
     out
 }
 
@@ -277,9 +275,8 @@ mod tests {
         frame.extend_from_slice(&nwk);
 
         let obs = observe_frame(&KEY, &frame, SEC_LEVEL_ENC_MIC32);
-        // source (the reporting node) + dest (coordinator), both endpoint 1, cluster 0x0006
-        assert!(obs.contains(&(0xabcd, 1, 0x0006)), "node's own cluster observed");
-        assert!(obs.contains(&(0x0000, 1, 0x0006)), "coordinator end observed");
+        // only the SOURCE (the reporting node) — not the coordinator destination
+        assert_eq!(obs, vec![(0xabcd, 1, 0x0006)], "node's own cluster observed, source only");
 
         let mut net = Network::default();
         for (a, e, c) in &obs {

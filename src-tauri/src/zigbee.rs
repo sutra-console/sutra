@@ -457,8 +457,16 @@ pub struct ApsData<'a> {
 /// Parse a unicast APS **data** frame: fc·dst_ep·cluster·profile·src_ep·counter
 /// then payload. None for non-data / group-addressed / too-short frames.
 pub fn parse_aps_data(aps: &[u8]) -> Option<ApsData<'_>> {
-    if aps.len() < 8 || aps[0] & 0x03 != 0 {
-        return None; // frame type bits 00 = data only
+    if aps.len() < 8 {
+        return None;
+    }
+    let fc = aps[0];
+    // Only the standard layout: data frame (00), UNICAST delivery (bits 2-3 = 00),
+    // no extended header (bit 7). Group/broadcast/indirect or an extended header
+    // shift the bytes — parsing those as fc·dst_ep·cluster·profile yields garbage
+    // (e.g. a node address read as a "cluster"), which pollutes the model.
+    if fc & 0x03 != 0 || (fc >> 2) & 0x03 != 0 || fc & 0x80 != 0 {
+        return None;
     }
     Some(ApsData {
         dst_ep: aps[1],

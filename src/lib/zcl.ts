@@ -21,6 +21,11 @@ export const CLUSTERS: Record<number, ClusterDef> = {
   0x0003: { name: "Identify", commands: [{ cmd: 0x00, label: "Identify", payloadHex: "0a 00" }] },
   0x0004: { name: "Groups" },
   0x0005: { name: "Scenes" },
+  0x0007: { name: "On/Off Switch Config" },
+  0x0009: { name: "Alarms" },
+  0x000f: { name: "Binary Input" },
+  0x0012: { name: "Multistate Input" },
+  0x0020: { name: "Poll Control" },
   0x0006: {
     name: "On/Off",
     commands: [
@@ -49,12 +54,19 @@ export const CLUSTERS: Record<number, ClusterDef> = {
   0x0405: { name: "Humidity" },
   0x0406: { name: "Occupancy" },
   0x0500: { name: "IAS Zone (security)" },
+  0x0501: { name: "IAS ACE" },
+  0x0502: { name: "IAS WD (siren)" },
   0x0b04: { name: "Electrical" },
+  0x0b05: { name: "Diagnostics" },
   0x0702: { name: "Metering" },
+  0x1000: { name: "Touchlink" },
 };
 
-export const clusterName = (id: number): string =>
-  CLUSTERS[id]?.name ?? `0x${id.toString(16).padStart(4, "0")}`;
+export const clusterName = (id: number): string => {
+  if (CLUSTERS[id]) return CLUSTERS[id].name;
+  if (id >= 0xfc00) return `Manufacturer-specific (0x${id.toString(16)})`;
+  return `Cluster 0x${id.toString(16).padStart(4, "0")}`;
+};
 
 export const clusterCommands = (id: number): ZclCommand[] => CLUSTERS[id]?.commands ?? [];
 
