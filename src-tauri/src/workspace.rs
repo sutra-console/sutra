@@ -105,8 +105,14 @@ widgets:
       - { label: "All",       send: "$PMTK314,-1*04\r\n" }
   - { type: readout, label: Fix quality, x: 0, y: 2, w: 3, h: 1, match: "GGA,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,([0-9])", help: "0 none · 1 GPS · 2 DGPS" }
   - { type: readout, label: Satellites,  x: 3, y: 2, w: 3, h: 1, match: "GGA(?:,[^,]*){6},0*([0-9]+)" }
-# Future: a `transform:` / `script:` block (Lua) per widget for richer message
-# parsing/formatting, and plugin widget `type`s beyond the built-ins.
+# Actions aren't UART-only. A widget's `send:` (or a toggle's on:/off:, a select
+# option's send:) is transport-agnostic — a bare string is a raw DATA write
+# (UART/console); the object forms target other buses:
+#   send: { i2c:    { addr: 0x60, write: [0x01, 0xff], read: 0 } }   # I2C transfer
+#   send: { invoke: { id: 1, args: [10, 20] } }                       # device INVOKE command
+#   send: { cfg:    { key: 0x10, str: "value" } }                     # CFG set
+# (SPI is future — it needs a skrit SPI vocabulary first.)
+# Future: a `transform:`/`script:` (Lua) per widget, and plugin widget `type`s.
 "#;
 
 /// Drop a starter def into an empty i2c/ dir so the controls view has something

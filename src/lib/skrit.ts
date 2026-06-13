@@ -631,6 +631,17 @@ export async function i2cScan(): Promise<number[]> {
 }
 
 // ---- .yantra control surfaces (workspace .sutra/yantra/*.yantra) ----
+/** What a widget does — transport-agnostic. A bare string is a raw DATA write
+ *  (UART/console); the object forms target I²C / a device INVOKE command / CFG.
+ *  ({value} in a string is replaced by a slider's value.) SPI is future (needs a
+ *  skrit SPI vocabulary). */
+export type YantraAction =
+  | string
+  | { send: string }
+  | { i2c: { addr: number; write?: number[]; read?: number } }
+  | { invoke: { id: number; args?: number[] } }
+  | { cfg: { key: number; bytes?: number[]; str?: string } };
+
 /** A widget in a .yantra control surface. Loose by design — new types/fields
  *  (scripts, plugins) slot in without breaking the renderer. */
 export interface YantraWidget {
@@ -638,10 +649,10 @@ export interface YantraWidget {
   label?: string;
   help?: string;
   x?: number; y?: number; w?: number; h?: number; // grid placement (cells)
-  send?: string; // button/slider: text to send ({value} → the slider value)
-  on?: string; off?: string; // toggle
+  send?: YantraAction; // button/slider action ({value} → the slider value)
+  on?: YantraAction; off?: YantraAction; // toggle
   min?: number; max?: number; step?: number; // slider
-  options?: { label: string; send: string }[]; // select
+  options?: { label: string; send: YantraAction }[]; // select
   match?: string; // readout: regex over the console; capture group 1 is shown
 }
 export interface YantraSpec {

@@ -1473,11 +1473,7 @@ export default function App() {
           <CardContent className="flex min-h-0 flex-1 flex-col bg-[#0a0a0b] p-2">
             {mainView === "controls" ? (
               yantras[yantraSel] ? (
-                <YantraCanvas
-                  spec={yantras[yantraSel].doc}
-                  disabled={!connected}
-                  onSend={(text) => dataWrite(Array.from(new TextEncoder().encode(text)))}
-                />
+                <YantraCanvas spec={yantras[yantraSel].doc} disabled={!connected} />
               ) : (
                 <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                   Drop a .yantra in the workspace's .sutra/yantra/ to add a control surface.
