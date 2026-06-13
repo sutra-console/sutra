@@ -925,7 +925,7 @@ export function YantraEditor({
 
         <div
           ref={gridRef}
-          className="yantra-canvas relative flex-1 overflow-hidden rounded border bg-muted/10"
+          className="yantra-canvas scroll-stable relative flex-1 overflow-auto rounded border bg-muted/10"
           style={{
             backgroundSize: `${cw}px ${ROW_H}px`,
             backgroundImage:

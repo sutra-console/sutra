@@ -77,7 +77,7 @@ export function YantraCanvas({
   };
 
   return (
-    <div className="relative h-full overflow-auto p-1">
+    <div className="scroll-stable relative h-full overflow-auto p-1">
       <CanvasNodes
         container="root" widgets={widgets} frames={frames}
         activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
