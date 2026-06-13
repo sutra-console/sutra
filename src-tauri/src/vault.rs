@@ -56,11 +56,11 @@ pub struct Vault {
 // ---- public on-disk config (security.json — non-secret, commit-safe) -------
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
-struct RecipientCfg {
-    kind: String, // "app" | "ssh" | "age"  (only "app" used in Phase A)
-    pubkey: String,
+pub struct RecipientCfg {
+    pub kind: String, // "app" | "ssh" | "age"
+    pub pubkey: String,
     #[serde(default)]
-    label: String,
+    pub label: String,
 }
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 struct SecurityCfg {
@@ -98,6 +98,8 @@ pub struct SecurityStatus {
     pub app_key_pub: String, // "age1…" public key (empty if no app key yet)
     pub git_track_vault: bool,
     pub git_track_captures: bool,
+    pub git_hooks: bool,                 // pre-commit hook installed (blocks plaintext secrets)
+    pub recipients: Vec<RecipientCfg>,   // who the vault is encrypted to (sharing)
 }
 
 // ---- crypto primitives (standalone + unit-testable) ------------------------
@@ -109,18 +111,33 @@ fn unpack(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
     serde_json::from_slice(bytes).map_err(|e| format!("corrupt vault payload: {e}"))
 }
 
-/// Encrypt `plaintext` to a set of X25519 public recipients (age, binary output).
-fn encrypt_to(recipients: &[age::x25519::Recipient], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+/// Encrypt `plaintext` to a heterogeneous set of public recipients (age X25519 and/or
+/// SSH keys — any one's identity decrypts). Binary age output.
+fn encrypt_to(recipients: &[Box<dyn age::Recipient>], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     if recipients.is_empty() {
         return Err("no recipients to encrypt to".into());
     }
-    let recs: Vec<&dyn age::Recipient> = recipients.iter().map(|r| r as &dyn age::Recipient).collect();
-    let enc = age::Encryptor::with_recipients(recs.into_iter()).map_err(|e| e.to_string())?;
+    let enc = age::Encryptor::with_recipients(recipients.iter().map(|b| b.as_ref()))
+        .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     let mut w = enc.wrap_output(&mut out).map_err(|e| e.to_string())?;
     w.write_all(plaintext).map_err(|e| e.to_string())?;
     w.finish().map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+/// Classify a pasted public key: age (`age1…`) vs SSH (everything else).
+fn detect_kind(pubkey: &str) -> &'static str {
+    if pubkey.trim().starts_with("age1") { "age" } else { "ssh" }
+}
+
+/// Build an age recipient from a config entry (None if the key doesn't parse).
+fn build_recipient(r: &RecipientCfg) -> Option<Box<dyn age::Recipient>> {
+    let p = r.pubkey.trim();
+    match r.kind.as_str() {
+        "ssh" => p.parse::<age::ssh::Recipient>().ok().map(|x| Box::new(x) as Box<dyn age::Recipient>),
+        _ => p.parse::<age::x25519::Recipient>().ok().map(|x| Box::new(x) as Box<dyn age::Recipient>),
+    }
 }
 
 /// Decrypt an age blob with a single X25519 identity.
@@ -135,9 +152,6 @@ fn id_pub(id: &age::x25519::Identity) -> String {
     id.to_public().to_string()
 }
 fn parse_identity(s: &str) -> Result<age::x25519::Identity, String> {
-    s.trim().parse().map_err(|e: &str| e.to_string())
-}
-fn parse_recipient(s: &str) -> Result<age::x25519::Recipient, String> {
     s.trim().parse().map_err(|e: &str| e.to_string())
 }
 
@@ -217,20 +231,64 @@ pub fn app_key_pub(app: &AppHandle) -> String {
 
 // ---- recipients ------------------------------------------------------------
 
-/// The X25519 recipients the vault is (re-)encrypted to, from `security.json`.
-fn load_recipients(dot: &Path) -> Result<Vec<age::x25519::Recipient>, String> {
-    let cfg = load_cfg(dot);
-    let mut out = Vec::new();
-    for r in &cfg.recipients {
-        // Phase A only handles age (X25519) recipients; ssh recipients arrive in Phase B.
-        if let Ok(rec) = parse_recipient(&r.pubkey) {
-            out.push(rec);
-        }
-    }
+/// The recipients the vault is (re-)encrypted to, from `security.json` (age + ssh).
+fn load_recipients(dot: &Path) -> Result<Vec<Box<dyn age::Recipient>>, String> {
+    let out: Vec<_> = load_cfg(dot).recipients.iter().filter_map(build_recipient).collect();
     if out.is_empty() {
         return Err("no recipients configured".into());
     }
     Ok(out)
+}
+
+/// Re-encrypt the unlocked member map to the current recipient set (after the list
+/// changes). Requires an unlocked session.
+fn reencrypt(app: &AppHandle, dot: &Path) -> Result<(), String> {
+    let members = {
+        let v = app.state::<Vault>();
+        let g = v.inner.lock().unwrap();
+        g.as_ref().ok_or("unlock the workspace first")?.members.clone()
+    };
+    let recipients = load_recipients(dot)?;
+    let blob = encrypt_to(&recipients, &pack(&members))?;
+    std::fs::write(vault_path(dot), blob).map_err(|e| e.to_string())
+}
+
+/// Add a collaborator's public key (age `age1…` or an SSH key) as a vault recipient
+/// and re-encrypt so they can decrypt. Requires unlock.
+pub fn add_recipient(app: &AppHandle, dot: &Path, pubkey: &str, label: &str) -> Result<(), String> {
+    if !vault_path(dot).exists() {
+        return Err("enable encryption first".into());
+    }
+    let r = RecipientCfg {
+        kind: detect_kind(pubkey).to_string(),
+        pubkey: pubkey.trim().to_string(),
+        label: label.trim().to_string(),
+    };
+    build_recipient(&r).ok_or("not a valid age or SSH public key")?;
+    let mut cfg = load_cfg(dot);
+    if cfg.recipients.iter().any(|x| x.pubkey == r.pubkey) {
+        return Err("already a recipient".into());
+    }
+    cfg.recipients.push(r);
+    save_cfg(dot, &cfg)?;
+    reencrypt(app, dot)
+}
+
+/// Remove a recipient (refuses this app's own key, which would lock you out) and
+/// re-encrypt so the removed key can no longer decrypt future writes. Requires unlock.
+pub fn remove_recipient(app: &AppHandle, dot: &Path, pubkey: &str) -> Result<(), String> {
+    let target = pubkey.trim();
+    let mut cfg = load_cfg(dot);
+    if cfg.recipients.iter().any(|r| r.pubkey == target && r.kind == "app") {
+        return Err("can't remove this app's own key".into());
+    }
+    let before = cfg.recipients.len();
+    cfg.recipients.retain(|r| r.pubkey != target);
+    if cfg.recipients.len() == before {
+        return Err("not a recipient".into());
+    }
+    save_cfg(dot, &cfg)?;
+    reencrypt(app, dot)
 }
 
 // ---- session helpers -------------------------------------------------------
@@ -499,29 +557,118 @@ pub fn status(app: &AppHandle, dot: Option<&Path>) -> SecurityStatus {
         app_key_pub: app_key_pub(app),
         git_track_vault: cfg.git_track_vault,
         git_track_captures: cfg.git_track_captures,
+        git_hooks: cfg.git_hooks,
+        recipients: cfg.recipients,
     }
+}
+
+// ---- git pre-commit hook (Phase B) -----------------------------------------
+// Belt-and-suspenders beyond .gitignore: refuse a commit that stages plaintext
+// secrets (catches `git add -f`). Marker-guarded so an existing hook is preserved.
+
+const HOOK_BEGIN: &str = "# >>> sutra managed";
+const HOOK_END: &str = "# <<< sutra managed";
+const HOOK_BODY: &str = r#"# Block committing plaintext Sutra secrets (.sutra/).
+if git diff --cached --name-only | grep -Eq '(^|/)\.sutra/(keys\.json|networks\.json|networks\.json\.bak|macros\.json)$'; then
+  echo 'sutra: refusing to commit plaintext secrets under .sutra/. Encrypt them (Settings > Security) or unstage.' >&2
+  exit 1
+fi"#;
+
+/// Nearest ancestor (incl. `start`) containing a `.git` — the repo root.
+fn git_root(start: &Path) -> Option<PathBuf> {
+    let mut cur = Some(start);
+    while let Some(d) = cur {
+        if d.join(".git").exists() {
+            return Some(d.to_path_buf());
+        }
+        cur = d.parent();
+    }
+    None
+}
+
+fn install_hook_block(existing: &str) -> String {
+    let block = format!("{HOOK_BEGIN}\n{HOOK_BODY}\n{HOOK_END}\n");
+    if let (Some(s), Some(e)) = (existing.find(HOOK_BEGIN), existing.find(HOOK_END)) {
+        if s < e {
+            let after = existing[e + HOOK_END.len()..].trim_start_matches('\n');
+            return format!("{}{block}{after}", &existing[..s]);
+        }
+    }
+    if existing.trim().is_empty() {
+        format!("#!/bin/sh\n{block}")
+    } else {
+        format!("{}\n\n{block}", existing.trim_end())
+    }
+}
+
+fn remove_hook_block(existing: &str) -> String {
+    if let (Some(s), Some(e)) = (existing.find(HOOK_BEGIN), existing.find(HOOK_END)) {
+        if s < e {
+            let after = existing[e + HOOK_END.len()..].trim_start_matches('\n');
+            let head = existing[..s].trim_end();
+            // A hook that's now just the shebang carries no purpose — drop it entirely.
+            let merged = format!("{head}\n{after}");
+            if merged.trim() == "#!/bin/sh" || merged.trim().is_empty() {
+                return String::new();
+            }
+            return merged;
+        }
+    }
+    existing.to_string()
+}
+
+/// Install or remove the pre-commit hook in the workspace's git repo + record the flag.
+pub fn set_git_hooks(app: &AppHandle, dot: &Path, on: bool) -> Result<(), String> {
+    let ws = crate::workspace::current(app).ok_or("no workspace selected")?;
+    let root = git_root(&ws).ok_or("the workspace isn't inside a git repository")?;
+    let hook = root.join(".git").join("hooks").join("pre-commit");
+    let existing = std::fs::read_to_string(&hook).unwrap_or_default();
+    let merged = if on { install_hook_block(&existing) } else { remove_hook_block(&existing) };
+    if merged.trim().is_empty() {
+        let _ = std::fs::remove_file(&hook);
+    } else {
+        if let Some(parent) = hook.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&hook, &merged).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let mut cfg = load_cfg(dot);
+    cfg.git_hooks = on;
+    save_cfg(dot, &cfg)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn rec(id: &age::x25519::Identity) -> Box<dyn age::Recipient> {
+        Box::new(id.to_public())
+    }
+
     #[test]
     fn x25519_member_roundtrip() {
         let id = age::x25519::Identity::generate();
         let mut members = BTreeMap::new();
         members.insert("networks.json".to_string(), b"{\"key\":\"deadbeef\"}".to_vec());
-        let blob = encrypt_to(&[id.to_public()], &pack(&members)).unwrap();
+        let blob = encrypt_to(&[rec(&id)], &pack(&members)).unwrap();
         let back = unpack(&decrypt_with(&id, &blob).unwrap()).unwrap();
         assert_eq!(back.get("networks.json").unwrap(), members.get("networks.json").unwrap());
     }
 
     #[test]
-    fn wrong_identity_fails() {
-        let id = age::x25519::Identity::generate();
-        let other = age::x25519::Identity::generate();
-        let blob = encrypt_to(&[id.to_public()], b"secret").unwrap();
-        assert!(decrypt_with(&other, &blob).is_err());
+    fn multi_recipient_either_decrypts() {
+        let a = age::x25519::Identity::generate();
+        let b = age::x25519::Identity::generate();
+        let blob = encrypt_to(&[rec(&a), rec(&b)], b"shared").unwrap();
+        assert_eq!(decrypt_with(&a, &blob).unwrap(), b"shared");
+        assert_eq!(decrypt_with(&b, &blob).unwrap(), b"shared");
+        let c = age::x25519::Identity::generate();
+        assert!(decrypt_with(&c, &blob).is_err());
     }
 
     #[test]
@@ -541,6 +688,6 @@ mod tests {
         let back = parse_identity(&s).unwrap();
         assert_eq!(id_pub(&back), id_pub(&id));
         // the public key parses as a recipient
-        assert!(parse_recipient(&id_pub(&id)).is_ok());
+        assert!(id_pub(&id).parse::<age::x25519::Recipient>().is_ok());
     }
 }

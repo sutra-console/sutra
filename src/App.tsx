@@ -97,6 +97,9 @@ import {
   securitySetPassword,
   appKeyRegenerate,
   securitySetGitTrack,
+  securityAddRecipient,
+  securityRemoveRecipient,
+  securitySetGitHooks,
   onVault,
   type I2cDef,
   listI2cDefs,
@@ -314,6 +317,8 @@ export default function App() {
   const [unlockPw, setUnlockPw] = useState(""); // password entry for the locked-workspace banner
   const [pwOld, setPwOld] = useState(""); // current password (change/remove)
   const [pwNew, setPwNew] = useState(""); // new password (set/change)
+  const [recipKey, setRecipKey] = useState(""); // pasted collaborator public key
+  const [recipLabel, setRecipLabel] = useState(""); // its label
   const [recents, setRecents] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("sutra.recentWorkspaces") || "[]"); } catch { return []; }
   });
@@ -1222,6 +1227,11 @@ export default function App() {
           title={workspace ?? "No workspace selected"}
           className="absolute left-1/2 max-w-[40%] -translate-x-1/2 cursor-default truncate text-xs text-muted-foreground"
         >
+          {security?.vaultPresent && (
+            <span className="mr-1" title={security.unlocked ? "Secrets unlocked" : "Secrets locked"}>
+              {security.unlocked ? "🔓" : "🔒"}
+            </span>
+          )}
           {workspace ? workspace.split(/[/\\]/).pop() : "No workspace"}
         </span>
         {/* app name → Sutra menu (workspace, import/export, preferences, exit) */}
@@ -2497,6 +2507,60 @@ export default function App() {
                             </div>
                           )}
 
+                          {/* sharing: the public keys the vault is encrypted to */}
+                          {security?.vaultPresent && (
+                            <div className="flex flex-col gap-2 border-t pt-3">
+                              <div className="text-sm">
+                                Shared with
+                                <span className="ml-1 text-[11px] text-muted-foreground">
+                                  (add a public key so others can decrypt)
+                                </span>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                {(security.recipients ?? []).map((r) => (
+                                  <div key={r.pubkey} className="flex items-center gap-2 rounded bg-muted/40 px-2 py-1">
+                                    <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] uppercase text-primary">
+                                      {r.kind}
+                                    </span>
+                                    <span className="min-w-0 flex-1 truncate text-[11px]" title={r.pubkey}>
+                                      {r.label || r.pubkey}
+                                    </span>
+                                    {r.kind !== "app" && (
+                                      <button type="button" title="remove" disabled={!security.unlocked}
+                                        className="text-muted-foreground hover:text-destructive disabled:opacity-40"
+                                        onClick={() =>
+                                          runSecurity(() => securityRemoveRecipient(r.pubkey), "recipient removed")
+                                        }>
+                                        <Trash2 className="size-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                              {security.unlocked ? (
+                                <div className="flex gap-2">
+                                  <Input className="h-8 flex-[2] font-mono text-[11px]"
+                                    placeholder="age1… or ssh-ed25519 AAAA…"
+                                    value={recipKey} onChange={(e) => setRecipKey(e.target.value)} />
+                                  <Input className="h-8 flex-1" placeholder="label (optional)"
+                                    value={recipLabel} onChange={(e) => setRecipLabel(e.target.value)} />
+                                  <Button size="sm" className="h-8" disabled={!recipKey.trim()}
+                                    onClick={() =>
+                                      runSecurity(
+                                        () => securityAddRecipient(recipKey.trim(), recipLabel.trim())
+                                          .then((s) => { setRecipKey(""); setRecipLabel(""); return s; }),
+                                        "recipient added",
+                                      )
+                                    }>
+                                    Add
+                                  </Button>
+                                </div>
+                              ) : (
+                                <p className="text-[10px] text-muted-foreground">Unlock to change who can decrypt.</p>
+                              )}
+                            </div>
+                          )}
+
                           {/* git tracking toggles */}
                           <div className="flex flex-col gap-3 border-t pt-3">
                             <div className="flex items-center justify-between gap-3">
@@ -2524,6 +2588,20 @@ export default function App() {
                                 checked={!!security?.gitTrackCaptures}
                                 onCheckedChange={(v) =>
                                   runSecurity(() => securitySetGitTrack(null, v), "git tracking updated")
+                                }
+                              />
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm">Use a git pre-commit hook</div>
+                                <div className="text-[11px] text-muted-foreground">
+                                  Blocks committing plaintext secrets (needs a git repo).
+                                </div>
+                              </div>
+                              <Switch
+                                checked={!!security?.gitHooks}
+                                onCheckedChange={(v) =>
+                                  runSecurity(() => securitySetGitHooks(v), "git hook updated")
                                 }
                               />
                             </div>

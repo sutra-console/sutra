@@ -1160,6 +1160,7 @@ export async function onMacros(cb: (list: MacroRec[]) => void): Promise<Unlisten
 }
 
 // ---- security: at-rest secret encryption ----
+export interface Recipient { kind: string; pubkey: string; label: string }
 export interface SecurityStatus {
   hasWorkspace: boolean;
   enabled: boolean;        // encryption configured for this workspace
@@ -1169,16 +1170,20 @@ export interface SecurityStatus {
   appKeyPub: string;       // "age1…" public key (empty if none yet)
   gitTrackVault: boolean;
   gitTrackCaptures: boolean;
+  gitHooks: boolean;       // pre-commit hook installed
+  recipients: Recipient[]; // who the vault is encrypted to (sharing)
 }
 // Rust serializes snake_case; map to our camelCase shape.
 interface SecurityStatusRaw {
   has_workspace: boolean; enabled: boolean; vault_present: boolean; unlocked: boolean;
   has_password: boolean; app_key_pub: string; git_track_vault: boolean; git_track_captures: boolean;
+  git_hooks: boolean; recipients: Recipient[];
 }
 const mapStatus = (r: SecurityStatusRaw): SecurityStatus => ({
   hasWorkspace: r.has_workspace, enabled: r.enabled, vaultPresent: r.vault_present,
   unlocked: r.unlocked, hasPassword: r.has_password, appKeyPub: r.app_key_pub,
   gitTrackVault: r.git_track_vault, gitTrackCaptures: r.git_track_captures,
+  gitHooks: r.git_hooks, recipients: r.recipients ?? [],
 });
 
 export const securityStatus = () =>
@@ -1198,6 +1203,12 @@ export const securitySetGitTrack = (vault: boolean | null, captures: boolean | n
   invoke<SecurityStatusRaw>("security_set_git_track", {
     vaultTracked: vault, capturesTracked: captures,
   }).then(mapStatus);
+export const securityAddRecipient = (pubkey: string, label: string) =>
+  invoke<SecurityStatusRaw>("security_add_recipient", { pubkey, label }).then(mapStatus);
+export const securityRemoveRecipient = (pubkey: string) =>
+  invoke<SecurityStatusRaw>("security_remove_recipient", { pubkey }).then(mapStatus);
+export const securitySetGitHooks = (on: boolean) =>
+  invoke<SecurityStatusRaw>("security_set_git_hooks", { on }).then(mapStatus);
 /** Fires when the vault is enabled/disabled/locked/unlocked. */
 export async function onVault(cb: () => void): Promise<UnlistenFn> {
   return listen("sutra://vault", () => cb());

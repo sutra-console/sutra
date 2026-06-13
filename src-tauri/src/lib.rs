@@ -430,6 +430,34 @@ fn security_set_git_track(
     Ok(vault::status(&app, Some(&dot)))
 }
 
+/// Add a collaborator's public key (age `age1…` or SSH) as a vault recipient (needs unlock).
+#[tauri::command]
+fn security_add_recipient(
+    app: tauri::AppHandle,
+    pubkey: String,
+    label: String,
+) -> Result<SecurityStatus, String> {
+    let dot = workspace::dot_sutra_existing(&app).ok_or("select a workspace first")?;
+    vault::add_recipient(&app, &dot, &pubkey, &label)?;
+    Ok(vault::status(&app, Some(&dot)))
+}
+
+/// Remove a vault recipient and re-encrypt (needs unlock; refuses this app's own key).
+#[tauri::command]
+fn security_remove_recipient(app: tauri::AppHandle, pubkey: String) -> Result<SecurityStatus, String> {
+    let dot = workspace::dot_sutra_existing(&app).ok_or("select a workspace first")?;
+    vault::remove_recipient(&app, &dot, &pubkey)?;
+    Ok(vault::status(&app, Some(&dot)))
+}
+
+/// Install/remove a pre-commit hook that blocks committing plaintext secrets.
+#[tauri::command]
+fn security_set_git_hooks(app: tauri::AppHandle, on: bool) -> Result<SecurityStatus, String> {
+    let dot = workspace::dot_sutra_existing(&app).ok_or("select a workspace first")?;
+    vault::set_git_hooks(&app, &dot, on)?;
+    Ok(vault::status(&app, Some(&dot)))
+}
+
 #[tauri::command]
 fn macros_set(state: tauri::State<AppState>, macros: Vec<MacroRec>) {
     serial::macros_set(&state.shared, macros);
@@ -552,6 +580,9 @@ pub fn run() {
             security_set_password,
             app_key_regenerate,
             security_set_git_track,
+            security_add_recipient,
+            security_remove_recipient,
+            security_set_git_hooks,
             export_set,
             import_set,
             mcp_start,
