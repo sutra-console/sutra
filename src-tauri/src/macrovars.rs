@@ -272,6 +272,29 @@ mod tests {
         assert_eq!(c.frame_counter, 1001);
     }
 
+    /// Not a unit test — emits the exact frame Sutra would inject for the
+    /// bench network so an external dissector (tshark) can validate it.
+    /// Run: cargo test --lib macrovars::tests::emit_bench_inject -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn emit_bench_inject() {
+        let mut c = VarContext {
+            key: Some([
+                0xa1, 0x40, 0x35, 0x57, 0x84, 0xcc, 0xa8, 0x94, 0xa1, 0x40, 0x35, 0x57, 0x84, 0xcc,
+                0xa8, 0x94,
+            ]),
+            pan: 0x0c84,
+            channel: 11,
+            src_short: 0x7fff,
+            src_eui64: [0x02, 0x53, 0x55, 0x54, 0x52, 0x41, 0x00, 0x01], // "0253555452410001"
+            frame_counter: 1,
+            seq: 0,
+            vars: HashMap::new(),
+        };
+        let line = resolve_line(&mut c, "{$zdp active_ep 0000}").unwrap();
+        println!("INJECT_FRAME={}", line.replace(' ', ""));
+    }
+
     #[test]
     fn var_directive_sets_and_uses() {
         let mut c = ctx();

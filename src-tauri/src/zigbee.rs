@@ -211,9 +211,10 @@ pub fn aps_zdp_header(cluster: u16, aps_counter: u8) -> Vec<u8> {
 }
 
 /// Cleartext (authenticated) NWK data header: FCF · dst · src · radius · seq.
-/// FCF 0x0209 = data · protocol version 2 (Zigbee PRO) · security on.
+/// FCF 0x0208 = data (type 0) · protocol version 2 (Zigbee PRO) · security on.
+/// (Frame-type bits 0-1 = 00 = data; 0x09 would be a NWK *command*.)
 pub fn nwk_header(dst: u16, src: u16, radius: u8, seq: u8) -> Vec<u8> {
-    let fcf: u16 = 0x0209;
+    let fcf: u16 = 0x0208;
     let mut h = Vec::with_capacity(8);
     h.extend_from_slice(&fcf.to_le_bytes());
     h.extend_from_slice(&dst.to_le_bytes());
@@ -421,7 +422,7 @@ mod tests {
         assert_eq!(&frame[7..9], &[0xff, 0x7f], "src short LE");
 
         // NWK header (cleartext) starts at byte 9: FCF 0x0209 · dst · src · radius · seq
-        assert_eq!(&frame[9..11], &[0x09, 0x02], "NWK FCF = data/v2/secured");
+        assert_eq!(&frame[9..11], &[0x08, 0x02], "NWK FCF = data/v2/secured");
         assert_eq!(&frame[11..13], &[0xcd, 0xab], "NWK dst LE");
         assert_eq!(&frame[13..15], &[0xff, 0x7f], "NWK src LE");
         assert_eq!(frame[15], 30, "radius");
