@@ -182,6 +182,10 @@ pub struct Shared {
     // here; send_cmd consumes them. cmd_lock serializes a request/response round-trip.
     mux_rx: Mutex<Option<std::sync::mpsc::Receiver<Frame>>>,
     cmd_lock: Mutex<()>,
+    // Serializes macro-variable resolution (the NWK frame-counter read-modify-write
+    // against the workspace) so concurrent injects can't grab the same counter — a
+    // duplicate counter is dropped by the target's anti-replay protection.
+    resolve_lock: Mutex<()>,
     // Active BLE link, if connected over Bluetooth instead of serial.
     ble: Mutex<Option<crate::ble::BleLink>>,
     // Active WebSocket link, if connected over the network.
@@ -204,6 +208,7 @@ impl Default for Shared {
             mcp_tools: Mutex::new(McpToolFlags::default()),
             mux_rx: Mutex::new(None),
             cmd_lock: Mutex::new(()),
+            resolve_lock: Mutex::new(()),
             ble: Mutex::new(None),
             ws: Mutex::new(None),
         }
@@ -1730,6 +1735,10 @@ fn resolve_macro_text(shared: &Arc<Shared>, text: &str) -> Result<String, String
         .unwrap()
         .clone()
         .ok_or("macro variables need a workspace (no app handle)")?;
+    // Serialize the whole load → consume-counter → save against the workspace so
+    // concurrent injects can't grab the same NWK frame counter (a duplicate is
+    // dropped by the target's anti-replay — the "fails in succession" symptom).
+    let _guard = shared.resolve_lock.lock().unwrap();
     let mut nets = crate::workspace::load_networks(&app);
     let idx = crate::workspace::active_network_index(&nets);
 
