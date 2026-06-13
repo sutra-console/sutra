@@ -147,6 +147,120 @@ pub fn unsecure_nwk(key: &[u8; 16], frame: &[u8], header_len: usize) -> Result<V
     Ok(ct)
 }
 
+// ---- frame assembly: ZDP → APS → NWK → MAC --------------------------------
+// Builds a complete injectable 802.15.4 MAC frame carrying a NWK-secured ZDP
+// request. The sniffer's `tx` takes exactly these bytes (the radio appends the
+// 2-byte FCS). Layout, outer → inner:
+//
+//   MAC header(9) · [ NWK header(8) · aux-sec(14) · ENC{ APS header(8) · ZDP } · MIC(4) ]
+//
+// All short-address, single-hop, NWK-secured-with-network-key. Multi-hop routing
+// (source-route subframe) and APS-layer security are out of scope here.
+
+/// ZDP request cluster ids (the APS cluster == the ZDP command). The three we
+/// use to interview a node.
+pub const ZDP_NODE_DESC_REQ: u16 = 0x0002;
+pub const ZDP_SIMPLE_DESC_REQ: u16 = 0x0004;
+pub const ZDP_ACTIVE_EP_REQ: u16 = 0x0005;
+
+/// ZDP request payload (= the APS payload): txn seq · target short(2 LE) ·
+/// [endpoint] (only Simple_Desc_req carries the endpoint).
+pub fn zdp_request(txn_seq: u8, target: u16, endpoint: Option<u8>) -> Vec<u8> {
+    let mut p = Vec::with_capacity(4);
+    p.push(txn_seq);
+    p.extend_from_slice(&target.to_le_bytes());
+    if let Some(ep) = endpoint {
+        p.push(ep);
+    }
+    p
+}
+
+/// APS data header for a ZDP request: endpoint 0, profile 0x0000 (ZDP), the
+/// cluster carries the ZDP command. Unicast, no APS security, no ack request.
+pub fn aps_zdp_header(cluster: u16, aps_counter: u8) -> Vec<u8> {
+    vec![
+        0x00, // frame control: data · unicast · no security · no ack
+        0x00, // destination endpoint 0 (ZDP)
+        (cluster & 0xff) as u8,
+        (cluster >> 8) as u8,
+        0x00,
+        0x00, // profile 0x0000 (ZDP)
+        0x00, // source endpoint 0
+        aps_counter,
+    ]
+}
+
+/// Cleartext (authenticated) NWK data header: FCF · dst · src · radius · seq.
+/// FCF 0x0209 = data · protocol version 2 (Zigbee PRO) · security on.
+pub fn nwk_header(dst: u16, src: u16, radius: u8, seq: u8) -> Vec<u8> {
+    let fcf: u16 = 0x0209;
+    let mut h = Vec::with_capacity(8);
+    h.extend_from_slice(&fcf.to_le_bytes());
+    h.extend_from_slice(&dst.to_le_bytes());
+    h.extend_from_slice(&src.to_le_bytes());
+    h.push(radius);
+    h.push(seq);
+    h
+}
+
+/// 802.15.4 data MAC header: FCF 0x8861 = data · ack request · PAN-ID
+/// compression · short dst · short src. Then seq · dst PAN · dst · src.
+pub fn mac_header(seq: u8, pan: u16, dst: u16, src: u16) -> Vec<u8> {
+    let fcf: u16 = 0x8861;
+    let mut h = Vec::with_capacity(9);
+    h.extend_from_slice(&fcf.to_le_bytes());
+    h.push(seq);
+    h.extend_from_slice(&pan.to_le_bytes());
+    h.extend_from_slice(&dst.to_le_bytes());
+    h.extend_from_slice(&src.to_le_bytes());
+    h
+}
+
+/// Everything needed to assemble one injectable ZDP request frame. Sequence
+/// counters (`mac_seq`/`nwk_seq`/`aps_counter`/`zdp_seq`/`frame_counter`) are
+/// caller-managed and must advance per frame; `src_short`/`src_eui64` are OUR
+/// injector identity and must NOT collide with a real node (coordinator-safety).
+pub struct ZdpInject<'a> {
+    pub key: &'a [u8; 16],
+    pub src_eui64: &'a [u8; 8],
+    pub pan: u16,
+    /// target node short address — MAC dst, NWK dst, and ZDP NWKAddrOfInterest.
+    pub target: u16,
+    pub src_short: u16,
+    pub frame_counter: u32,
+    pub mac_seq: u8,
+    pub nwk_seq: u8,
+    pub aps_counter: u8,
+    pub zdp_seq: u8,
+    pub radius: u8,
+    pub key_seq: u8,
+    pub cluster: u16,
+    /// Some(endpoint) for Simple_Desc_req; None for Node_Desc/Active_EP.
+    pub endpoint: Option<u8>,
+}
+
+/// Assemble the full injectable MAC frame (without FCS — the radio appends it).
+pub fn build_zdp_inject(p: &ZdpInject) -> Result<Vec<u8>, String> {
+    // APS frame = APS header · ZDP payload  → this becomes the encrypted NWK payload.
+    let mut aps = aps_zdp_header(p.cluster, p.aps_counter);
+    aps.extend_from_slice(&zdp_request(p.zdp_seq, p.target, p.endpoint));
+
+    let nwkh = nwk_header(p.target, p.src_short, p.radius, p.nwk_seq);
+    let nwk = secure_nwk(
+        p.key,
+        &nwkh,
+        &aps,
+        p.src_eui64,
+        p.frame_counter,
+        p.key_seq,
+        SEC_LEVEL_ENC_MIC32,
+    )?;
+
+    let mut frame = mac_header(p.mac_seq, p.pan, p.target, p.src_short);
+    frame.extend_from_slice(&nwk);
+    Ok(frame)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +332,62 @@ mod tests {
         let ct0 = header.len() + 14;
         bad[ct0] ^= 0x01;
         assert!(unsecure_nwk(&KEY, &bad, header.len()).is_err());
+    }
+
+    #[test]
+    fn zdp_active_ep_inject() {
+        let p = ZdpInject {
+            key: &KEY,
+            src_eui64: &EUI,
+            pan: 0x1234,
+            target: 0xabcd,
+            src_short: 0x7fff, // a high, unlikely-to-collide injector address
+            frame_counter: 100,
+            mac_seq: 0x10,
+            nwk_seq: 0x20,
+            aps_counter: 0x30,
+            zdp_seq: 0x40,
+            radius: 30,
+            key_seq: 0,
+            cluster: ZDP_ACTIVE_EP_REQ,
+            endpoint: None,
+        };
+        let frame = build_zdp_inject(&p).unwrap();
+
+        // MAC header: FCF 0x8861 · seq · dst PAN · dst · src
+        assert_eq!(&frame[0..2], &[0x61, 0x88], "MAC FCF = data/ack/short");
+        assert_eq!(frame[2], 0x10, "MAC seq");
+        assert_eq!(&frame[3..5], &[0x34, 0x12], "dst PAN LE");
+        assert_eq!(&frame[5..7], &[0xcd, 0xab], "dst short LE");
+        assert_eq!(&frame[7..9], &[0xff, 0x7f], "src short LE");
+
+        // NWK header (cleartext) starts at byte 9: FCF 0x0209 · dst · src · radius · seq
+        assert_eq!(&frame[9..11], &[0x09, 0x02], "NWK FCF = data/v2/secured");
+        assert_eq!(&frame[11..13], &[0xcd, 0xab], "NWK dst LE");
+        assert_eq!(&frame[13..15], &[0xff, 0x7f], "NWK src LE");
+        assert_eq!(frame[15], 30, "radius");
+        assert_eq!(frame[16], 0x20, "NWK seq");
+
+        // The secured NWK frame is everything after the 9-byte MAC header.
+        // Decrypt it and confirm the APS+ZDP payload round-trips.
+        let secured = &frame[9..];
+        let aps = unsecure_nwk(&KEY, secured, 8).unwrap();
+        // APS header: fc=0 · dst ep 0 · cluster(2 LE) · profile(2 LE) · src ep 0 · counter
+        assert_eq!(aps[0], 0x00, "APS frame control: data/unicast");
+        assert_eq!(aps[1], 0x00, "APS dst endpoint 0");
+        assert_eq!(&aps[2..4], &[0x05, 0x00], "cluster = Active_EP_req");
+        assert_eq!(&aps[4..6], &[0x00, 0x00], "profile = ZDP");
+        assert_eq!(aps[6], 0x00, "APS src endpoint 0");
+        assert_eq!(aps[7], 0x30, "APS counter");
+        // ZDP payload: txn seq · target(2 LE)
+        assert_eq!(aps[8], 0x40, "ZDP txn seq");
+        assert_eq!(&aps[9..11], &[0xcd, 0xab], "ZDP target = node short");
+        assert_eq!(aps.len(), 11, "no trailing endpoint for Active_EP_req");
+    }
+
+    #[test]
+    fn zdp_simple_desc_carries_endpoint() {
+        let zdp = zdp_request(0x40, 0xabcd, Some(7));
+        assert_eq!(zdp, vec![0x40, 0xcd, 0xab, 0x07]);
     }
 }
