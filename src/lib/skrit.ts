@@ -785,6 +785,7 @@ export interface Ieee154Frame {
   payloadHex: string; // MAC payload (after addressing, before FCS) as hex
   raw: number[]; // original record bytes (for pcap export)
   mac: number[]; // the MAC frame (no FCS) — feeds zdpIngest for the live interview
+  tx?: boolean; // true = a frame WE injected (echoed back; the radio can't hear its own TX)
 }
 
 const IEEE154_FTYPE = ["Beacon", "Data", "Ack", "MAC Command", "0x4", "0x5", "0x6", "0x7"];
@@ -861,6 +862,24 @@ export function decodeIeee154(p: number[] | Uint8Array): Ieee154Frame | null {
   }
   const payloadHex = payload.map((x) => x.toString(16).padStart(2, "0").toUpperCase()).join(" ");
   return { ts, channel, rssi, lqi, type, seq, dstPan, dst, src, payloadHex, raw: b, mac };
+}
+
+/** Decode a raw injected MAC frame (no record header, no FCS) into the same
+ *  shape as a captured frame, flagged `tx`. We synthesize a capture record
+ *  (ts·ch·rssi·lqi·flags·len·psdu) so the normal decoder does the MAC parse —
+ *  this is the "assumed send" we show because the radio can't hear its own TX. */
+export function decodeIeee154Tx(mac: number[], channel: number): Ieee154Frame | null {
+  // record = ts(4)·ch(1)·rssi(1)·lqi(1)·flags(1, fcs-ok)·len(1)·psdu(mac + 2 FCS)
+  const rec = [0, 0, 0, 0, channel & 0xff, 0, 0xff, 0x01, mac.length + 2, ...mac, 0, 0];
+  const f = decodeIeee154(rec);
+  if (f) f.tx = true;
+  return f;
+}
+
+/** Frames WE inject over the DATA channel, echoed back so the UI can show them
+ *  (the sniffer radio can't capture its own transmissions). Raw MAC bytes. */
+export async function onTx(cb: (mac: number[]) => void): Promise<UnlistenFn> {
+  return listen<number[]>("sutra://tx", (e) => cb(e.payload));
 }
 
 /** A node fact recovered from a decrypted ZDP reply (see zdpIngest). */

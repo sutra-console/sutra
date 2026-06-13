@@ -156,7 +156,7 @@ export function Ieee154Panel({
   const nodes = useMemo(() => {
     const m = new Map<string, Node>();
     frames.forEach((f, i) => {
-      if (!f.src) return;
+      if (!f.src || f.tx) return; // skip our own injected frames — not discovered nodes
       const d = m.get(f.src);
       if (d) {
         d.count++;
@@ -409,11 +409,15 @@ export function Ieee154Panel({
             </thead>
             <tbody>
               {packetRows.map(({ f, n }, i) => (
-                <tr key={group ? `${f.src}|${f.dst}|${f.type}|${f.payloadHex}` : i} className="border-t">
+                <tr key={group ? `${f.src}|${f.dst}|${f.type}|${f.payloadHex}` : i}
+                  className={`border-t ${f.tx ? "bg-primary/10" : ""}`}>
                   {group && <td className="px-2 py-0.5 tabular-nums text-muted-foreground">{n}</td>}
                   <td className="px-2 py-0.5 text-muted-foreground">{f.channel}</td>
-                  <td className="px-2 py-0.5 tabular-nums">{f.rssi}</td>
-                  <td className="px-2 py-0.5 text-muted-foreground">{f.type}</td>
+                  <td className="px-2 py-0.5 tabular-nums">{f.tx ? "TX" : f.rssi}</td>
+                  <td className="px-2 py-0.5 text-muted-foreground">
+                    {f.tx && <span className="mr-1 rounded bg-primary/20 px-1 text-[10px] text-primary">→ sent</span>}
+                    {f.type}
+                  </td>
                   <td className="px-2 py-0.5">{f.src || "—"}</td>
                   <td className="px-2 py-0.5">{f.dst || "—"}</td>
                   <td className="whitespace-nowrap px-2 py-0.5 text-muted-foreground">{f.payloadHex}</td>

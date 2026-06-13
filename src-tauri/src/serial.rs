@@ -794,6 +794,13 @@ pub fn data_write(shared: &Arc<Shared>, bytes: &[u8]) -> Result<(), String> {
         conn.data_writer.write_all(bytes).map_err(|e| format!("data write: {e}"))?;
     }
     conn.data_writer.flush().ok();
+    drop(guard);
+    // Echo the outbound bytes so the UI can show what we sent (a sniffer can't
+    // capture its own injects — this is the "assumed send"). Frontend decides
+    // how to render it per DATA kind (a TX 802.15.4 frame for a sniffer).
+    if let Some(app) = shared.app.lock().unwrap().clone() {
+        let _ = app.emit("sutra://tx", bytes.to_vec());
+    }
     Ok(())
 }
 

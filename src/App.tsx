@@ -56,6 +56,8 @@ import {
   decodeBleSniff,
   decodeI2cRecord,
   decodeIeee154,
+  decodeIeee154Tx,
+  onTx,
   getInfo,
   getIoConfig,
   onData,
@@ -265,6 +267,8 @@ export default function App() {
   const [ieee154Frames, setIeee154Frames] = useState<Ieee154Frame[]>([]); // decoded 802.15.4 frames (last 2000)
   const [ieee154Total, setIeee154Total] = useState(0); // total received (the buffer is capped)
   const [ch154, setCh154] = useState(0); // 802.15.4 sniffer channel (0 = auto-hop, 11..26 = pinned)
+  const ch154Ref = useRef(0); // latest channel for the (non-re-subscribing) TX echo listener
+  ch154Ref.current = ch154;
   const [tsharkOk, setTsharkOk] = useState(false); // Wireshark tshark present (enables in-app decode)
   const [networks, setNetworks] = useState<Network[]>([]); // workspace network model (keys + nodes)
   const [networksActive, setNetworksActive] = useState(""); // active-network label (preserved on save)
@@ -652,6 +656,16 @@ export default function App() {
         if (pkt) bleBuf.push(pkt);
       }
     }).then((u) => (unlisten = u));
+    // Echo our own injected frames into the 802.15.4 view as TX ("assumed sends")
+    // — the radio can't capture its own transmissions, so without this an inject
+    // produces no visible feedback.
+    let unTx: (() => void) | undefined;
+    if (kind === DATA_KIND.IEEE802154) {
+      onTx((mac) => {
+        const f = decodeIeee154Tx(mac, ch154Ref.current);
+        if (f) setIeee154Frames((fs) => [...fs, f].slice(-2000));
+      }).then((u) => (unTx = u));
+    }
     const flush = window.setInterval(() => {
       if (kind === DATA_KIND.BLE_SNIFF && bleBuf.length) {
         const chunk = bleBuf.splice(0);
@@ -680,6 +694,7 @@ export default function App() {
     }, 150);
     return () => {
       unlisten?.();
+      unTx?.();
       window.clearInterval(flush);
     };
   }, [dataDesc?.kind]);
