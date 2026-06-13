@@ -44,6 +44,29 @@ function migrateFrames(spec: YantraSpec): YantraSpec {
     if (w.frame && !known.has(w.frame)) { frames.push({ id: w.frame, name: "Frame" }); known.add(w.frame); }
   }
   if (frames.length) s.frames = frames;
+
+  // Phase C: convert the old flat grid coords (x/w in cols, y/h in rows, absolute to
+  // canvas) into container-relative units. Frames become full-canvas (so children's
+  // canvas-relative coords stay correct as frame-relative), then the user can resize them.
+  if (s.coordV !== 2) {
+    const cols = s.cols ?? 6;
+    for (const w of s.widgets ?? []) {
+      w.x = ((w.x ?? 0) / cols) * 100;
+      w.w = ((w.w ?? 1) / cols) * 100;
+      w.y = (w.y ?? 0) * ROW_H;
+      w.h = (w.h ?? 1) * ROW_H;
+      w.unitH = "pct";
+      w.unitV = "px";
+      delete w.anchorH;
+      delete w.anchorV;
+    }
+    for (const f of s.frames ?? []) {
+      f.x = 0; f.y = 0; f.w = 100; f.h = 100;
+      f.unitH = "pct"; f.unitV = "pct";
+      if (f.clip === undefined) f.clip = false; // migrated full-canvas frames don't clip
+    }
+    s.coordV = 2;
+  }
   return s;
 }
 const csvToBytes = (s: string): number[] =>
@@ -51,15 +74,16 @@ const csvToBytes = (s: string): number[] =>
 const bytesToCsv = (b?: number[]): string =>
   (b ?? []).map((n) => `0x${n.toString(16).padStart(2, "0")}`).join(" ");
 
+// Phase C coords: x/w in % of parent, y/h in px. y is the stacking offset (px).
 function defaultWidget(type: string, y: number): YantraWidget {
-  const base: YantraWidget = { type, label: type, x: 0, y, w: 2, h: 1 };
+  const base: YantraWidget = { type, label: type, x: 4, y, w: 30, h: 48, unitH: "pct", unitV: "px" };
   switch (type) {
     case "button": return { ...base, send: "" };
     case "toggle": return { ...base, on: "", off: "" };
-    case "slider": return { ...base, min: 0, max: 100, step: 1, send: "{value}" };
-    case "select": return { ...base, w: 3, options: [{ label: "Option", send: "" }] };
-    case "readout": return { ...base, w: 3, match: "" };
-    case "tabs": return { ...base, w: 4, h: 3, label: "Tabs", tabs: [{ id: tid(), label: "Tab 1" }, { id: tid(), label: "Tab 2" }] };
+    case "slider": return { ...base, w: 50, min: 0, max: 100, step: 1, send: "{value}" };
+    case "select": return { ...base, w: 50, options: [{ label: "Option", send: "" }] };
+    case "readout": return { ...base, w: 50, match: "" };
+    case "tabs": return { ...base, w: 60, h: 220, label: "Tabs", tabs: [{ id: tid(), label: "Tab 1" }, { id: tid(), label: "Tab 2" }] };
     default: return base;
   }
 }
@@ -168,6 +192,7 @@ export function YantraEditor({
   const [selected, setSelected] = useState<number[]>([]); // selected widget indices
   const [selectedFrames, setSelectedFrames] = useState<string[]>([]); // frames selected in the tree
   const [containerW, setContainerW] = useState(0);
+  const [containerH, setContainerH] = useState(0);
   const [ready, setReady] = useState(false);
   const [toolMenu, setToolMenu] = useState<"a" | "s" | null>(null); // open align/spacing submenu
   const [showLayers, setShowLayers] = useState(false); // layers panel visible
@@ -189,15 +214,41 @@ export function YantraEditor({
   const dirty = JSON.stringify(draft) !== JSON.stringify(spec);
   const sel = selected.length ? selected[0] : null;
 
-  // px geometry of a widget. Coordinates are ALWAYS in grid units (x/w in columns,
-  // y/h in rows) — grid mode keeps them integer (snapped), free mode allows
-  // fractional. Freeflow changes only snapping, never the coordinate system.
-  const geom = (w: YantraWidget) => ({
-    left: (w.x ?? 0) * cw,
-    top: (w.y ?? 0) * ROW_H,
-    width: (w.w ?? 1) * cw,
-    height: (w.h ?? 1) * ROW_H,
-  });
+  // Phase C: coords are relative to the parent container's content box, in unitH/unitV
+  // (pct of parent | px). The editor is FLAT — we resolve each node's ABSOLUTE px rect
+  // by walking the parent chain, so Moveable/Selecto keep working on absolute wrappers.
+  type Rect = { x: number; y: number; w: number; h: number };
+  type Node = { x?: number; y?: number; w?: number; h?: number; unitH?: string; unitV?: string };
+  const TAB_BAR = 30; // approx tab-bar height (renderer uses flex; editor estimates)
+  const parentKeyOf = (n: { tab?: string; frame?: string; parent?: string }) =>
+    n.tab ?? n.frame ?? n.parent ?? "root";
+  const relRect = (n: Node, pb: Rect): Rect => {
+    const uH = n.unitH ?? "pct", uV = n.unitV ?? "px";
+    return {
+      x: pb.x + (uH === "pct" ? ((n.x ?? 0) / 100) * pb.w : n.x ?? 0),
+      w: uH === "pct" ? ((n.w ?? 25) / 100) * pb.w : n.w ?? 100,
+      y: pb.y + (uV === "pct" ? ((n.y ?? 0) / 100) * pb.h : n.y ?? 0),
+      h: uV === "pct" ? ((n.h ?? 25) / 100) * pb.h : n.h ?? 48,
+    };
+  };
+  const contentBox = (key: string, seen = new Set<string>()): Rect => {
+    if (key === "root" || seen.has(key)) return { x: 0, y: 0, w: containerW, h: containerH };
+    seen.add(key);
+    const f = frames.find((x) => x.id === key);
+    if (f) return relRect(f, contentBox(parentKeyOf(f), seen));
+    const owner = widgets.find((w) => w.type === "tabs" && (w.tabs ?? []).some((t) => t.id === key));
+    if (owner) {
+      const ob = relRect(owner, contentBox(parentKeyOf(owner), seen));
+      return { x: ob.x, y: ob.y + TAB_BAR, w: ob.w, h: Math.max(0, ob.h - TAB_BAR) };
+    }
+    return { x: 0, y: 0, w: containerW, h: containerH };
+  };
+  const absRect = (n: Node & { tab?: string; frame?: string; parent?: string }): Rect =>
+    relRect(n, contentBox(parentKeyOf(n)));
+  const geom = (w: YantraWidget) => {
+    const r = absRect(w);
+    return { left: r.x, top: r.y, width: r.w, height: r.h };
+  };
 
   // editor preview gating: show only the active pane's members (treat tabs like a
   // frame). Mirrors the renderer but against the editor's chosen active tab.
@@ -221,6 +272,8 @@ export function YantraEditor({
     return out;
   };
   const paneHidden = (w: YantraWidget) => panesFor(w).some((p) => !tabActive(p));
+  // a frame is hidden if any pane on its own tab/parent chain is inactive
+  const frameHidden = (f: YantraFrame) => panesFor({ type: "", tab: f.tab, frame: f.parent } as YantraWidget).some((p) => !tabActive(p));
 
   // re-seed when the file prop changes (App also remounts via key, but be safe)
   useEffect(() => {
@@ -265,9 +318,10 @@ export function YantraEditor({
     setReady(true);
     const el = gridRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setContainerW(el.clientWidth));
+    const ro = new ResizeObserver(() => { setContainerW(el.clientWidth); setContainerH(el.clientHeight); });
     ro.observe(el);
     setContainerW(el.clientWidth);
+    setContainerH(el.clientHeight);
     return () => ro.disconnect();
   }, []);
 
@@ -381,7 +435,10 @@ export function YantraEditor({
     ]);
     const parent = parents.size === 1 ? [...parents][0] : undefined;
     setDraft((d) => {
-      const fr: YantraFrame[] = [...(d.frames ?? []), { id, name: "Frame", parent }];
+      // New frame fills its parent (pct), so the children's existing relative coords
+      // stay visually correct after reparenting; resize it afterwards to constrain.
+      const newFrame: YantraFrame = { id, name: "Frame", parent, x: 0, y: 0, w: 100, h: 100, unitH: "pct", unitV: "pct", clip: false };
+      const fr: YantraFrame[] = [...(d.frames ?? []), newFrame];
       // reparent selected frames under the new one (nesting)
       const fr2 = fr.map((f) => (selectedFrames.includes(f.id) ? { ...f, parent: id } : f));
       const ws = (d.widgets ?? []).map((w, i) => (selected.includes(i) ? { ...w, frame: id } : w));
@@ -465,29 +522,30 @@ export function YantraEditor({
   };
 
 
-  // Read the final DOM geometry of the dragged/resized widgets back into the spec
-  // (cells in grid mode, pixels in free mode), then clear the gesture transforms.
+  // Read the dragged/resized widgets' final DOM rects back into the spec, converted
+  // to coords RELATIVE to each widget's parent container, in its unit (pct|px).
   const commit = (indices: number[]) => {
     const cont = gridRef.current;
     if (!cont) return;
     const cr = cont.getBoundingClientRect();
-    const cwNow = containerW > 0 ? containerW / cols : 80;
+    const r2 = (n: number) => Math.round(n * 100) / 100;
     setDraft((d) => {
       const ws = [...(d.widgets ?? [])];
       for (const i of indices) {
         const el = widgetRefs.current[i];
         if (!el) continue;
+        const w0 = ws[i];
+        const pb = contentBox(parentKeyOf(w0)); // parent content box (canvas px)
         const r = el.getBoundingClientRect();
-        const left = r.left - cr.left + cont.scrollLeft;
-        const top = r.top - cr.top + cont.scrollTop;
-        // grid units, 2-decimal fractions (Shift-snap already lands on whole cells)
-        const r2 = (n: number) => Math.round(n * 100) / 100;
+        const left = r.left - cr.left + cont.scrollLeft - pb.x;
+        const top = r.top - cr.top + cont.scrollTop - pb.y;
+        const uH = w0.unitH ?? "pct", uV = w0.unitV ?? "px";
         ws[i] = {
-          ...ws[i],
-          x: Math.max(0, r2(left / cwNow)),
-          y: Math.max(0, r2(top / ROW_H)),
-          w: Math.max(0.25, r2(r.width / cwNow)),
-          h: Math.max(0.25, r2(r.height / ROW_H)),
+          ...w0,
+          x: uH === "pct" ? Math.max(0, r2(pb.w ? (left / pb.w) * 100 : 0)) : Math.max(0, Math.round(left)),
+          w: uH === "pct" ? Math.max(1, r2(pb.w ? (r.width / pb.w) * 100 : 0)) : Math.max(8, Math.round(r.width)),
+          y: uV === "pct" ? Math.max(0, r2(pb.h ? (top / pb.h) * 100 : 0)) : Math.max(0, Math.round(top)),
+          h: uV === "pct" ? Math.max(1, r2(pb.h ? (r.height / pb.h) * 100 : 0)) : Math.max(8, Math.round(r.height)),
         };
       }
       return { ...d, widgets: ws };
@@ -783,6 +841,16 @@ export function YantraEditor({
             minHeight: rows * ROW_H,
           }}
         >
+          {/* container outlines (non-interactive) so frame bounds are visible */}
+          {frames.map((f) => frameHidden(f) ? null : (() => {
+            const r = absRect({ ...f });
+            return (
+              <div key={`f${f.id}`} className={`pointer-events-none absolute rounded border border-dashed ${selectedFrames.includes(f.id) ? "border-primary" : "border-muted-foreground/40"}`}
+                style={{ left: r.x, top: r.y, width: r.w, height: r.h }}>
+                <span className="absolute left-0 top-0 rounded-br bg-background/70 px-1 text-[9px] text-muted-foreground">{f.name || "frame"}</span>
+              </div>
+            );
+          })())}
           {widgets.map((w, i) => paneHidden(w) ? null : (
             <ContextMenu key={i}>
               <ContextMenuTrigger asChild>

@@ -668,26 +668,36 @@ export interface YantraWidget {
   options?: { label: string; send: YantraAction }[]; // select
   match?: string; // readout: regex over the console; capture group 1 is shown
   hidden?: boolean; // layer hidden from the rendered surface
-  frame?: string; // parent frame id (organizational; editor-only)
+  frame?: string; // parent frame id (container); coords are relative to it
   group?: string; // legacy flat group id — migrated to `frame` on load
-  anchorH?: "scale" | "left" | "right" | "center" | "stretch"; // responsive: horizontal
-  anchorV?: "scale" | "top" | "bottom" | "middle" | "stretch"; // responsive: vertical
+  // Phase C: x/y/w/h are relative to the parent container's content box, in these units.
+  unitH?: "pct" | "px"; // governs x,w — pct = % of parent (responsive), px = fixed. default pct
+  unitV?: "pct" | "px"; // governs y,h. default px (fixed rows, today's feel)
+  anchorH?: "scale" | "left" | "right" | "center" | "stretch"; // legacy (pre-C); migrated to unitH
+  anchorV?: "scale" | "top" | "bottom" | "middle" | "stretch"; // legacy (pre-C); migrated to unitV
 }
-/** An editor-only container in the layer tree. Nestable via `parent`. */
+/** A container node in the layer tree. Has its own bounds; children are positioned
+ *  relative to it and clipped to it. Nestable via `parent` (or `tab` to live in a pane). */
 export interface YantraFrame {
   id: string;
   name?: string;
   parent?: string; // parent frame id (nesting); absent = top level
   tab?: string; // if set, this frame lives inside a tabs pane (id of that tab)
   collapsed?: boolean; // layer-tree collapse (UI only)
+  // Phase C: the frame's own rect, relative to ITS parent container's content box.
+  x?: number; y?: number; w?: number; h?: number;
+  unitH?: "pct" | "px";
+  unitV?: "pct" | "px";
+  clip?: boolean; // clip children to the frame's bounds (default true)
 }
 export interface YantraSpec {
   name?: string;
   description?: string;
-  cols?: number; // grid columns (default 6)
-  layout?: "grid" | "free"; // grid = snap to cells (default); free = absolute pixels
-  design?: { w: number; h: number }; // reference canvas size for anchor resolution
-  frames?: YantraFrame[]; // editor-only container tree
+  cols?: number; // grid columns (default 6) — editor snap guide only since Phase C
+  layout?: "grid" | "free"; // legacy (pre-C)
+  design?: { w: number; h: number }; // legacy (pre-C anchor reference)
+  coordV?: number; // coordinate-model version: 2 = container-relative (Phase C). absent = pre-C grid
+  frames?: YantraFrame[]; // container tree (each has its own bounds; children relative)
   widgets?: YantraWidget[];
 }
 export interface YantraDoc {

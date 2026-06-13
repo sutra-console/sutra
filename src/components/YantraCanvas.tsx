@@ -9,7 +9,7 @@ import { type CSSProperties, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   MSG, dataWrite, i2cXfer, invokeCommand, onData, sendCmd,
-  type YantraAction, type YantraSpec, type YantraWidget,
+  type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
 
 const enc = new TextEncoder();
@@ -47,33 +47,13 @@ export function YantraCanvas({
   const fire = (a: YantraAction | undefined, value?: string) => {
     runAction(a, value).catch(() => {});
   };
-  const cols = spec.cols ?? 6;
   const widgets = spec.widgets ?? [];
+  const frames = spec.frames ?? [];
   const hasReadout = widgets.some((w) => w.type === "readout");
 
-  const frames = spec.frames ?? [];
   // active tab per `tabs` widget (keyed by its index); default = first pane
   const [activeTabs, setActiveTabs] = useState<Record<number, string>>({});
   const activeTabOf = (i: number) => activeTabs[i] ?? widgets[i].tabs?.[0]?.id;
-  const tabActive = (tabId: string): boolean => {
-    const owner = widgets.findIndex((w) => w.type === "tabs" && (w.tabs ?? []).some((t) => t.id === tabId));
-    return owner < 0 || activeTabOf(owner) === tabId; // orphan tab → always shown
-  };
-  // panes gating a widget: its own tab plus any tab on its frame-parent chain.
-  const panesFor = (w: YantraWidget): string[] => {
-    const out: string[] = [];
-    if (w.tab) out.push(w.tab);
-    let fid = w.frame;
-    const seen = new Set<string>();
-    while (fid && !seen.has(fid)) {
-      seen.add(fid);
-      const f = frames.find((x) => x.id === fid);
-      if (!f) break;
-      if (f.tab) out.push(f.tab);
-      fid = f.parent;
-    }
-    return out;
-  };
 
   // Rolling console buffer for readout regex matches (only while readouts exist).
   const [consoleText, setConsoleText] = useState("");
@@ -96,58 +76,97 @@ export function YantraCanvas({
     }
   };
 
-  // Coordinates are grid units (x/w in columns, y/h in rows). We position absolutely
-  // (column % wide × ROW_H tall) so it matches the editor pixel-for-pixel. ROW_H must
-  // equal the editor's. Anchors (responsive) resolve against the design size; CSS
-  // positioning (left/right/top/bottom in px) then keeps fixed edges fixed as the
-  // window resizes — no measurement needed. Default H=scale (today's %), V=top (fixed).
-  const ROW_H = 56;
-  const design = spec.design;
-  const widgetStyle = (w: YantraWidget): CSSProperties => {
-    const x = w.x ?? 0, y = w.y ?? 0, wc = w.w ?? 1, hc = w.h ?? 1;
-    const aH = design ? w.anchorH ?? "scale" : "scale";
-    const aV = design ? w.anchorV ?? "top" : "top";
-    const dW = design?.w ?? 0;
-    const dH = design?.h ?? 0;
-    const cw = cols > 0 ? dW / cols : 0;
-    const dx = x * cw, dw = wc * cw, dy = y * ROW_H, dh = hc * ROW_H;
-    const s: CSSProperties = {};
-    if (aH === "scale") { s.left = `${(x / cols) * 100}%`; s.width = `${(wc / cols) * 100}%`; }
-    else if (aH === "left") { s.left = dx; s.width = dw; }
-    else if (aH === "right") { s.right = dW - (dx + dw); s.width = dw; }
-    else if (aH === "center") { s.left = `calc(${((dx + dw / 2) / dW) * 100}% - ${dw / 2}px)`; s.width = dw; }
-    else { s.left = dx; s.right = dW - (dx + dw); } // stretch
-    if (aV === "top") { s.top = dy; s.height = dh; }
-    else if (aV === "scale") { s.top = `${(dy / dH) * 100}%`; s.height = `${(dh / dH) * 100}%`; }
-    else if (aV === "bottom") { s.bottom = dH - (dy + dh); s.height = dh; }
-    else if (aV === "middle") { s.top = `calc(${((dy + dh / 2) / dH) * 100}% - ${dh / 2}px)`; s.height = dh; }
-    else { s.top = dy; s.bottom = dH - (dy + dh); } // stretch
-    return s;
-  };
   return (
     <div className="relative h-full overflow-auto p-1">
-      {widgets.map((w, i) => {
-        if (w.hidden) return null;
-        if (panesFor(w).some((p) => !tabActive(p))) return null;
-        return (
-          <div key={i} className="absolute" style={widgetStyle(w)}>
-            {w.type === "tabs" ? (
+      <CanvasNodes
+        container="root" widgets={widgets} frames={frames}
+        activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
+        disabled={disabled} fire={fire} readout={readout}
+      />
+    </div>
+  );
+}
+
+// x/y/w/h are relative to the parent container's content box; unitH/unitV pick %
+// (responsive) vs px (fixed). Defaults: H=pct, V=px (today's feel).
+function nodeStyle(n: { x?: number; y?: number; w?: number; h?: number; unitH?: string; unitV?: string }): CSSProperties {
+  const uH = n.unitH ?? "pct";
+  const uV = n.unitV ?? "px";
+  const x = n.x ?? 0, y = n.y ?? 0;
+  const w = n.w ?? (uH === "pct" ? 25 : 100);
+  const h = n.h ?? (uV === "pct" ? 25 : 48);
+  return {
+    position: "absolute",
+    left: uH === "pct" ? `${x}%` : x,
+    width: uH === "pct" ? `${w}%` : w,
+    top: uV === "pct" ? `${y}%` : y,
+    height: uV === "pct" ? `${h}%` : h,
+  };
+}
+
+// Recursively render the children of one container (root | a frame id | a tab-pane id).
+function CanvasNodes({
+  container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, readout,
+}: {
+  container: string; // "root" | frame id | pane id
+  widgets: YantraWidget[];
+  frames: YantraFrame[];
+  activeTabOf: (i: number) => string | undefined;
+  setActiveTabs: (f: (m: Record<number, string>) => Record<number, string>) => void;
+  disabled?: boolean;
+  fire: (a: YantraAction | undefined, value?: string) => void;
+  readout: (re?: string) => string;
+}) {
+  const isRoot = container === "root";
+  const childFrames = frames.filter((f) =>
+    isRoot ? !f.parent && !f.tab : f.tab === container || (f.parent === container && !f.tab),
+  );
+  const childWidgetIdx = widgets
+    .map((_, i) => i)
+    .filter((i) => {
+      const w = widgets[i];
+      if (w.hidden) return false;
+      return isRoot ? !w.frame && !w.tab : w.tab === container || (w.frame === container && !w.tab);
+    });
+
+  const sub = (c: string) => (
+    <CanvasNodes container={c} widgets={widgets} frames={frames} activeTabOf={activeTabOf}
+      setActiveTabs={setActiveTabs} disabled={disabled} fire={fire} readout={readout} />
+  );
+
+  return (
+    <>
+      {childFrames.map((f) => (
+        <div key={f.id} style={nodeStyle(f)} className={`rounded ${f.clip === false ? "" : "overflow-hidden"}`}>
+          {sub(f.id)}
+        </div>
+      ))}
+      {childWidgetIdx.map((i) => {
+        const w = widgets[i];
+        if (w.type === "tabs") {
+          const active = activeTabOf(i);
+          return (
+            <div key={i} style={nodeStyle(w)} className="flex flex-col overflow-hidden rounded border bg-card">
               <div className="flex flex-wrap gap-1 border-b p-1">
                 {(w.tabs ?? []).map((t) => (
                   <button key={t.id} type="button"
-                    className={`rounded px-2 py-0.5 text-xs ${activeTabOf(i) === t.id ? "bg-primary text-primary-foreground" : "bg-muted/40 hover:bg-muted"}`}
+                    className={`rounded px-2 py-0.5 text-xs ${active === t.id ? "bg-primary text-primary-foreground" : "bg-muted/40 hover:bg-muted"}`}
                     onClick={() => setActiveTabs((m) => ({ ...m, [i]: t.id }))}>
                     {t.label}
                   </button>
                 ))}
               </div>
-            ) : (
-              <Widget w={w} disabled={disabled} fire={fire} readout={readout} />
-            )}
+              <div className="relative flex-1">{active && sub(active)}</div>
+            </div>
+          );
+        }
+        return (
+          <div key={i} style={nodeStyle(w)}>
+            <Widget w={w} disabled={disabled} fire={fire} readout={readout} />
           </div>
         );
       })}
-    </div>
+    </>
   );
 }
 
