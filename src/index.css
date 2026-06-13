@@ -96,11 +96,9 @@
   color-scheme: dark;
 }
 
-/* Thin scrollbars; reserve the gutter so widths don't shift when a scrollbar appears. */
-* {
-  scrollbar-width: thin; /* Firefox */
-  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 45%, transparent) transparent;
-}
+/* Thin scrollbars. NOTE: do NOT set the standard scrollbar-width/scrollbar-color —
+   in Chromium (WebView2) that disables the ::-webkit-scrollbar styling below, leaving
+   the OS thin scrollbar (which can't be centered in the gutter). */
 *::-webkit-scrollbar {
   width: 12px;
   height: 12px;
