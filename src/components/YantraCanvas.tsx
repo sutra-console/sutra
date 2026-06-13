@@ -9,7 +9,7 @@ import { type CSSProperties, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   MSG, dataWrite, i2cXfer, invokeCommand, onData, sendCmd,
-  type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
+  axisStyle, type AnchorMode, type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
 
 const enc = new TextEncoder();
@@ -87,21 +87,16 @@ export function YantraCanvas({
   );
 }
 
-// x/y/w/h are relative to the parent container's content box; unitH/unitV pick %
-// (responsive) vs px (fixed). Defaults: H=pct, V=px (today's feel).
-function nodeStyle(n: { x?: number; y?: number; w?: number; h?: number; unitH?: string; unitV?: string }): CSSProperties {
-  const uH = n.unitH ?? "pct";
-  const uV = n.unitV ?? "px";
-  const x = n.x ?? 0, y = n.y ?? 0;
-  const w = n.w ?? (uH === "pct" ? 25 : 100);
-  const h = n.h ?? (uV === "pct" ? 25 : 48);
+// x/y/w/h are relative to the parent container's content box; the per-axis anchor
+// (scale/start/center/end/stretch) decides how they resolve. Defaults: H=scale, V=start.
+function nodeStyle(n: YantraWidget | YantraFrame): CSSProperties {
+  const aH = (n.anchorH ?? "scale") as AnchorMode;
+  const aV = (n.anchorV ?? "start") as AnchorMode;
   return {
     position: "absolute",
-    left: uH === "pct" ? `${x}%` : x,
-    width: uH === "pct" ? `${w}%` : w,
-    top: uV === "pct" ? `${y}%` : y,
-    height: uV === "pct" ? `${h}%` : h,
-  };
+    ...axisStyle(aH, n.x ?? 0, n.w ?? (aH === "scale" ? 25 : 100), "h"),
+    ...axisStyle(aV, n.y ?? 0, n.h ?? (aV === "scale" ? 25 : 48), "v"),
+  } as CSSProperties;
 }
 
 // Recursively render the children of one container (root | a frame id | a tab-pane id).

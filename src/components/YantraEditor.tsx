@@ -22,8 +22,14 @@ import {
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import type { YantraAction, YantraFrame, YantraSpec, YantraWidget } from "@/lib/skrit";
+import {
+  resolveAxis, storeAxis,
+  type AnchorMode, type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
+} from "@/lib/skrit";
 import { Widget } from "./YantraCanvas";
+
+const ANCHORS: AnchorMode[] = ["scale", "start", "center", "end", "stretch"];
+const r2 = (n: number) => Math.round(n * 100) / 100;
 
 const ROW_H = 56; // px per grid row in the editor (renderer auto-sizes rows)
 const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label", "tabs"] as const;
@@ -55,18 +61,24 @@ function migrateFrames(spec: YantraSpec): YantraSpec {
       w.w = ((w.w ?? 1) / cols) * 100;
       w.y = (w.y ?? 0) * ROW_H;
       w.h = (w.h ?? 1) * ROW_H;
-      w.unitH = "pct";
-      w.unitV = "px";
-      delete w.anchorH;
-      delete w.anchorV;
+      w.anchorH = "scale";
+      w.anchorV = "start";
     }
     for (const f of s.frames ?? []) {
       f.x = 0; f.y = 0; f.w = 100; f.h = 100;
-      f.unitH = "pct"; f.unitV = "pct";
+      f.anchorH = "scale"; f.anchorV = "scale";
       if (f.clip === undefined) f.clip = false; // migrated full-canvas frames don't clip
     }
     s.coordV = 2;
   }
+  // interim Phase-C2 files stored unitH/unitV — convert to the anchor model
+  const u2a = (n: { anchorH?: AnchorMode; anchorV?: AnchorMode; unitH?: string; unitV?: string }) => {
+    if (!n.anchorH && n.unitH) n.anchorH = n.unitH === "pct" ? "scale" : "start";
+    if (!n.anchorV && n.unitV) n.anchorV = n.unitV === "pct" ? "scale" : "start";
+    delete n.unitH; delete n.unitV;
+  };
+  for (const w of s.widgets ?? []) u2a(w);
+  for (const f of s.frames ?? []) u2a(f);
   return s;
 }
 const csvToBytes = (s: string): number[] =>
@@ -76,7 +88,7 @@ const bytesToCsv = (b?: number[]): string =>
 
 // Phase C coords: x/w in % of parent, y/h in px. y is the stacking offset (px).
 function defaultWidget(type: string, y: number): YantraWidget {
-  const base: YantraWidget = { type, label: type, x: 4, y, w: 30, h: 48, unitH: "pct", unitV: "px" };
+  const base: YantraWidget = { type, label: type, x: 4, y, w: 30, h: 48, anchorH: "scale", anchorV: "start" };
   switch (type) {
     case "button": return { ...base, send: "" };
     case "toggle": return { ...base, on: "", off: "" };
@@ -218,18 +230,15 @@ export function YantraEditor({
   // (pct of parent | px). The editor is FLAT — we resolve each node's ABSOLUTE px rect
   // by walking the parent chain, so Moveable/Selecto keep working on absolute wrappers.
   type Rect = { x: number; y: number; w: number; h: number };
-  type Node = { x?: number; y?: number; w?: number; h?: number; unitH?: string; unitV?: string };
+  type Node = { x?: number; y?: number; w?: number; h?: number; anchorH?: AnchorMode; anchorV?: AnchorMode };
   const TAB_BAR = 30; // approx tab-bar height (renderer uses flex; editor estimates)
   const parentKeyOf = (n: { tab?: string; frame?: string; parent?: string }) =>
     n.tab ?? n.frame ?? n.parent ?? "root";
   const relRect = (n: Node, pb: Rect): Rect => {
-    const uH = n.unitH ?? "pct", uV = n.unitV ?? "px";
-    return {
-      x: pb.x + (uH === "pct" ? ((n.x ?? 0) / 100) * pb.w : n.x ?? 0),
-      w: uH === "pct" ? ((n.w ?? 25) / 100) * pb.w : n.w ?? 100,
-      y: pb.y + (uV === "pct" ? ((n.y ?? 0) / 100) * pb.h : n.y ?? 0),
-      h: uV === "pct" ? ((n.h ?? 25) / 100) * pb.h : n.h ?? 48,
-    };
+    const aH = n.anchorH ?? "scale", aV = n.anchorV ?? "start";
+    const h = resolveAxis(aH, n.x ?? 0, n.w ?? (aH === "scale" ? 25 : 100), pb.w);
+    const v = resolveAxis(aV, n.y ?? 0, n.h ?? (aV === "scale" ? 25 : 48), pb.h);
+    return { x: pb.x + h.start, w: h.size, y: pb.y + v.start, h: v.size };
   };
   const contentBox = (key: string, seen = new Set<string>()): Rect => {
     if (key === "root" || seen.has(key)) return { x: 0, y: 0, w: containerW, h: containerH };
@@ -347,9 +356,8 @@ export function YantraEditor({
   // keep Moveable's box synced when geometry changes from outside a gesture
   useEffect(() => { moveableRef.current?.updateRect(); }, [draft, containerW, selected]);
 
-  // Set a dimension from a typed string like "50", "50%", "120px". A "%"/"px"
-  // suffix switches that axis's unit (converting the other fields), then applies
-  // the typed number literally.
+  // Set a dimension from a typed string like "50", "50%", "120px". A "%" suffix
+  // switches the axis anchor to scale; "px" switches a scale axis to start.
   const setDim = (field: "x" | "y" | "w" | "h", raw: string) => {
     if (sel == null) return;
     const w = widgets[sel];
@@ -358,34 +366,28 @@ export function YantraEditor({
     if (!m) return;
     const val = parseFloat(m[1]);
     const suffix = m[2]?.toLowerCase();
-    const curUnit = axis === "H" ? w.unitH ?? "pct" : w.unitV ?? "px";
-    const unit: "pct" | "px" = suffix === "%" ? "pct" : suffix === "px" ? "px" : curUnit;
-    if (unit !== curUnit) setUnit(axis, unit);
+    const cur = axis === "H" ? w.anchorH ?? "scale" : w.anchorV ?? "start";
+    if (suffix === "%" && cur !== "scale") setAnchor(axis, "scale");
+    else if (suffix === "px" && cur === "scale") setAnchor(axis, "start");
     setWidget(sel, { [field]: val });
   };
 
-  // Switch a selected widget's axis unit (pct↔px), converting the stored value
-  // through the measured parent so it doesn't jump on screen.
-  const setUnit = (axis: "H" | "V", unit: "pct" | "px") => {
+  // Switch a selected widget's axis anchor (Unity-style preset), converting the
+  // stored values through the measured parent so it doesn't jump on screen.
+  const setAnchor = (axis: "H" | "V", mode: AnchorMode) => {
     if (sel == null) return;
     const w = widgets[sel];
     const pb = contentBox(parentKeyOf(w));
     if (axis === "H") {
-      if ((w.unitH ?? "pct") === unit) return;
-      const px = unit === "px";
-      setWidget(sel, {
-        unitH: unit,
-        x: px ? Math.round((w.x ?? 0) / 100 * pb.w) : (pb.w ? Math.round((w.x ?? 0) / pb.w * 1000) / 10 : 0),
-        w: px ? Math.round((w.w ?? 0) / 100 * pb.w) : (pb.w ? Math.round((w.w ?? 0) / pb.w * 1000) / 10 : 0),
-      });
+      const cur = w.anchorH ?? "scale";
+      const abs = resolveAxis(cur, w.x ?? 0, w.w ?? (cur === "scale" ? 25 : 100), pb.w);
+      const st = storeAxis(mode, abs.start, abs.size, pb.w);
+      setWidget(sel, { anchorH: mode, x: r2(st.a), w: r2(st.b) });
     } else {
-      if ((w.unitV ?? "px") === unit) return;
-      const px = unit === "px";
-      setWidget(sel, {
-        unitV: unit,
-        y: px ? Math.round((w.y ?? 0) / 100 * pb.h) : (pb.h ? Math.round((w.y ?? 0) / pb.h * 1000) / 10 : 0),
-        h: px ? Math.round((w.h ?? 0) / 100 * pb.h) : (pb.h ? Math.round((w.h ?? 0) / pb.h * 1000) / 10 : 0),
-      });
+      const cur = w.anchorV ?? "start";
+      const abs = resolveAxis(cur, w.y ?? 0, w.h ?? (cur === "scale" ? 25 : 48), pb.h);
+      const st = storeAxis(mode, abs.start, abs.size, pb.h);
+      setWidget(sel, { anchorV: mode, y: r2(st.a), h: r2(st.b) });
     }
   };
 
@@ -486,7 +488,7 @@ export function YantraEditor({
     setDraft((d) => {
       // New frame fills its parent (pct), so the children's existing relative coords
       // stay visually correct after reparenting; resize it afterwards to constrain.
-      const newFrame: YantraFrame = { id, name: "Frame", parent, x: 0, y: 0, w: 100, h: 100, unitH: "pct", unitV: "pct", clip: false };
+      const newFrame: YantraFrame = { id, name: "Frame", parent, x: 0, y: 0, w: 100, h: 100, anchorH: "scale", anchorV: "scale", clip: false };
       const fr: YantraFrame[] = [...(d.frames ?? []), newFrame];
       // reparent selected frames under the new one (nesting)
       const fr2 = fr.map((f) => (selectedFrames.includes(f.id) ? { ...f, parent: id } : f));
@@ -596,15 +598,10 @@ export function YantraEditor({
             ? { frame: target, tab: undefined }
             : { tab: target, frame: undefined };
         const left = absL - pb.x, top = absT - pb.y;
-        const uH = w0.unitH ?? "pct", uV = w0.unitV ?? "px";
-        ws[i] = {
-          ...w0,
-          ...ptr,
-          x: uH === "pct" ? Math.max(0, r2(pb.w ? (left / pb.w) * 100 : 0)) : Math.max(0, Math.round(left)),
-          w: uH === "pct" ? Math.max(1, r2(pb.w ? (r.width / pb.w) * 100 : 0)) : Math.max(8, Math.round(r.width)),
-          y: uV === "pct" ? Math.max(0, r2(pb.h ? (top / pb.h) * 100 : 0)) : Math.max(0, Math.round(top)),
-          h: uV === "pct" ? Math.max(1, r2(pb.h ? (r.height / pb.h) * 100 : 0)) : Math.max(8, Math.round(r.height)),
-        };
+        const aH = w0.anchorH ?? "scale", aV = w0.anchorV ?? "start";
+        const H = storeAxis(aH, left, r.width, pb.w);
+        const V = storeAxis(aV, top, r.height, pb.h);
+        ws[i] = { ...w0, ...ptr, x: r2(H.a), w: r2(H.b), y: r2(V.a), h: r2(V.b) };
       }
       return { ...d, widgets: ws };
     });
@@ -1124,7 +1121,7 @@ export function YantraEditor({
             w={widgets[sel]}
             tabOptions={widgets.flatMap((x) => (x.tabs ?? []).map((t) => ({ id: t.id, label: `${x.name || x.label || "tabs"} · ${t.label}` })))}
             onChange={(p) => setWidget(sel, p)}
-            onUnit={setUnit}
+            onAnchor={setAnchor}
             onDim={setDim}
             onDelete={() => { removeMany([sel]); setSelected([]); }}
           />
@@ -1151,8 +1148,8 @@ function AlignBtn({
 
 // Unit-aware dimension input: shows the value with its unit (px/%); typing a
 // "%" or "px" suffix switches the axis unit. Commits on blur / Enter.
-function DimInput({ value, unit, onCommit }: { value: number; unit: "pct" | "px"; onCommit: (raw: string) => void }) {
-  const fmt = `${Math.round((value ?? 0) * 10) / 10}${unit === "pct" ? "%" : "px"}`;
+function DimInput({ value, mode, onCommit }: { value: number; mode: AnchorMode; onCommit: (raw: string) => void }) {
+  const fmt = `${Math.round((value ?? 0) * 10) / 10}${mode === "scale" ? "%" : "px"}`;
   const [s, setS] = useState(fmt);
   useEffect(() => { setS(fmt); }, [fmt]);
   return (
@@ -1173,12 +1170,12 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function WidgetProps({
-  w, tabOptions, onChange, onUnit, onDim, onDelete,
+  w, tabOptions, onChange, onAnchor, onDim, onDelete,
 }: {
   w: YantraWidget;
   tabOptions: { id: string; label: string }[];
   onChange: (patch: Partial<YantraWidget>) => void;
-  onUnit: (axis: "H" | "V", unit: "pct" | "px") => void;
+  onAnchor: (axis: "H" | "V", mode: AnchorMode) => void;
   onDim: (field: "x" | "y" | "w" | "h", raw: string) => void;
   onDelete: () => void;
 }) {
@@ -1248,24 +1245,24 @@ function WidgetProps({
       <div className="grid grid-cols-4 gap-1">
         {(["x", "y", "w", "h"] as const).map((k) => (
           <Field key={k} label={k.toUpperCase()}>
-            <DimInput value={w[k] ?? 0} unit={(k === "x" || k === "w" ? w.unitH : w.unitV) ?? (k === "x" || k === "w" ? "pct" : "px")}
+            <DimInput value={w[k] ?? 0} mode={(k === "x" || k === "w" ? w.anchorH : w.anchorV) ?? (k === "x" || k === "w" ? "scale" : "start")}
               onCommit={(raw) => onDim(k, raw)} />
           </Field>
         ))}
       </div>
 
-      {/* sizing units: pct = % of parent (responsive), px = fixed */}
+      {/* anchors (per-axis, relative to the parent): scale=% · start/center/end=px · stretch=fill */}
       <div className="grid grid-cols-2 gap-1">
-        <Field label="X / W unit">
-          <Select value={w.unitH ?? "pct"} onValueChange={(v) => onUnit("H", v as "pct" | "px")}>
+        <Field label="Anchor X">
+          <Select value={w.anchorH ?? "scale"} onValueChange={(v) => onAnchor("H", v as AnchorMode)}>
             <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="pct">% of parent</SelectItem><SelectItem value="px">px (fixed)</SelectItem></SelectContent>
+            <SelectContent>{ANCHORS.map((a) => <SelectItem key={a} value={a}>{a}</SelectItem>)}</SelectContent>
           </Select>
         </Field>
-        <Field label="Y / H unit">
-          <Select value={w.unitV ?? "px"} onValueChange={(v) => onUnit("V", v as "pct" | "px")}>
+        <Field label="Anchor Y">
+          <Select value={w.anchorV ?? "start"} onValueChange={(v) => onAnchor("V", v as AnchorMode)}>
             <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="pct">% of parent</SelectItem><SelectItem value="px">px (fixed)</SelectItem></SelectContent>
+            <SelectContent>{ANCHORS.map((a) => <SelectItem key={a} value={a}>{a}</SelectItem>)}</SelectContent>
           </Select>
         </Field>
       </div>

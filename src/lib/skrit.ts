@@ -670,11 +670,53 @@ export interface YantraWidget {
   hidden?: boolean; // layer hidden from the rendered surface
   frame?: string; // parent frame id (container); coords are relative to it
   group?: string; // legacy flat group id — migrated to `frame` on load
-  // Phase C: x/y/w/h are relative to the parent container's content box, in these units.
-  unitH?: "pct" | "px"; // governs x,w — pct = % of parent (responsive), px = fixed. default pct
-  unitV?: "pct" | "px"; // governs y,h. default px (fixed rows, today's feel)
-  anchorH?: "scale" | "left" | "right" | "center" | "stretch"; // legacy (pre-C); migrated to unitH
-  anchorV?: "scale" | "top" | "bottom" | "middle" | "stretch"; // legacy (pre-C); migrated to unitV
+  // Phase C: x/y/w/h are relative to the parent container's content box. The per-axis
+  // anchor (Unity-style preset) decides how they're read:
+  //   scale  → x,w are % of parent (responsive)
+  //   start  → x px from left/top,  w/h px (fixed)
+  //   center → x px offset from centre, w/h px
+  //   end    → x px gap from right/bottom, w/h px
+  //   stretch→ x = near margin px, w = far margin px (size fills parent − margins)
+  anchorH?: AnchorMode; // default "scale"
+  anchorV?: AnchorMode; // default "start"
+  unitH?: "pct" | "px"; // legacy (Phase C interim) → migrated to anchorH
+  unitV?: "pct" | "px"; // legacy → migrated to anchorV
+}
+export type AnchorMode = "scale" | "start" | "center" | "end" | "stretch";
+
+// One axis of anchor math. a = x|y, b = w|h (stored). Used three ways:
+//  - axisStyle: CSS for the renderer (scale → %, others → px; no measurement).
+//  - resolveAxis: absolute {start,size} px within a parent of `parent` px (editor).
+//  - storeAxis: inverse — absolute px → stored a,b (editor commit).
+export function axisStyle(mode: AnchorMode, a: number, b: number, axis: "h" | "v"): Record<string, string | number> {
+  const lead = axis === "h" ? "left" : "top";
+  const far = axis === "h" ? "right" : "bottom";
+  const size = axis === "h" ? "width" : "height";
+  switch (mode) {
+    case "scale": return { [lead]: `${a}%`, [size]: `${b}%` };
+    case "center": return { [lead]: `calc(50% + ${a - b / 2}px)`, [size]: b };
+    case "end": return { [far]: a, [size]: b };
+    case "stretch": return { [lead]: a, [far]: b };
+    default: return { [lead]: a, [size]: b }; // start
+  }
+}
+export function resolveAxis(mode: AnchorMode, a: number, b: number, parent: number): { start: number; size: number } {
+  switch (mode) {
+    case "scale": return { start: (a / 100) * parent, size: (b / 100) * parent };
+    case "center": return { start: parent / 2 + a - b / 2, size: b };
+    case "end": return { start: parent - a - b, size: b };
+    case "stretch": return { start: a, size: Math.max(0, parent - a - b) };
+    default: return { start: a, size: b }; // start
+  }
+}
+export function storeAxis(mode: AnchorMode, start: number, size: number, parent: number): { a: number; b: number } {
+  switch (mode) {
+    case "scale": return { a: parent ? (start / parent) * 100 : 0, b: parent ? (size / parent) * 100 : 0 };
+    case "center": return { a: start + size / 2 - parent / 2, b: size };
+    case "end": return { a: parent - start - size, b: size };
+    case "stretch": return { a: start, b: Math.max(0, parent - start - size) };
+    default: return { a: start, b: size }; // start
+  }
 }
 /** A container node in the layer tree. Has its own bounds; children are positioned
  *  relative to it and clipped to it. Nestable via `parent` (or `tab` to live in a pane). */
@@ -686,9 +728,14 @@ export interface YantraFrame {
   collapsed?: boolean; // layer-tree collapse (UI only)
   // Phase C: the frame's own rect, relative to ITS parent container's content box.
   x?: number; y?: number; w?: number; h?: number;
-  unitH?: "pct" | "px";
-  unitV?: "pct" | "px";
+  anchorH?: AnchorMode;
+  anchorV?: AnchorMode;
+  unitH?: "pct" | "px"; // legacy
+  unitV?: "pct" | "px"; // legacy
   clip?: boolean; // clip children to the frame's bounds (default true)
+  layout?: "free" | "row" | "column" | "grid"; // auto-arrange children (free = manual x/y)
+  gap?: number; // px gap between children in a layout
+  pad?: number; // px padding inside the frame for a layout
 }
 export interface YantraSpec {
   name?: string;
