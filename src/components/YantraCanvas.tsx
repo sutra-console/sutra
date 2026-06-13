@@ -51,6 +51,14 @@ export function YantraCanvas({
   const widgets = spec.widgets ?? [];
   const hasReadout = widgets.some((w) => w.type === "readout");
 
+  // active tab per `tabs` widget (keyed by its index); default = first pane
+  const [activeTabs, setActiveTabs] = useState<Record<number, string>>({});
+  const activeTabOf = (i: number) => activeTabs[i] ?? widgets[i].tabs?.[0]?.id;
+  const tabVisible = (tabId: string): boolean => {
+    const owner = widgets.findIndex((w) => w.type === "tabs" && (w.tabs ?? []).some((t) => t.id === tabId));
+    return owner < 0 || activeTabOf(owner) === tabId; // orphan tab → always shown
+  };
+
   // Rolling console buffer for readout regex matches (only while readouts exist).
   const [consoleText, setConsoleText] = useState("");
   useEffect(() => {
@@ -102,11 +110,27 @@ export function YantraCanvas({
   };
   return (
     <div className="relative h-full overflow-auto p-1">
-      {widgets.map((w, i) => (
-        w.hidden ? null : <div key={i} className="absolute" style={widgetStyle(w)}>
-          <Widget w={w} disabled={disabled} fire={fire} readout={readout} />
-        </div>
-      ))}
+      {widgets.map((w, i) => {
+        if (w.hidden) return null;
+        if (w.tab && !tabVisible(w.tab)) return null;
+        return (
+          <div key={i} className="absolute" style={widgetStyle(w)}>
+            {w.type === "tabs" ? (
+              <div className="flex flex-wrap gap-1 border-b p-1">
+                {(w.tabs ?? []).map((t) => (
+                  <button key={t.id} type="button"
+                    className={`rounded px-2 py-0.5 text-xs ${activeTabOf(i) === t.id ? "bg-primary text-primary-foreground" : "bg-muted/40 hover:bg-muted"}`}
+                    onClick={() => setActiveTabs((m) => ({ ...m, [i]: t.id }))}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <Widget w={w} disabled={disabled} fire={fire} readout={readout} />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

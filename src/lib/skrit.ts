@@ -655,9 +655,12 @@ export type YantraAction =
 /** A widget in a .yantra control surface. Loose by design — new types/fields
  *  (scripts, plugins) slot in without breaking the renderer. */
 export interface YantraWidget {
-  type: string; // button | select | slider | toggle | readout | label | …
+  type: string; // button | select | slider | toggle | readout | label | tabs | …
+  name?: string; // stable id for scripting / addressing ("named output"); mlua routes by this
   label?: string;
   help?: string;
+  tab?: string; // membership: id of a tab on some `tabs` widget (hidden unless that tab is active)
+  tabs?: { id: string; label: string }[]; // for type "tabs": the panes
   x?: number; y?: number; w?: number; h?: number; // grid placement (cells)
   send?: YantraAction; // button/slider action ({value} → the slider value)
   on?: YantraAction; off?: YantraAction; // toggle

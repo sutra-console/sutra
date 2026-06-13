@@ -25,7 +25,8 @@ import {
 import type { YantraAction, YantraFrame, YantraSpec, YantraWidget } from "@/lib/skrit";
 
 const ROW_H = 56; // px per grid row in the editor (renderer auto-sizes rows)
-const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label"] as const;
+const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label", "tabs"] as const;
+const tid = () => `t${crypto.randomUUID().slice(0, 5)}`;
 
 // ---- small helpers ----------------------------------------------------------
 
@@ -57,6 +58,7 @@ function defaultWidget(type: string, y: number): YantraWidget {
     case "slider": return { ...base, min: 0, max: 100, step: 1, send: "{value}" };
     case "select": return { ...base, w: 3, options: [{ label: "Option", send: "" }] };
     case "readout": return { ...base, w: 3, match: "" };
+    case "tabs": return { ...base, w: 4, h: 3, label: "Tabs", tabs: [{ id: tid(), label: "Tab 1" }, { id: tid(), label: "Tab 2" }] };
     default: return base;
   }
 }
@@ -430,7 +432,8 @@ export function YantraEditor({
     setDraft((d) => {
       const ws = d.widgets ?? [];
       const y = ws.reduce((m, x) => Math.max(m, (x.y ?? 0) + (x.h ?? 1)), 0);
-      return { ...d, widgets: [...ws, defaultWidget(type, y)] };
+      const n = ws.filter((x) => x.type === type).length + 1;
+      return { ...d, widgets: [...ws, { ...defaultWidget(type, y), name: `${type}${n}` }] };
     });
     setSelected([newIdx]);
   };
@@ -709,10 +712,23 @@ export function YantraEditor({
                   } ${w.hidden ? "opacity-40" : ""}`}
                   style={{ ...geom(w), padding: 4 }}
                 >
-                  <div className="flex h-full flex-col overflow-hidden">
-                    <span className="truncate font-medium">{w.label || w.type}</span>
-                    <span className="truncate text-[10px] text-muted-foreground">{w.type}</span>
-                  </div>
+                  {w.type === "tabs" ? (
+                    <div className="flex h-full flex-col gap-1 overflow-hidden">
+                      <div className="flex flex-wrap gap-0.5">
+                        {(w.tabs ?? []).map((t) => (
+                          <span key={t.id} className="rounded bg-primary/15 px-1 text-[9px] text-primary">{t.label}</span>
+                        ))}
+                      </div>
+                      <span className="text-[9px] text-muted-foreground">{w.name || "tabs"}</span>
+                    </div>
+                  ) : (
+                    <div className="flex h-full flex-col overflow-hidden">
+                      <span className="truncate font-medium">{w.label || w.type}</span>
+                      <span className="truncate text-[10px] text-muted-foreground">
+                        {w.tab ? `${w.type} · tab` : w.type}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </ContextMenuTrigger>
               <ContextMenuContent className="w-44">
@@ -882,6 +898,7 @@ export function YantraEditor({
         ) : (
           <WidgetProps
             w={widgets[sel]}
+            tabOptions={widgets.flatMap((x) => (x.tabs ?? []).map((t) => ({ id: t.id, label: `${x.name || x.label || "tabs"} · ${t.label}` })))}
             onChange={(p) => setWidget(sel, p)}
             onDelete={() => { removeMany([sel]); setSelected([]); }}
           />
@@ -916,9 +933,10 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function WidgetProps({
-  w, onChange, onDelete,
+  w, tabOptions, onChange, onDelete,
 }: {
   w: YantraWidget;
+  tabOptions: { id: string; label: string }[];
   onChange: (patch: Partial<YantraWidget>) => void;
   onDelete: () => void;
 }) {
@@ -939,9 +957,51 @@ function WidgetProps({
           </SelectContent>
         </Select>
       </Field>
+      <Field label="Name (for scripts)">
+        <Input className="h-7 font-mono text-xs" value={w.name ?? ""} placeholder="e.g. throttle"
+          onChange={(e) => onChange({ name: e.target.value })} />
+      </Field>
       <Field label="Label">
         <Input className="h-7 text-xs" value={w.label ?? ""} onChange={(e) => onChange({ label: e.target.value })} />
       </Field>
+
+      {/* tab membership: which tab pane this widget belongs to (hidden unless active) */}
+      {w.type !== "tabs" && tabOptions.length > 0 && (
+        <Field label="In tab">
+          <Select value={w.tab ?? "__none"} onValueChange={(v) => onChange({ tab: v === "__none" ? undefined : v })}>
+            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none">— always shown —</SelectItem>
+              {tabOptions.map((t) => <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </Field>
+      )}
+
+      {/* tabs widget: edit the pane list */}
+      {w.type === "tabs" && (
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] text-muted-foreground">Tabs</span>
+          {(w.tabs ?? []).map((t, i) => (
+            <div key={t.id} className="flex gap-1">
+              <Input className="h-6 flex-1 text-[11px]" value={t.label}
+                onChange={(e) => {
+                  const tabs = [...(w.tabs ?? [])];
+                  tabs[i] = { ...tabs[i], label: e.target.value };
+                  onChange({ tabs });
+                }} />
+              <Button size="sm" variant="ghost" className="h-6 px-1 text-destructive" disabled={(w.tabs ?? []).length <= 1}
+                onClick={() => onChange({ tabs: (w.tabs ?? []).filter((_, j) => j !== i) })}>
+                <Trash2 className="size-3" />
+              </Button>
+            </div>
+          ))}
+          <Button size="sm" variant="outline" className="h-6 gap-1 text-[11px]"
+            onClick={() => onChange({ tabs: [...(w.tabs ?? []), { id: tid(), label: `Tab ${(w.tabs ?? []).length + 1}` }] })}>
+            <Plus className="size-3" /> tab
+          </Button>
+        </div>
+      )}
 
       <div className="grid grid-cols-4 gap-1">
         {(["x", "y", "w", "h"] as const).map((k) => (
