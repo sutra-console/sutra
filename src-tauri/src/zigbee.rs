@@ -89,9 +89,19 @@ fn sec_control(level: u8) -> u8 {
     (level & 0x07) | (KEYID_NWK << 3) | (1 << 5) // ext-nonce always present here
 }
 
+/// The level-override (validated against a real Silicon Labs frame): Zigbee
+/// transmits the aux security-control byte with the level bits ZEROED, but both
+/// the CCM* nonce and the AAD must use the network's *actual* security level.
+/// So: write `sec_control(0)` on the wire, compute with `sec_control(level)`.
+fn sc_with_level(wire_sc: u8, level: u8) -> u8 {
+    (wire_sc & !0x07) | (level & 0x07)
+}
+
 /// Wrap a cleartext NWK header + payload into a secured NWK frame:
 ///   header · aux-sec-header · ciphertext · MIC(4).
-/// `header` is the cleartext NWK header (authenticated, not encrypted).
+/// `header` is the cleartext NWK header (authenticated, not encrypted). The
+/// transmitted aux sec-control carries level 0 (Zigbee convention); the crypto
+/// uses the real `level`.
 pub fn secure_nwk(
     key: &[u8; 16],
     header: &[u8],
@@ -101,49 +111,59 @@ pub fn secure_nwk(
     key_seq: u8,
     level: u8,
 ) -> Result<Vec<u8>, String> {
-    let sc = sec_control(level);
+    let sc_wire = sec_control(0); // level bits zeroed for transmission
+    let sc_real = sec_control(level); // real level for nonce + AAD
     let mut aux = Vec::with_capacity(14);
-    aux.push(sc);
+    aux.push(sc_wire);
     aux.extend_from_slice(&frame_counter.to_le_bytes());
     aux.extend_from_slice(src_eui64);
     aux.push(key_seq);
 
+    // AAD = header · aux, but with the real-level sec-control byte.
     let mut aad = Vec::with_capacity(header.len() + aux.len());
     aad.extend_from_slice(header);
     aad.extend_from_slice(&aux);
+    aad[header.len()] = sc_real;
 
     let mut ct = payload.to_vec();
-    let mic = ccm_encrypt(key, src_eui64, frame_counter, sc, &aad, &mut ct)?;
+    let mic = ccm_encrypt(key, src_eui64, frame_counter, sc_real, &aad, &mut ct)?;
 
-    let mut out = aad; // header · aux …
+    let mut out = Vec::with_capacity(header.len() + aux.len() + ct.len() + 4);
+    out.extend_from_slice(header);
+    out.extend_from_slice(&aux); // wire bytes: sc_wire (level 0)
     out.extend_from_slice(&ct);
     out.extend_from_slice(&mic);
     Ok(out)
 }
 
 /// Inverse of `secure_nwk`. `header_len` is the cleartext NWK header length (a
-/// NWK-header parser supplies it for real frames; the round-trip test passes the
-/// known length). Returns the decrypted NWK payload, or Err on a bad MIC.
-pub fn unsecure_nwk(key: &[u8; 16], frame: &[u8], header_len: usize) -> Result<Vec<u8>, String> {
+/// NWK-header parser supplies it for real frames; tests pass the known length).
+/// `level` is the network's configured security level (override the wire byte,
+/// which carries 0). Returns the decrypted NWK payload, or Err on a bad MIC.
+pub fn unsecure_nwk(
+    key: &[u8; 16],
+    frame: &[u8],
+    header_len: usize,
+    level: u8,
+) -> Result<Vec<u8>, String> {
     if frame.len() < header_len + 14 + 4 {
         return Err("frame too short for aux header + MIC".into());
     }
     let aux_off = header_len;
-    let sc = frame[aux_off];
+    let sc = sc_with_level(frame[aux_off], level); // override wire level -> real
     let fc = u32::from_le_bytes(frame[aux_off + 1..aux_off + 5].try_into().unwrap());
     let mut eui = [0u8; 8];
     eui.copy_from_slice(&frame[aux_off + 5..aux_off + 13]);
     // key_seq at aux_off+13; aux header is 14 bytes total here (ext nonce + nwk key).
     let aux_end = aux_off + 14;
     let mic_off = frame.len() - 4;
-    let aad = &frame[..aux_end];
+    // AAD = header · aux with the real-level sec-control byte (not the wire's 0).
+    let mut aad = frame[..aux_end].to_vec();
+    aad[aux_off] = sc;
     let mut ct = frame[aux_end..mic_off].to_vec();
     let mut mic = [0u8; 4];
     mic.copy_from_slice(&frame[mic_off..]);
-    // GOTCHA: over the air some stacks zero the level bits in the wire sec_control;
-    // the nonce + AAD must use the ACTUAL level. We pass `sc` as-is, which is correct
-    // when the wire carries the real level — validate against tshark on a live frame.
-    ccm_decrypt(key, &eui, fc, sc, aad, &mut ct, &mic)?;
+    ccm_decrypt(key, &eui, fc, sc, &aad, &mut ct, &mic)?;
     Ok(ct)
 }
 
@@ -324,14 +344,53 @@ mod tests {
             &payload[..],
             "payload is encrypted on the wire"
         );
-        let back = unsecure_nwk(&KEY, &frame, header.len()).unwrap();
+        let back = unsecure_nwk(&KEY, &frame, header.len(), SEC_LEVEL_ENC_MIC32).unwrap();
         assert_eq!(back, payload, "unsecure recovers the NWK payload");
+        // the wire aux sec-control byte must carry level 0 (Zigbee convention)
+        assert_eq!(frame[header.len()] & 0x07, 0, "wire level is zeroed");
 
         // a flipped ciphertext byte must fail the MIC
         let mut bad = frame.clone();
         let ct0 = header.len() + 14;
         bad[ct0] ^= 0x01;
-        assert!(unsecure_nwk(&KEY, &bad, header.len()).is_err());
+        assert!(unsecure_nwk(&KEY, &bad, header.len(), SEC_LEVEL_ENC_MIC32).is_err());
+    }
+
+    /// Regression vector from a REAL Silicon Labs frame captured on the bench
+    /// (channel 11, key a140355784cca894…). tshark decrypts it to a Link Status
+    /// command (cmd 0x08, options 0x6a). Proves the nonce/AAD construction +
+    /// the wire-level override against silicon, not just our own round-trip.
+    #[test]
+    fn real_frame_decrypt() {
+        // The NWK frame (MAC header stripped): NWK hdr(16, incl ext-source) ·
+        // aux(14) · ciphertext(32) · MIC(4).
+        let nwk: Vec<u8> = vec![
+            0x09, 0x12, 0xfc, 0xff, 0x6e, 0xb5, 0x01, 0xac, // FCF·dst·src·radius·seq
+            0x69, 0xa2, 0xc2, 0xfe, 0xff, 0x27, 0x87, 0x04, // NWK ext-source EUI64
+            0x28, 0xe6, 0xe5, 0x58, 0x00, // aux: sec-control(level 0!)·frame counter
+            0x69, 0xa2, 0xc2, 0xfe, 0xff, 0x27, 0x87, 0x04, // aux: source EUI64
+            0x00, // aux: key sequence
+            0x3e, 0xd1, 0x9d, 0x7e, 0x0e, 0xbd, 0xde, 0xd4, 0xbc, 0x7d, 0xaa, 0x4d, 0xdd, 0xc9,
+            0x2f, 0xa6, 0x83, 0x72, 0x4e, 0x4c, 0x53, 0x83, 0x0f, 0x64, 0x3c, 0x6f, 0x64, 0xfa,
+            0xbb, 0xc4, 0xe3, 0x38, // ciphertext (32)
+            0x17, 0xde, 0xb0, 0x61, // MIC
+        ];
+        let key: [u8; 16] = [
+            0xa1, 0x40, 0x35, 0x57, 0x84, 0xcc, 0xa8, 0x94, 0xa1, 0x40, 0x35, 0x57, 0x84, 0xcc,
+            0xa8, 0x94,
+        ];
+        // wire sec-control is level 0; the real network level is 5.
+        let pt = unsecure_nwk(&key, &nwk, 16, SEC_LEVEL_ENC_MIC32)
+            .expect("real frame MIC must verify with the level override");
+        assert_eq!(pt.len(), 32, "Link Status payload length");
+        assert_eq!(pt[0], 0x08, "NWK command id = Link Status");
+        assert_eq!(pt[1], 0x6a, "Link Status options (Last|First|count=10)");
+
+        // sanity: WITHOUT the override (treat wire level 0 as real) the MIC fails.
+        assert!(
+            unsecure_nwk(&key, &nwk, 16, 0).is_err(),
+            "level-0 (no override) must NOT verify — proves the override is load-bearing"
+        );
     }
 
     #[test]
@@ -371,7 +430,7 @@ mod tests {
         // The secured NWK frame is everything after the 9-byte MAC header.
         // Decrypt it and confirm the APS+ZDP payload round-trips.
         let secured = &frame[9..];
-        let aps = unsecure_nwk(&KEY, secured, 8).unwrap();
+        let aps = unsecure_nwk(&KEY, secured, 8, SEC_LEVEL_ENC_MIC32).unwrap();
         // APS header: fc=0 · dst ep 0 · cluster(2 LE) · profile(2 LE) · src ep 0 · counter
         assert_eq!(aps[0], 0x00, "APS frame control: data/unicast");
         assert_eq!(aps[1], 0x00, "APS dst endpoint 0");
