@@ -415,7 +415,7 @@ export function YantraEditor({
           {/* mini align/distribute toolbar pinned to the group's outline */}
           {groupBox && (
             <div
-              className="absolute z-[60] flex flex-col gap-0.5 rounded-md border bg-popover/95 p-0.5 shadow-md backdrop-blur"
+              className="yantra-tool absolute z-[60] flex flex-col gap-0.5 rounded-md border bg-popover/95 p-0.5 shadow-md backdrop-blur"
               style={{ left: Math.max(2, groupBox.left - 30), top: Math.max(0, groupBox.top) }}
               onPointerDown={(e) => e.stopPropagation()}
             >
@@ -482,6 +482,7 @@ export function YantraEditor({
               onDragStart={(e) => {
                 const t = e.inputEvent.target as HTMLElement;
                 const mv = moveableRef.current;
+                if (t.closest(".yantra-tool")) { e.stop(); return; } // align toolbar clicks keep the selection
                 if (mv?.isMoveableElement(t)) { e.stop(); return; }
                 if (selected.some((i) => { const el = widgetRefs.current[i]; return !!el && (el === t || el.contains(t)); })) {
                   e.stop();
