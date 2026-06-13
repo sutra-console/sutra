@@ -7,7 +7,7 @@ import {
   Plus, Save, Undo2, Trash2, Move,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
-  AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
+  AlignHorizontalSpaceBetween, AlignVerticalSpaceBetween,
 } from "lucide-react";
 import Moveable from "react-moveable";
 import Selecto from "react-selecto";
@@ -329,8 +329,8 @@ export function YantraEditor({
     { key: "b", label: "Align bottom", Icon: AlignEndHorizontal, run: () => alignSelected((w, b) => ({ y: Math.round(b.maxB - (w.h ?? 1)) })) },
   ];
   const distActions = [
-    { key: "dh", label: "Distribute horizontally", Icon: AlignHorizontalDistributeCenter, run: () => distribute("h") },
-    { key: "dv", label: "Distribute vertically", Icon: AlignVerticalDistributeCenter, run: () => distribute("v") },
+    { key: "dh", label: "Even spacing (horizontal)", Icon: AlignHorizontalSpaceBetween, run: () => distribute("h") },
+    { key: "dv", label: "Even spacing (vertical)", Icon: AlignVerticalSpaceBetween, run: () => distribute("v") },
   ];
 
   // top-left corner (px, canvas coords) of the multi-selection's bounding box,
@@ -518,7 +518,7 @@ export function YantraEditor({
               </div>
             </div>
             <div>
-              <div className="mb-1 text-[11px] text-muted-foreground">Distribute</div>
+              <div className="mb-1 text-[11px] text-muted-foreground">Spacing</div>
               <div className="grid grid-cols-2 gap-1">
                 {distActions.map((a) => (
                   <AlignBtn key={a.key} label={a.label} icon={a.Icon}
@@ -527,7 +527,7 @@ export function YantraEditor({
               </div>
             </div>
             <p className="text-[10px] text-muted-foreground">
-              Distribute needs 3+ widgets. Shift-click to add/remove from the selection.
+              Even spacing needs 3+ widgets. Shift-click to add/remove from the selection.
             </p>
           </div>
         ) : sel == null || !widgets[sel] ? (
