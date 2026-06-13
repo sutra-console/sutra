@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus, Save, Undo2, Redo2, RotateCcw, Trash2, Move,
-  Layers, Eye, EyeOff, ChevronUp, ChevronDown,
+  Layers, Eye, EyeOff, ChevronUp, ChevronDown, ChevronRight,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalSpaceBetween, AlignVerticalSpaceBetween,
@@ -22,7 +22,7 @@ import {
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import type { YantraAction, YantraSpec, YantraWidget } from "@/lib/skrit";
+import type { YantraAction, YantraFrame, YantraSpec, YantraWidget } from "@/lib/skrit";
 
 const ROW_H = 56; // px per grid row in the editor (renderer auto-sizes rows)
 const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label"] as const;
@@ -30,6 +30,20 @@ const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label"
 // ---- small helpers ----------------------------------------------------------
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
+
+// Migrate the legacy flat `group` tag to the frame model, synthesizing frame
+// entries for any referenced ids. Idempotent.
+function migrateFrames(spec: YantraSpec): YantraSpec {
+  const s = clone(spec);
+  const frames = s.frames ?? [];
+  const known = new Set(frames.map((f) => f.id));
+  for (const w of s.widgets ?? []) {
+    if (w.group && !w.frame) { w.frame = w.group; delete w.group; }
+    if (w.frame && !known.has(w.frame)) { frames.push({ id: w.frame, name: "Frame" }); known.add(w.frame); }
+  }
+  if (frames.length) s.frames = frames;
+  return s;
+}
 const csvToBytes = (s: string): number[] =>
   s.split(/[\s,]+/).filter(Boolean).map((t) => parseInt(t, t.startsWith("0x") ? 16 : 10) || 0);
 const bytesToCsv = (b?: number[]): string =>
@@ -147,15 +161,16 @@ export function YantraEditor({
   onSave: (spec: YantraSpec) => void;
   saving?: boolean;
 }) {
-  const [draft, setDraft] = useState<YantraSpec>(() => clone(spec));
-  const [selected, setSelected] = useState<number[]>([]);
+  const [draft, setDraft] = useState<YantraSpec>(() => migrateFrames(spec));
+  const [selected, setSelected] = useState<number[]>([]); // selected widget indices
+  const [selectedFrames, setSelectedFrames] = useState<string[]>([]); // frames selected in the tree
   const [containerW, setContainerW] = useState(0);
   const [ready, setReady] = useState(false);
   const [toolMenu, setToolMenu] = useState<"a" | "s" | null>(null); // open align/spacing submenu
   const [showLayers, setShowLayers] = useState(false); // layers panel visible
   const [past, setPast] = useState<YantraSpec[]>([]); // undo stack (checkpoints before each change)
   const [future, setFuture] = useState<YantraSpec[]>([]); // redo stack
-  const committed = useRef<YantraSpec>(clone(spec)); // last history checkpoint
+  const committed = useRef<YantraSpec>(migrateFrames(spec)); // last history checkpoint
   const gridRef = useRef<HTMLDivElement>(null);
   const moveableRef = useRef<Moveable>(null);
   const toolbarRef = useRef<HTMLDivElement>(null); // floating toolbar, repositioned live during a gesture
@@ -163,6 +178,7 @@ export function YantraEditor({
 
   const cols = draft.cols ?? 6;
   const widgets = draft.widgets ?? [];
+  const frames = draft.frames ?? [];
   widgetRefs.current.length = widgets.length;
   const cw = containerW > 0 ? containerW / cols : 80;
   const dirty = JSON.stringify(draft) !== JSON.stringify(spec);
@@ -180,8 +196,8 @@ export function YantraEditor({
 
   // re-seed when the file prop changes (App also remounts via key, but be safe)
   useEffect(() => {
-    setDraft(clone(spec)); setSelected([]);
-    committed.current = clone(spec); setPast([]); setFuture([]);
+    setDraft(migrateFrames(spec)); setSelected([]); setSelectedFrames([]);
+    committed.current = migrateFrames(spec); setPast([]); setFuture([]);
   }, [file]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Snapshot draft into the undo stack once edits settle (coalesces rapid changes
@@ -287,31 +303,78 @@ export function YantraEditor({
       return { ...d, widgets: ws };
     });
 
-  // --- grouping: a shared `group` id ties widgets together ---------------------
-  // Expand a raw selection to whole groups (clicking one grouped widget selects all).
-  const expandGroups = (idxs: number[]): number[] => {
-    const groups = new Set(idxs.map((i) => widgets[i]?.group).filter(Boolean) as string[]);
-    if (!groups.size) return idxs;
+  // --- frames: nestable editor-only containers --------------------------------
+  // Frame ids in the subtree rooted at `id` (inclusive).
+  const subtreeFrames = (id: string): string[] => {
+    const out = [id];
+    for (let n = 0; n < out.length; n++) {
+      for (const f of frames) if (f.parent === out[n] && !out.includes(f.id)) out.push(f.id);
+    }
+    return out;
+  };
+  // Widget indices whose frame is in any of `frameIds`.
+  const widgetsInFrames = (frameIds: string[]): number[] => {
+    const set = new Set(frameIds);
+    return widgets.map((w, i) => (w.frame && set.has(w.frame) ? i : -1)).filter((i) => i >= 0);
+  };
+  // Expand a raw widget selection to whole frames (selecting one framed widget
+  // selects its frame's subtree).
+  const expandToSubtree = (idxs: number[]): number[] => {
+    const fids = new Set(idxs.map((i) => widgets[i]?.frame).filter(Boolean) as string[]);
+    if (!fids.size) return idxs;
+    const all = new Set<string>();
+    fids.forEach((id) => subtreeFrames(id).forEach((f) => all.add(f)));
     const out = new Set(idxs);
-    widgets.forEach((w, i) => { if (w.group && groups.has(w.group)) out.add(i); });
+    widgetsInFrames([...all]).forEach((i) => out.add(i));
     return [...out];
   };
+
+  // Group the current selection into a new frame (nests when items share a parent
+  // frame, or when whole frames are selected via the tree).
   const groupSelected = () => {
-    if (selected.length < 2) return;
-    const id = `g${crypto.randomUUID().slice(0, 6)}`;
+    if (selected.length < 2 && selectedFrames.length < 1) return;
+    const id = `f${crypto.randomUUID().slice(0, 6)}`;
+    // common parent: the frame all selected items already sit under (else top level)
+    const parents = new Set<string | undefined>([
+      ...selected.map((i) => widgets[i]?.frame),
+      ...selectedFrames.map((fid) => frames.find((f) => f.id === fid)?.parent),
+    ]);
+    const parent = parents.size === 1 ? [...parents][0] : undefined;
     setDraft((d) => {
-      const ws = [...(d.widgets ?? [])];
-      for (const i of selected) if (ws[i]) ws[i] = { ...ws[i], group: id };
-      return { ...d, widgets: ws };
+      const fr: YantraFrame[] = [...(d.frames ?? []), { id, name: "Frame", parent }];
+      // reparent selected frames under the new one (nesting)
+      const fr2 = fr.map((f) => (selectedFrames.includes(f.id) ? { ...f, parent: id } : f));
+      const ws = (d.widgets ?? []).map((w, i) => (selected.includes(i) ? { ...w, frame: id } : w));
+      return { ...d, frames: fr2, widgets: ws };
     });
+    setSelectedFrames([id]);
   };
-  const ungroupSelected = () =>
+  // Dissolve the selected frame(s): their direct children move up to the frame's parent.
+  const ungroupFrames = (ids: string[]) => {
+    if (!ids.length) return;
     setDraft((d) => {
-      const ws = [...(d.widgets ?? [])];
-      for (const i of selected) if (ws[i]) { const w = { ...ws[i] }; delete w.group; ws[i] = w; }
-      return { ...d, widgets: ws };
+      const fr = d.frames ?? [];
+      const parentOf = (fid: string) => fr.find((f) => f.id === fid)?.parent;
+      const ws = (d.widgets ?? []).map((w) =>
+        w.frame && ids.includes(w.frame) ? { ...w, frame: parentOf(w.frame) } : w,
+      );
+      const fr2 = fr
+        .filter((f) => !ids.includes(f.id))
+        .map((f) => (f.parent && ids.includes(f.parent) ? { ...f, parent: parentOf(f.parent) } : f));
+      return { ...d, frames: fr2, widgets: ws };
     });
-  const selectionHasGroup = selected.some((i) => widgets[i]?.group);
+    setSelectedFrames([]);
+  };
+  // Frames implied by the current selection (selected tree frames, or frames the
+  // selected widgets belong to).
+  const selectionFrames = (): string[] => {
+    const out = new Set(selectedFrames);
+    selected.forEach((i) => { const f = widgets[i]?.frame; if (f) out.add(f); });
+    return [...out];
+  };
+  const expandGroups = expandToSubtree; // name used by Selecto/right-click selection
+  const ungroupSelected = () => ungroupFrames(selectionFrames());
+  const selectionHasGroup = selectionFrames().length > 0;
 
   // resize the selection to a cell size, or snap its position+size to whole cells
   const resizeSelected = (w: number, h: number) =>
@@ -329,8 +392,26 @@ export function YantraEditor({
       }
       return { ...d, widgets: ws };
     });
-  // right-click selects the widget (and its group) if it isn't already selected
-  const ensureSelected = (i: number) => { if (!selected.includes(i)) setSelected(expandGroups([i])); };
+  // right-click selects the widget (and its frame) if it isn't already selected
+  const ensureSelected = (i: number) => { if (!selected.includes(i)) { setSelectedFrames([]); setSelected(expandGroups([i])); } };
+  // frame helpers (layer tree)
+  const selectFrame = (id: string, additive: boolean) => {
+    setSelectedFrames((sf) => (additive ? (sf.includes(id) ? sf.filter((x) => x !== id) : [...sf, id]) : [id]));
+    const idxs = widgetsInFrames(subtreeFrames(id));
+    setSelected((sel) => (additive ? [...new Set([...sel, ...idxs])] : idxs));
+  };
+  const renameFrame = (id: string, name: string) =>
+    setDraft((d) => ({ ...d, frames: (d.frames ?? []).map((f) => (f.id === id ? { ...f, name } : f)) }));
+  const toggleCollapse = (id: string) =>
+    setDraft((d) => ({ ...d, frames: (d.frames ?? []).map((f) => (f.id === id ? { ...f, collapsed: !f.collapsed } : f)) }));
+  const toggleFrameHidden = (id: string) => {
+    const idxs = new Set(widgetsInFrames(subtreeFrames(id)));
+    const anyVisible = [...idxs].some((i) => !widgets[i]?.hidden);
+    setDraft((d) => ({
+      ...d,
+      widgets: (d.widgets ?? []).map((w, i) => (idxs.has(i) ? { ...w, hidden: anyVisible } : w)),
+    }));
+  };
   const RESIZE_PRESETS: [number, number][] = [[1, 1], [2, 1], [2, 2], [3, 1], [3, 2], [4, 2]];
   const addWidget = (type: string) => {
     const newIdx = widgets.length;
@@ -492,39 +573,69 @@ export function YantraEditor({
 
   const rows = Math.max(4, widgets.reduce((m, w) => Math.max(m, (w.y ?? 0) + (w.h ?? 1)), 0) + 1);
 
+  // --- layer tree rows --------------------------------------------------------
+  const widgetRow = (i: number, depth: number) => {
+    const w = widgets[i];
+    return (
+      <div key={`w${i}`} style={{ paddingLeft: depth * 12 + 4 }}
+        className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selected.includes(i) && !selectedFrames.length ? "bg-primary/15" : "hover:bg-accent/50"}`}
+        onClick={(e) => { setSelectedFrames([]); setSelected((sel) => (e.shiftKey ? (sel.includes(i) ? sel.filter((s) => s !== i) : [...sel, i]) : [i])); }}>
+        <button type="button" title={w.hidden ? "Show" : "Hide"} className="text-muted-foreground hover:text-foreground"
+          onClick={(e) => { e.stopPropagation(); toggleHidden(i); }}>
+          {w.hidden ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
+        </button>
+        <span className="min-w-0 flex-1 truncate" title={w.label || w.type}>{w.label || w.type}</span>
+        <button type="button" title="Bring forward" disabled={i === widgets.length - 1}
+          className="text-muted-foreground hover:text-foreground disabled:opacity-30"
+          onClick={(e) => { e.stopPropagation(); moveLayer(i, 1); }}><ChevronUp className="size-3" /></button>
+        <button type="button" title="Send backward" disabled={i === 0}
+          className="text-muted-foreground hover:text-foreground disabled:opacity-30"
+          onClick={(e) => { e.stopPropagation(); moveLayer(i, -1); }}><ChevronDown className="size-3" /></button>
+      </div>
+    );
+  };
+  const renderLayer = (parent: string | undefined, depth: number): React.ReactNode => {
+    const childFrames = frames.filter((f) => f.parent === parent);
+    const childWidgets = widgets.map((w, i) => (w.frame === parent ? i : -1)).filter((i) => i >= 0).reverse();
+    return (
+      <>
+        {childFrames.map((f) => (
+          <div key={f.id}>
+            <div style={{ paddingLeft: depth * 12 }}
+              className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selectedFrames.includes(f.id) ? "bg-primary/20" : "hover:bg-accent/50"}`}
+              onClick={(e) => selectFrame(f.id, e.shiftKey)}>
+              <button type="button" className="text-muted-foreground" title={f.collapsed ? "Expand" : "Collapse"}
+                onClick={(e) => { e.stopPropagation(); toggleCollapse(f.id); }}>
+                {f.collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
+              </button>
+              <Layers className="size-3 text-muted-foreground" />
+              <input value={f.name ?? "Frame"} onClick={(e) => e.stopPropagation()}
+                onChange={(e) => renameFrame(f.id, e.target.value)}
+                className="min-w-0 flex-1 bg-transparent outline-none focus:underline" />
+              <button type="button" className="text-muted-foreground hover:text-foreground" title="Hide / show frame"
+                onClick={(e) => { e.stopPropagation(); toggleFrameHidden(f.id); }}>
+                <Eye className="size-3" />
+              </button>
+            </div>
+            {!f.collapsed && renderLayer(f.id, depth + 1)}
+          </div>
+        ))}
+        {childWidgets.map((i) => widgetRow(i, depth))}
+      </>
+    );
+  };
+
   return (
     <div className="flex h-full min-h-0 gap-3">
-      {/* layers: front (top of list) = drawn last = on top */}
+      {/* layers tree: frames (nestable) + widgets. Tree = hierarchy; z-order is
+          still the flat widget array (the chevrons reorder it). */}
       {showLayers && (
-        <div className="flex w-44 shrink-0 flex-col overflow-auto rounded border bg-muted/10 p-2">
+        <div className="flex w-48 shrink-0 flex-col overflow-auto rounded border bg-muted/10 p-2">
           <div className="mb-1 text-[11px] font-medium text-muted-foreground">Layers</div>
-          {widgets.length === 0 && <div className="text-[10px] text-muted-foreground">No widgets yet.</div>}
-          {widgets.map((_, idx) => widgets.length - 1 - idx).map((i) => {
-            const w = widgets[i];
-            return (
-              <div key={i}
-                className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selected.includes(i) ? "bg-primary/15" : "hover:bg-accent/50"}`}
-                onClick={(e) => setSelected((sel) => (e.shiftKey ? (sel.includes(i) ? sel.filter((s) => s !== i) : [...sel, i]) : [i]))}>
-                <button type="button" title={w.hidden ? "Show" : "Hide"}
-                  className="text-muted-foreground hover:text-foreground"
-                  onClick={(e) => { e.stopPropagation(); toggleHidden(i); }}>
-                  {w.hidden ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
-                </button>
-                <span className="min-w-0 flex-1 truncate" title={w.label || w.type}>{w.label || w.type}</span>
-                {w.group && <span className="rounded bg-muted px-1 text-[9px] text-muted-foreground" title={`group ${w.group}`}>g</span>}
-                <button type="button" title="Bring forward" disabled={i === widgets.length - 1}
-                  className="text-muted-foreground hover:text-foreground disabled:opacity-30"
-                  onClick={(e) => { e.stopPropagation(); moveLayer(i, 1); }}>
-                  <ChevronUp className="size-3" />
-                </button>
-                <button type="button" title="Send backward" disabled={i === 0}
-                  className="text-muted-foreground hover:text-foreground disabled:opacity-30"
-                  onClick={(e) => { e.stopPropagation(); moveLayer(i, -1); }}>
-                  <ChevronDown className="size-3" />
-                </button>
-              </div>
-            );
-          })}
+          {widgets.length === 0 && frames.length === 0 && (
+            <div className="text-[10px] text-muted-foreground">No widgets yet.</div>
+          )}
+          {renderLayer(undefined, 0)}
         </div>
       )}
 
@@ -688,7 +799,8 @@ export function YantraEditor({
                 const idxs = e.selected
                   .map((el) => Number((el as HTMLElement).dataset.idx))
                   .filter((n) => !Number.isNaN(n));
-                setSelected(expandGroups(idxs)); // selecting one grouped widget selects its group
+                setSelectedFrames([]);
+                setSelected(expandGroups(idxs)); // selecting one framed widget selects its frame
               }}
             />
           )}

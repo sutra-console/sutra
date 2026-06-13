@@ -665,13 +665,25 @@ export interface YantraWidget {
   options?: { label: string; send: YantraAction }[]; // select
   match?: string; // readout: regex over the console; capture group 1 is shown
   hidden?: boolean; // layer hidden from the rendered surface
-  group?: string; // group id — widgets sharing one move/select together
+  frame?: string; // parent frame id (organizational; editor-only)
+  group?: string; // legacy flat group id — migrated to `frame` on load
+  anchorH?: "scale" | "left" | "right" | "center" | "stretch"; // responsive: horizontal
+  anchorV?: "scale" | "top" | "bottom" | "middle" | "stretch"; // responsive: vertical
+}
+/** An editor-only container in the layer tree. Nestable via `parent`. */
+export interface YantraFrame {
+  id: string;
+  name?: string;
+  parent?: string; // parent frame id (nesting); absent = top level
+  collapsed?: boolean; // layer-tree collapse (UI only)
 }
 export interface YantraSpec {
   name?: string;
   description?: string;
   cols?: number; // grid columns (default 6)
   layout?: "grid" | "free"; // grid = snap to cells (default); free = absolute pixels
+  design?: { w: number; h: number }; // reference canvas size for anchor resolution
+  frames?: YantraFrame[]; // editor-only container tree
   widgets?: YantraWidget[];
 }
 export interface YantraDoc {
