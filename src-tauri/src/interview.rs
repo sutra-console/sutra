@@ -15,8 +15,8 @@ use tauri::AppHandle;
 use crate::workspace::{self, NetEndpoint, NetNode, Network};
 use crate::zigbee::{
     decrypt_nwk, mac_data_header, parse_active_ep_rsp, parse_aps_data, parse_node_desc_rsp,
-    parse_simple_desc_rsp, SEC_LEVEL_ENC_MIC32, ZDP_ACTIVE_EP_RSP, ZDP_NODE_DESC_RSP,
-    ZDP_SIMPLE_DESC_RSP,
+    parse_simple_desc_rsp, parse_zcl_attr_reports, SEC_LEVEL_ENC_MIC32, ZDP_ACTIVE_EP_RSP,
+    ZDP_NODE_DESC_RSP, ZDP_SIMPLE_DESC_RSP,
 };
 
 /// What one ZDP response told us about a node. Emitted to the UI and merged into
@@ -152,63 +152,114 @@ pub fn observe_into_node(net: &mut Network, addr: &str, endpoint: u8, cluster: u
     }
 }
 
-/// Pure: decrypt a sniffed application (non-ZDP) APS frame and return the
-/// (node, endpoint, cluster) association it reveals. We record only the SOURCE —
-/// the node that hosts/operates the cluster (its reports/responses) — not the
-/// destination, which would attribute clusters to the coordinator and conjure
-/// phantom nodes from frames we never saw originate. Empty unless it's a
-/// decryptable, standard unicast application APS data frame.
-pub fn observe_frame(key: &[u8; 16], mac: &[u8], level: u8) -> Vec<(u16, u8, u16)> {
-    let mut out = Vec::new();
-    let Some((mlen, _)) = mac_data_header(mac) else { return out };
-    let Some(nwk) = mac.get(mlen..) else { return out };
+/// What a sniffed application frame revealed about its SOURCE node.
+pub struct FrameObs {
+    pub addr: u16,
+    pub endpoint: u8,
+    pub cluster: u16,
+    /// (attribute id, formatted value) from a Report / Read-Attributes-Response.
+    pub attrs: Vec<(u16, String)>,
+}
+
+/// Parse the ZCL header of an APS payload; if it's a global Report Attributes
+/// (0x0a) or Read Attributes Response (0x01), return the attribute records.
+fn zcl_attrs(zcl: &[u8]) -> Vec<(u16, String)> {
+    if zcl.is_empty() || zcl[0] & 0x03 != 0 {
+        return Vec::new(); // global commands only (frame type 00)
+    }
+    let hdr = if zcl[0] & 0x04 != 0 { 5 } else { 3 }; // fc · [mfg code 2] · seq · cmd
+    if zcl.len() < hdr {
+        return Vec::new();
+    }
+    match zcl[hdr - 1] {
+        0x0a => parse_zcl_attr_reports(&zcl[hdr..], false),
+        0x01 => parse_zcl_attr_reports(&zcl[hdr..], true),
+        _ => Vec::new(),
+    }
+}
+
+/// Pure: decrypt a sniffed application (non-ZDP) APS frame → what its SOURCE node
+/// reveals (endpoint, cluster, and any attribute values it reported). Source only
+/// — the node that hosts/operates the cluster — not the destination (which would
+/// attribute clusters to the coordinator and conjure phantom nodes). None unless
+/// it's a decryptable, standard unicast application APS data frame.
+pub fn observe_frame(key: &[u8; 16], mac: &[u8], level: u8) -> Option<FrameObs> {
+    let (mlen, _) = mac_data_header(mac)?;
+    let nwk = mac.get(mlen..)?;
     if nwk.len() < 6 {
-        return out;
+        return None;
     }
     let nwk_src = u16::from_le_bytes([nwk[4], nwk[5]]);
-    let Ok(aps_bytes) = decrypt_nwk(key, nwk, level) else { return out };
-    let Some(aps) = parse_aps_data(&aps_bytes) else { return out };
+    let aps_bytes = decrypt_nwk(key, nwk, level).ok()?;
+    let aps = parse_aps_data(&aps_bytes)?;
     if aps.profile == 0x0000 {
-        return out; // ZDP / NWK-mgmt, not application clusters
+        return None; // ZDP / NWK-mgmt, not application clusters
     }
-    out.push((nwk_src, aps.src_ep, aps.cluster));
-    out
+    Some(FrameObs {
+        addr: nwk_src,
+        endpoint: aps.src_ep,
+        cluster: aps.cluster,
+        attrs: zcl_attrs(aps.payload),
+    })
+}
+
+/// One attribute value seen on the wire (live device state, not persisted).
+#[derive(Serialize, Clone)]
+pub struct AttrObs {
+    pub addr: String,
+    pub endpoint: u8,
+    pub cluster: String,
+    pub attr: String,
+    pub value: String,
+}
+
+/// Result of a batch ingest: model-change count (drives a node-model refresh) +
+/// the attribute values observed (live state for the UI; not persisted).
+#[derive(Serialize, Default)]
+pub struct IngestResult {
+    pub changed: usize,
+    pub attrs: Vec<AttrObs>,
 }
 
 /// Batch-ingest sniffed MAC frames against the active network: decrypt each,
-/// route ZDP replies through the active-discovery merge, and passively record
-/// endpoints/clusters from any other application (APS) frame. One workspace
-/// write for the whole batch. Returns how many frames yielded model changes.
-pub fn ingest_frames(app: &AppHandle, frames: &[Vec<u8>]) -> usize {
+/// route ZDP replies through the active-discovery merge, passively record
+/// endpoints/clusters from any application frame, and harvest attribute values
+/// from Report/Read-Response frames. One workspace write for the whole batch.
+pub fn ingest_frames(app: &AppHandle, frames: &[Vec<u8>]) -> IngestResult {
+    let mut res = IngestResult::default();
     let mut nets = workspace::load_networks(app);
     let Some(idx) = workspace::active_network_index(&nets) else {
-        return 0;
+        return res;
     };
     let Some(key) = parse_key(&nets.networks[idx].key) else {
-        return 0;
+        return res;
     };
     let level = SEC_LEVEL_ENC_MIC32;
-    let mut changed = 0usize;
     for mac in frames {
         // ZDP reply addressed to our injector → active-discovery merge.
         if let Some(d) = parse_zdp_response(&key, mac, level) {
             merge_into_node(&mut nets.networks[idx], &d);
-            changed += 1;
+            res.changed += 1;
             continue;
         }
-        // Otherwise: passive endpoint/cluster observation from any APS data frame.
-        let obs = observe_frame(&key, mac, level);
-        for (addr, ep, cl) in &obs {
-            observe_into_node(&mut nets.networks[idx], &fmt_addr(*addr), *ep, *cl);
-        }
-        if !obs.is_empty() {
-            changed += 1;
+        // Otherwise: passive observation from any application APS data frame.
+        let Some(obs) = observe_frame(&key, mac, level) else { continue };
+        observe_into_node(&mut nets.networks[idx], &fmt_addr(obs.addr), obs.endpoint, obs.cluster);
+        res.changed += 1;
+        for (attr, value) in obs.attrs {
+            res.attrs.push(AttrObs {
+                addr: fmt_addr(obs.addr),
+                endpoint: obs.endpoint,
+                cluster: fmt_id(obs.cluster),
+                attr: fmt_id(attr),
+                value,
+            });
         }
     }
-    if changed > 0 {
+    if res.changed > 0 {
         let _ = workspace::save_networks(app, &nets);
     }
-    changed
+    res
 }
 
 /// Try to ingest a sniffed MAC frame as a ZDP reply against the active network,
@@ -274,14 +325,14 @@ mod tests {
         let mut frame = mac_header(0x11, 0x0c84, 0x0000, 0xabcd);
         frame.extend_from_slice(&nwk);
 
-        let obs = observe_frame(&KEY, &frame, SEC_LEVEL_ENC_MIC32);
+        let obs = observe_frame(&KEY, &frame, SEC_LEVEL_ENC_MIC32).unwrap();
         // only the SOURCE (the reporting node) — not the coordinator destination
-        assert_eq!(obs, vec![(0xabcd, 1, 0x0006)], "node's own cluster observed, source only");
+        assert_eq!((obs.addr, obs.endpoint, obs.cluster), (0xabcd, 1, 0x0006));
+        // the ZCL Report Attributes payload (attr 0x0000 bool=true) was parsed
+        assert_eq!(obs.attrs, vec![(0x0000, "true".to_string())], "attribute harvested");
 
         let mut net = Network::default();
-        for (a, e, c) in &obs {
-            observe_into_node(&mut net, &fmt_addr(*a), *e, *c);
-        }
+        observe_into_node(&mut net, &fmt_addr(obs.addr), obs.endpoint, obs.cluster);
         let node = net.nodes.iter().find(|n| n.addr == "0xabcd").unwrap();
         assert_eq!(node.endpoints[0].id, 1);
         assert_eq!(node.endpoints[0].clusters, vec!["0x0006"]);

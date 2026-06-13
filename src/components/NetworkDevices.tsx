@@ -1,19 +1,25 @@
 // Per-peer command surface: the discovered nodes of a network, typed ("it's a
 // light") from their clusters, with buttons that inject the ZCL command. Pairs
 // with src-tauri/src/zigbee.rs build_zcl_inject via the {$zcl} macro var.
-import type { Network } from "@/lib/skrit";
+import type { AttrObs, Network } from "@/lib/skrit";
 import { clusterCommands, clusterName, deviceType, parseCluster } from "@/lib/zcl";
 
 export function NetworkDevices({
   net,
   disabled,
   onCommand,
+  attrs,
 }: {
   net: Network;
   /** true when not connected — buttons can't inject. */
   disabled?: boolean;
   onCommand: (addr: string, endpoint: number, cluster: number, cmd: number, payloadHex?: string) => void;
+  /** live ZCL attribute values, keyed addr|ep|cluster|attr. */
+  attrs?: Record<string, AttrObs>;
 }) {
+  // attribute values seen for a given node/endpoint/cluster (passive reads)
+  const attrsFor = (addr: string, ep: number, cluster: string): AttrObs[] =>
+    attrs ? Object.values(attrs).filter((a) => a.addr === addr && a.endpoint === ep && a.cluster === cluster) : [];
   const nodes = net.nodes.filter((n) => n.endpoints?.length);
   if (!nodes.length) {
     return (
@@ -40,6 +46,7 @@ export function NetworkDevices({
                 {ep.clusters.map((cs) => {
                   const cid = parseCluster(cs);
                   const cmds = clusterCommands(cid);
+                  const vals = attrsFor(n.addr, ep.id, cs);
                   return (
                     <span key={cs} className="flex items-center gap-0.5 rounded border bg-muted/30 px-1 py-0.5">
                       <span className="text-[10px] text-muted-foreground" title={cs}>{clusterName(cid)}</span>
@@ -54,6 +61,12 @@ export function NetworkDevices({
                         >
                           {c.label}
                         </button>
+                      ))}
+                      {vals.map((a) => (
+                        <span key={a.attr} className="rounded bg-emerald-500/15 px-1 text-[10px] text-emerald-500"
+                          title={`attribute ${a.attr} (read off the wire)`}>
+                          {a.attr}={a.value}
+                        </span>
                       ))}
                     </span>
                   );

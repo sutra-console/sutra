@@ -560,6 +560,71 @@ pub fn parse_node_desc_rsp(zdp: &[u8]) -> Option<NodeDescRsp> {
     })
 }
 
+// ---- ZCL attribute reports: read device state passively off the wire --------
+// Nodes emit Report Attributes (global cmd 0x0a) and Read Attributes Response
+// (0x01) constantly; we decrypt them, so the attribute values are free to
+// harvest — no active read (which would need a routed reply to our ghost addr).
+
+/// Decode one ZCL typed value → (bytes consumed, formatted string). None for a
+/// type whose length we don't know (so the caller stops walking that record set).
+fn zcl_value(ty: u8, data: &[u8]) -> Option<(usize, String)> {
+    let u = |n: usize| -> Option<u64> {
+        let b = data.get(..n)?;
+        let mut v = 0u64;
+        for (i, x) in b.iter().enumerate() {
+            v |= (*x as u64) << (8 * i);
+        }
+        Some(v)
+    };
+    match ty {
+        0x00 => Some((0, String::new())),                                  // no data
+        0x10 => Some((1, (*data.first()? != 0).to_string())),             // bool
+        0x08 | 0x18 | 0x20 | 0x30 => Some((1, u(1)?.to_string())),        // data8/map8/uint8/enum8
+        0x28 => Some((1, (*data.first()? as i8).to_string())),            // int8
+        0x21 | 0x31 => Some((2, u(2)?.to_string())),                      // uint16/enum16
+        0x29 => Some((2, (i16::from_le_bytes([data[0], data[1]])).to_string())), // int16
+        0x22 => Some((3, u(3)?.to_string())),                            // uint24
+        0x23 => Some((4, u(4)?.to_string())),                            // uint32
+        0x2b => Some((4, (i32::from_le_bytes(data.get(..4)?.try_into().ok()?)).to_string())), // int32
+        0x39 => Some((4, f32::from_le_bytes(data.get(..4)?.try_into().ok()?).to_string())),   // float
+        0x41 | 0x42 => {
+            let n = *data.first()? as usize; // length-prefixed octet/char string
+            let s = data.get(1..1 + n)?;
+            Some((1 + n, String::from_utf8_lossy(s).into_owned()))
+        }
+        _ => None,
+    }
+}
+
+/// Parse attribute records from a ZCL Report Attributes / Read Attributes
+/// Response payload (the bytes AFTER the ZCL header). `read_response` adds the
+/// per-record status byte. Returns (attribute id, formatted value).
+pub fn parse_zcl_attr_reports(rec: &[u8], read_response: bool) -> Vec<(u16, String)> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 2 <= rec.len() {
+        let attr = u16::from_le_bytes([rec[i], rec[i + 1]]);
+        i += 2;
+        if read_response {
+            let Some(&st) = rec.get(i) else { break };
+            i += 1;
+            if st != 0 {
+                continue; // failed read — no type/value follows
+            }
+        }
+        let Some(&ty) = rec.get(i) else { break };
+        i += 1;
+        match zcl_value(ty, rec.get(i..).unwrap_or(&[])) {
+            Some((n, v)) => {
+                out.push((attr, v));
+                i += n;
+            }
+            None => break, // unknown type — can't size the remaining records
+        }
+    }
+    out
+}
+
 fn read_clusters(d: &[u8], off: usize, count: usize) -> Option<Vec<u16>> {
     let bytes = d.get(off..off + count * 2)?;
     Some(
@@ -788,6 +853,21 @@ mod tests {
         assert_eq!(aps[9], 0x40, "ZCL txn seq");
         assert_eq!(aps[10], 0x01, "ZCL command = On");
         assert_eq!(aps.len(), 11, "no payload for a bare On");
+    }
+
+    #[test]
+    fn zcl_attribute_reports_parse() {
+        // Report Attributes: attr 0x0000 uint8=42, attr 0x0021 uint8=200 (battery %).
+        let rec = [0x00, 0x00, 0x20, 42, 0x21, 0x00, 0x20, 200];
+        let a = parse_zcl_attr_reports(&rec, false);
+        assert_eq!(a, vec![(0x0000, "42".to_string()), (0x0021, "200".to_string())]);
+        // Read Attributes Response: attr 0x0000 status OK bool=true; attr 0x0001 status FAIL.
+        let rsp = [0x00, 0x00, 0x00, 0x10, 0x01, 0x01, 0x00, 0x86];
+        let b = parse_zcl_attr_reports(&rsp, true);
+        assert_eq!(b, vec![(0x0000, "true".to_string())], "failed read (status 0x86) skipped");
+        // int16 temperature 0x0402/attr 0x0000 = 2350 (23.50 °C ×100)
+        let t = [0x00, 0x00, 0x29, 0x2e, 0x09];
+        assert_eq!(parse_zcl_attr_reports(&t, false), vec![(0x0000, "2350".to_string())]);
     }
 
     #[test]

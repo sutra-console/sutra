@@ -93,6 +93,7 @@ import {
   getNetworks,
   setNetworks as saveNetworksApi,
   observeFrames,
+  type AttrObs,
   type Network,
   type NetNode,
   wifiStatus,
@@ -273,6 +274,7 @@ export default function App() {
   const [tsharkOk, setTsharkOk] = useState(false); // Wireshark tshark present (enables in-app decode)
   const [networks, setNetworks] = useState<Network[]>([]); // workspace network model (keys + nodes)
   const [networksActive, setNetworksActive] = useState(""); // active-network label (preserved on save)
+  const [attrs, setAttrs] = useState<Record<string, AttrObs>>({}); // live ZCL attribute values, keyed addr|ep|cluster|attr
   const [draftKey, setDraftKey] = useState("");
   const [draftKeyLabel, setDraftKeyLabel] = useState("");
   const [workspace, setWorkspace] = useState<string | null>(null); // the .sutra workspace folder
@@ -682,9 +684,15 @@ export default function App() {
         // and clusters. Refresh the node model when something changed.
         if (workspace) {
           observeFrames(chunk.map((f) => f.mac))
-            .then((changed) => {
-              if (changed > 0)
+            .then((res) => {
+              if (res.changed > 0)
                 getNetworks().then((n) => { setNetworks(n.networks ?? []); setNetworksActive(n.active ?? ""); }).catch(() => {});
+              if (res.attrs.length)
+                setAttrs((prev) => {
+                  const next = { ...prev };
+                  for (const a of res.attrs) next[`${a.addr}|${a.endpoint}|${a.cluster}|${a.attr}`] = a;
+                  return next;
+                });
             })
             .catch(() => {});
         }
@@ -1447,6 +1455,7 @@ export default function App() {
                 onSaveNodes={saveDiscoveredNodes}
                 activeNet={networks.find((n) => n.key.trim())}
                 onZclCommand={connected ? runZcl : undefined}
+                attrs={attrs}
               />
             ) : (
               <Terminal ref={terminalRef} connected={connected} />

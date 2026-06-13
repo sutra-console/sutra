@@ -899,11 +899,23 @@ export interface ZdpDiscovery {
 export const zdpIngest = (mac: number[]) =>
   invoke<ZdpDiscovery | null>("zdp_ingest", { frame: mac });
 
+/** One attribute value seen on the wire (live device state). */
+export interface AttrObs {
+  addr: string; // "0xabcd"
+  endpoint: number;
+  cluster: string; // "0x0006"
+  attr: string; // "0x0000"
+  value: string;
+}
+export interface IngestResult {
+  changed: number; // model changes (drives a node-model refresh)
+  attrs: AttrObs[]; // attribute values harvested this batch
+}
 /** Batch-observe sniffed MAC frames against the active network: ZDP replies feed
- *  active discovery, other application frames passively record endpoints/clusters.
- *  Returns how many frames changed the node model. */
+ *  active discovery, other application frames passively record endpoints/clusters,
+ *  and Report/Read-Response frames yield live attribute values. */
 export const observeFrames = (frames: number[][]) =>
-  invoke<number>("observe_frames", { frames });
+  invoke<IngestResult>("observe_frames", { frames });
 
 /** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */
 export async function wifiConfigure(ssid: string, password: string): Promise<void> {

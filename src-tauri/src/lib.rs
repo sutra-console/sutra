@@ -292,7 +292,7 @@ fn zdp_ingest(app: tauri::AppHandle, frame: Vec<u8>) -> Option<interview::ZdpDis
 /// endpoints/clusters. Returns how many frames changed the model. The 802.15.4
 /// panel calls this for each batch of captured frames.
 #[tauri::command]
-fn observe_frames(app: tauri::AppHandle, frames: Vec<Vec<u8>>) -> usize {
+fn observe_frames(app: tauri::AppHandle, frames: Vec<Vec<u8>>) -> interview::IngestResult {
     interview::ingest_frames(&app, &frames)
 }
 

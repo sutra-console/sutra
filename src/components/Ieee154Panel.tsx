@@ -13,7 +13,7 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { type DecodedRow, type Ieee154Frame, type Network } from "@/lib/skrit";
+import { type AttrObs, type DecodedRow, type Ieee154Frame, type Network } from "@/lib/skrit";
 import { NetworkDevices } from "@/components/NetworkDevices";
 
 const copyText = (s: string) => navigator.clipboard?.writeText(s).catch(() => {});
@@ -86,6 +86,7 @@ export function Ieee154Panel({
   onSaveNodes,
   activeNet,
   onZclCommand,
+  attrs,
 }: {
   frames: Ieee154Frame[];
   total: number; // total received (the frames buffer is capped)
@@ -97,6 +98,7 @@ export function Ieee154Panel({
   onSaveNodes?: (nodes: NodeSnapshot[]) => void; // persist discovered nodes to the workspace network model
   activeNet?: Network; // the keyed network whose nodes carry endpoints/clusters (for control)
   onZclCommand?: (addr: string, endpoint: number, cluster: number, cmd: number, payloadHex?: string) => void;
+  attrs?: Record<string, AttrObs>; // live ZCL attribute values, keyed addr|ep|cluster|attr
 }) {
   const [mode, setMode] = useState<"nodes" | "packets" | "decoded">("nodes");
   const [decoded, setDecoded] = useState<DecodedRow[]>([]);
@@ -406,7 +408,7 @@ export function Ieee154Panel({
               <div className="text-[11px] font-medium text-muted-foreground">
                 Control — peers on {activeNet.label || "network"}
               </div>
-              <NetworkDevices net={activeNet} onCommand={onZclCommand} />
+              <NetworkDevices net={activeNet} onCommand={onZclCommand} attrs={attrs} />
             </div>
           )}
           </div>
