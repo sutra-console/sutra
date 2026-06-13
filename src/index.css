@@ -118,5 +118,5 @@
   background: transparent;
 }
 .scroll-stable {
-  scrollbar-gutter: stable both-edges; /* reserve an equal gutter on both sides */
+  scrollbar-gutter: stable; /* reserve the gutter on the scrollbar side only */
 }
