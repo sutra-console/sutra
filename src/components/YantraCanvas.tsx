@@ -151,7 +151,7 @@ export function YantraCanvas({
   );
 }
 
-function Widget({
+export function Widget({
   w,
   disabled,
   fire,

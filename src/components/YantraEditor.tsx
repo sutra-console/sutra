@@ -23,6 +23,7 @@ import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import type { YantraAction, YantraFrame, YantraSpec, YantraWidget } from "@/lib/skrit";
+import { Widget } from "./YantraCanvas";
 
 const ROW_H = 56; // px per grid row in the editor (renderer auto-sizes rows)
 const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label", "tabs"] as const;
@@ -170,12 +171,14 @@ export function YantraEditor({
   const [ready, setReady] = useState(false);
   const [toolMenu, setToolMenu] = useState<"a" | "s" | null>(null); // open align/spacing submenu
   const [showLayers, setShowLayers] = useState(false); // layers panel visible
+  const [activeTab, setActiveTab] = useState<Record<number, string>>({}); // editor preview: active pane per tabs widget
   const [past, setPast] = useState<YantraSpec[]>([]); // undo stack (checkpoints before each change)
   const [future, setFuture] = useState<YantraSpec[]>([]); // redo stack
   const committed = useRef<YantraSpec>(migrateFrames(spec)); // last history checkpoint
   const gridRef = useRef<HTMLDivElement>(null);
   const moveableRef = useRef<Moveable>(null);
   const toolbarRef = useRef<HTMLDivElement>(null); // floating toolbar, repositioned live during a gesture
+  const moved = useRef(false); // true once a gesture actually moves (so a plain click doesn't commit/drift)
   const widgetRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const cols = draft.cols ?? 6;
@@ -195,6 +198,29 @@ export function YantraEditor({
     width: (w.w ?? 1) * cw,
     height: (w.h ?? 1) * ROW_H,
   });
+
+  // editor preview gating: show only the active pane's members (treat tabs like a
+  // frame). Mirrors the renderer but against the editor's chosen active tab.
+  const activeTabOf = (i: number) => activeTab[i] ?? widgets[i].tabs?.[0]?.id;
+  const tabActive = (tabId: string) => {
+    const owner = widgets.findIndex((x) => x.type === "tabs" && (x.tabs ?? []).some((t) => t.id === tabId));
+    return owner < 0 || activeTabOf(owner) === tabId;
+  };
+  const panesFor = (w: YantraWidget): string[] => {
+    const out: string[] = [];
+    if (w.tab) out.push(w.tab);
+    let fid = w.frame;
+    const seen = new Set<string>();
+    while (fid && !seen.has(fid)) {
+      seen.add(fid);
+      const f = frames.find((x) => x.id === fid);
+      if (!f) break;
+      if (f.tab) out.push(f.tab);
+      fid = f.parent;
+    }
+    return out;
+  };
+  const paneHidden = (w: YantraWidget) => panesFor(w).some((p) => !tabActive(p));
 
   // re-seed when the file prop changes (App also remounts via key, but be safe)
   useEffect(() => {
@@ -672,8 +698,9 @@ export function YantraEditor({
         {(w.tabs ?? []).map((pane) => (
           <div key={pane.id}>
             <div style={{ paddingLeft: (depth + 1) * 12 }} {...dropProps({ tab: pane.id })}
-              className="flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-accent/40"
-              title="Drop a control or frame here to put it in this tab">
+              onClick={() => setActiveTab((m) => ({ ...m, [i]: pane.id }))}
+              className={`flex items-center gap-1 rounded px-1 py-0.5 text-[10px] hover:bg-accent/40 ${activeTabOf(i) === pane.id ? "font-medium text-foreground" : "text-muted-foreground"}`}
+              title="Click to edit this pane · drop a control/frame here to add it">
               <ChevronRight className="size-3" /> {pane.label}
             </div>
             {frames.filter((f) => f.tab === pane.id).map((f) => frameNode(f, depth + 2))}
@@ -756,33 +783,33 @@ export function YantraEditor({
             minHeight: rows * ROW_H,
           }}
         >
-          {widgets.map((w, i) => (
+          {widgets.map((w, i) => paneHidden(w) ? null : (
             <ContextMenu key={i}>
               <ContextMenuTrigger asChild>
                 <div
                   data-idx={i}
                   ref={(el) => { widgetRefs.current[i] = el; }}
                   onContextMenu={() => ensureSelected(i)}
-                  className={`yantra-widget absolute select-none rounded border bg-card text-[11px] shadow-sm ${
+                  className={`yantra-widget absolute overflow-hidden rounded ${
                     selected.includes(i) ? "ring-2 ring-primary" : ""
                   } ${w.hidden ? "opacity-40" : ""}`}
-                  style={{ ...geom(w), padding: 4 }}
+                  style={geom(w)}
                 >
                   {w.type === "tabs" ? (
-                    <div className="flex h-full flex-col gap-1 overflow-hidden">
-                      <div className="flex flex-wrap gap-0.5">
-                        {(w.tabs ?? []).map((t) => (
-                          <span key={t.id} className="rounded bg-primary/15 px-1 text-[9px] text-primary">{t.label}</span>
-                        ))}
-                      </div>
-                      <span className="text-[9px] text-muted-foreground">{w.name || "tabs"}</span>
+                    // real tab bar; clicking a tab swaps the editor's active pane
+                    <div className="flex flex-wrap gap-1 rounded border bg-card p-1">
+                      {(w.tabs ?? []).map((t) => (
+                        <button key={t.id} type="button"
+                          className={`rounded px-2 py-0.5 text-xs ${activeTabOf(i) === t.id ? "bg-primary text-primary-foreground" : "bg-muted/40 hover:bg-muted"}`}
+                          onClick={(e) => { e.stopPropagation(); setActiveTab((m) => ({ ...m, [i]: t.id })); }}>
+                          {t.label}
+                        </button>
+                      ))}
                     </div>
                   ) : (
-                    <div className="flex h-full flex-col overflow-hidden">
-                      <span className="truncate font-medium">{w.label || w.type}</span>
-                      <span className="truncate text-[10px] text-muted-foreground">
-                        {w.tab ? `${w.type} · tab` : w.type}
-                      </span>
+                    // the real control, non-interactive so gestures hit the wrapper (WYSIWYG)
+                    <div className="pointer-events-none h-full w-full">
+                      <Widget w={w} disabled fire={() => {}} readout={() => "—"} />
                     </div>
                   )}
                 </div>
@@ -852,14 +879,14 @@ export function YantraEditor({
               bounds={{ left: 0, top: 0, position: "css" }}
               throttleDrag={0}
               throttleResize={0}
-              onDrag={(e) => { dragWidget(e.target as HTMLElement, e.translate, e.transform, shiftOf(e.inputEvent)); syncLiveBox(); }}
-              onDragEnd={() => commit(selected)}
-              onDragGroup={(e) => { const s = shiftOf(e.inputEvent); e.events.forEach((ev) => dragWidget(ev.target as HTMLElement, ev.translate, ev.transform, s)); syncLiveBox(); }}
-              onDragGroupEnd={() => commit(selected)}
-              onResize={(e) => { resizeWidget(e.target as HTMLElement, e.width, e.height, e.drag.transform, shiftOf(e.inputEvent)); syncLiveBox(); }}
-              onResizeEnd={() => commit(selected)}
-              onResizeGroup={(e) => { const s = shiftOf(e.inputEvent); e.events.forEach((ev) => resizeWidget(ev.target as HTMLElement, ev.width, ev.height, ev.drag.transform, s)); syncLiveBox(); }}
-              onResizeGroupEnd={() => commit(selected)}
+              onDrag={(e) => { moved.current = true; dragWidget(e.target as HTMLElement, e.translate, e.transform, shiftOf(e.inputEvent)); syncLiveBox(); }}
+              onDragEnd={() => { if (moved.current) commit(selected); moved.current = false; }}
+              onDragGroup={(e) => { moved.current = true; const s = shiftOf(e.inputEvent); e.events.forEach((ev) => dragWidget(ev.target as HTMLElement, ev.translate, ev.transform, s)); syncLiveBox(); }}
+              onDragGroupEnd={() => { if (moved.current) commit(selected); moved.current = false; }}
+              onResize={(e) => { moved.current = true; resizeWidget(e.target as HTMLElement, e.width, e.height, e.drag.transform, shiftOf(e.inputEvent)); syncLiveBox(); }}
+              onResizeEnd={() => { if (moved.current) commit(selected); moved.current = false; }}
+              onResizeGroup={(e) => { moved.current = true; const s = shiftOf(e.inputEvent); e.events.forEach((ev) => resizeWidget(ev.target as HTMLElement, ev.width, ev.height, ev.drag.transform, s)); syncLiveBox(); }}
+              onResizeGroupEnd={() => { if (moved.current) commit(selected); moved.current = false; }}
             />
           )}
           {ready && (
