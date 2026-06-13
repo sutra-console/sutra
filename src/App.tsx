@@ -1416,13 +1416,25 @@ export default function App() {
                   TX {dataSrcPins.tx >= 0 ? `GPIO${dataSrcPins.tx}` : "—"} · RX {dataSrcPins.rx >= 0 ? `GPIO${dataSrcPins.rx}` : "—"}
                 </span>
               )}
-              {hasKindSwitch && connected && (
-                <Button variant="outline" size="sm" className="h-6 px-2 text-[10px]"
-                  title="Switch the bridged medium"
-                  onClick={() => switchDataKind(dataDesc?.kind === DATA_KIND.I2C ? DATA_KIND.UART : DATA_KIND.I2C)}>
-                  {dataDesc?.kind === DATA_KIND.I2C ? "→ UART" : "→ I²C"}
-                </Button>
-              )}
+              {/* Bridge-medium selector — only for UART/I²C bridges. A sniffer's
+                  medium is the radio (not switchable); never offer it there, or
+                  switching to I²C strands the view with no way back. */}
+              {hasKindSwitch && connected &&
+                (dataDesc?.kind === DATA_KIND.UART || dataDesc?.kind === DATA_KIND.I2C) && (
+                  <div className="flex items-center overflow-hidden rounded border text-[10px]">
+                    {[
+                      { k: DATA_KIND.UART, l: "Console" },
+                      { k: DATA_KIND.I2C, l: "I²C" },
+                    ].map(({ k, l }) => (
+                      <button key={k} type="button"
+                        className={`px-2 py-0.5 ${dataDesc?.kind === k ? "bg-accent font-medium" : "text-muted-foreground hover:bg-accent/50"}`}
+                        title="Switch the bridged medium"
+                        onClick={() => dataDesc?.kind !== k && switchDataKind(k)}>
+                        {l}
+                      </button>
+                    ))}
+                  </div>
+                )}
               {dataDesc?.kind === DATA_KIND.UART && (
                 <span className="text-xs text-muted-foreground">
                   {baud} 8{parity[0].toUpperCase()}{stopBits}
