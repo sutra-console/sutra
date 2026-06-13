@@ -92,6 +92,7 @@ import {
   dataWrite,
   getNetworks,
   setNetworks as saveNetworksApi,
+  setNodeName,
   observeFrames,
   type AttrObs,
   type Network,
@@ -1461,6 +1462,11 @@ export default function App() {
                 onSaveNodes={saveDiscoveredNodes}
                 activeNet={networks.find((n) => n.key.trim())}
                 onZclCommand={connected ? runZcl : undefined}
+                onRenameNode={(addr, name) =>
+                  setNodeName(addr, name)
+                    .then(() => getNetworks().then((n) => setNetworks(n.networks ?? [])))
+                    .catch((e) => setStatus(`rename failed: ${e}`))
+                }
                 attrs={attrs}
               />
             ) : (

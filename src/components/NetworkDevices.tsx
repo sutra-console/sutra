@@ -1,6 +1,8 @@
 // Per-peer command surface: the discovered nodes of a network, typed ("it's a
 // light") from their clusters, with buttons that inject the ZCL command. Pairs
 // with src-tauri/src/zigbee.rs build_zcl_inject via the {$zcl} macro var.
+import { useState } from "react";
+
 import type { AttrObs, Network } from "@/lib/skrit";
 import { clusterCommands, clusterName, deviceType, parseCluster } from "@/lib/zcl";
 
@@ -8,15 +10,19 @@ export function NetworkDevices({
   net,
   disabled,
   onCommand,
+  onRename,
   attrs,
 }: {
   net: Network;
   /** true when not connected — buttons can't inject. */
   disabled?: boolean;
   onCommand: (addr: string, endpoint: number, cluster: number, cmd: number, payloadHex?: string) => void;
+  /** set a node nickname. */
+  onRename?: (addr: string, name: string) => void;
   /** live ZCL attribute values, keyed addr|ep|cluster|attr. */
   attrs?: Record<string, AttrObs>;
 }) {
+  const [editing, setEditing] = useState<string | null>(null); // addr being renamed
   // attribute values seen for a given node/endpoint/cluster (passive reads)
   const attrsFor = (addr: string, ep: number, cluster: string): AttrObs[] =>
     attrs ? Object.values(attrs).filter((a) => a.addr === addr && a.endpoint === ep && a.cluster === cluster) : [];
@@ -36,7 +42,25 @@ export function NetworkDevices({
         return (
           <div key={n.addr} className="rounded border p-2 text-xs">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono">{n.addr}</span>
+              {editing === n.addr ? (
+                <input
+                  autoFocus
+                  defaultValue={n.name || ""}
+                  placeholder="nickname"
+                  className="h-5 w-36 rounded border bg-background px-1 text-xs"
+                  onBlur={(e) => { onRename?.(n.addr, e.target.value.trim()); setEditing(null); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                    else if (e.key === "Escape") setEditing(null);
+                  }}
+                />
+              ) : (
+                <button type="button" className="text-left hover:underline" title="Click to rename"
+                  onClick={() => onRename && setEditing(n.addr)}>
+                  {n.name ? <span className="font-medium">{n.name}</span> : <span className="font-mono">{n.addr}</span>}
+                </button>
+              )}
+              {n.name && <span className="font-mono text-[10px] text-muted-foreground">{n.addr}</span>}
               <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium">{deviceType(clusters)}</span>
               {n.manufacturer && <span className="text-[10px] text-muted-foreground">mfr {n.manufacturer}</span>}
             </div>

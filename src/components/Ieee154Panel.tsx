@@ -86,6 +86,7 @@ export function Ieee154Panel({
   onSaveNodes,
   activeNet,
   onZclCommand,
+  onRenameNode,
   attrs,
 }: {
   frames: Ieee154Frame[];
@@ -98,6 +99,7 @@ export function Ieee154Panel({
   onSaveNodes?: (nodes: NodeSnapshot[]) => void; // persist discovered nodes to the workspace network model
   activeNet?: Network; // the keyed network whose nodes carry endpoints/clusters (for control)
   onZclCommand?: (addr: string, endpoint: number, cluster: number, cmd: number, payloadHex?: string) => void;
+  onRenameNode?: (addr: string, name: string) => void; // set a node nickname
   attrs?: Record<string, AttrObs>; // live ZCL attribute values, keyed addr|ep|cluster|attr
 }) {
   const [mode, setMode] = useState<"nodes" | "packets" | "decoded">("nodes");
@@ -408,7 +410,7 @@ export function Ieee154Panel({
               <div className="text-[11px] font-medium text-muted-foreground">
                 Control — peers on {activeNet.label || "network"}
               </div>
-              <NetworkDevices net={activeNet} onCommand={onZclCommand} attrs={attrs} />
+              <NetworkDevices net={activeNet} onCommand={onZclCommand} onRename={onRenameNode} attrs={attrs} />
             </div>
           )}
           </div>

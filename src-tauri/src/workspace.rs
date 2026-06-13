@@ -258,6 +258,8 @@ pub fn load_keys(app: &AppHandle) -> WorkspaceKeys {
 pub struct NetNode {
     pub addr: String,             // short address, "0x1234"
     #[serde(default)]
+    pub name: String,             // user nickname ("Living-room lamp"); "" = show the addr
+    #[serde(default)]
     pub role: String,             // Coordinator / Router / End Device / Node (inferred)
     #[serde(default)]
     pub channels: Vec<u8>,        // 802.15.4 channels it's been heard on
@@ -352,6 +354,24 @@ pub fn load_networks(app: &AppHandle) -> Networks {
             .collect(),
         ..Default::default()
     }
+}
+
+/// Set a node's nickname on the active network, atomically (load → set → save) so
+/// a concurrent passive-observe write can't clobber the rename. Creates the node
+/// if it isn't in the model yet. `addr` is "0x1234".
+pub fn set_node_name(app: &AppHandle, addr: &str, name: &str) -> Result<(), String> {
+    let mut nets = load_networks(app);
+    let idx = active_network_index(&nets).ok_or("no active network")?;
+    let net = &mut nets.networks[idx];
+    match net.nodes.iter_mut().find(|n| n.addr.eq_ignore_ascii_case(addr)) {
+        Some(n) => n.name = name.to_string(),
+        None => net.nodes.push(NetNode {
+            addr: addr.to_string(),
+            name: name.to_string(),
+            ..Default::default()
+        }),
+    }
+    save_networks(app, &nets)
 }
 
 /// Persist the workspace network model to `<ws>/.sutra/networks.json`.

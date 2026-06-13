@@ -152,6 +152,7 @@ export interface NetEndpoint {
 }
 export interface NetNode {
   addr: string; // short address "0x1234"
+  name?: string; // user nickname; "" → show the addr
   role: string; // Coordinator / Router / End Device / Node
   channels: number[];
   count: number;
@@ -178,6 +179,9 @@ export const getNetworks = () => invoke<Networks>("get_networks");
 /** Persist the workspace network model. Needs a workspace selected. */
 export const setNetworks = (networks: Networks) =>
   invoke<void>("set_networks", { networks });
+/** Nickname a node on the active network (atomic backend load→set→save). */
+export const setNodeName = (addr: string, name: string) =>
+  invoke<void>("set_node_name", { addr, name });
 export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes });
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });

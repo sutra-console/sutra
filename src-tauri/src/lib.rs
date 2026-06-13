@@ -276,6 +276,12 @@ fn set_networks(app: tauri::AppHandle, networks: workspace::Networks) -> Result<
     workspace::save_networks(&app, &networks)
 }
 
+/// Set a node's nickname on the active network (atomic load→set→save).
+#[tauri::command]
+fn set_node_name(app: tauri::AppHandle, addr: String, name: String) -> Result<(), String> {
+    workspace::set_node_name(&app, &addr, &name)
+}
+
 /// Try to decode a sniffed 802.15.4 MAC frame (no FCS) as a ZDP reply against the
 /// active network; on success merges the discovery into the node model. The
 /// 802.15.4 panel calls this for each captured frame during an interview.
@@ -400,6 +406,7 @@ pub fn run() {
             dissect_ieee154,
             get_networks,
             set_networks,
+            set_node_name,
             zdp_ingest,
             observe_frames,
             list_i2c_defs,
