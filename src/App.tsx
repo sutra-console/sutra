@@ -20,7 +20,6 @@ import {
 import { Terminal, type TerminalHandle } from "@/components/Terminal";
 import { MacroHelp } from "@/components/MacroHelp";
 import { MacroVars } from "@/components/MacroVars";
-import { NetworkDevices } from "@/components/NetworkDevices";
 import { clusterName } from "@/lib/zcl";
 import { RgbControl } from "@/components/RgbControl";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
@@ -1446,6 +1445,8 @@ export default function App() {
                 onDecode={decodeIeee154Capture}
                 onInject={connected ? injectIeee154 : undefined}
                 onSaveNodes={saveDiscoveredNodes}
+                activeNet={networks.find((n) => n.key.trim())}
+                onZclCommand={connected ? runZcl : undefined}
               />
             ) : (
               <Terminal ref={terminalRef} connected={connected} />
@@ -2095,18 +2096,6 @@ export default function App() {
                         </Button>
                       </div>
                     ))}
-                    {/* Per-peer commands for the active (first keyed) network. */}
-                    {(() => {
-                      const active = networks.find((n) => n.key.trim());
-                      return active && active.nodes.some((n) => n.endpoints?.length) ? (
-                        <div className="mt-1 flex flex-col gap-1">
-                          <div className="text-[11px] font-medium text-muted-foreground">
-                            Peers on {active.label || "network"}
-                          </div>
-                          <NetworkDevices net={active} disabled={!connected} onCommand={runZcl} />
-                        </div>
-                      ) : null;
-                    })()}
                     <div className="flex items-center gap-1">
                       <Input className="h-8 w-24 text-xs" placeholder="label"
                         value={draftKeyLabel} onChange={(e) => setDraftKeyLabel(e.target.value)} />

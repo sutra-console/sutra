@@ -13,7 +13,8 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { type DecodedRow, type Ieee154Frame } from "@/lib/skrit";
+import { type DecodedRow, type Ieee154Frame, type Network } from "@/lib/skrit";
+import { NetworkDevices } from "@/components/NetworkDevices";
 
 const copyText = (s: string) => navigator.clipboard?.writeText(s).catch(() => {});
 // The on-air MAC frame from a captured record (ts·ch·rssi·lqi·flags·len·psdu),
@@ -83,6 +84,8 @@ export function Ieee154Panel({
   onDecode,
   onInject,
   onSaveNodes,
+  activeNet,
+  onZclCommand,
 }: {
   frames: Ieee154Frame[];
   total: number; // total received (the frames buffer is capped)
@@ -92,6 +95,8 @@ export function Ieee154Panel({
   onDecode?: () => Promise<DecodedRow[]>; // dissect the current capture
   onInject?: (mac: number[]) => void; // transmit a MAC frame (no FCS); undefined if not connected
   onSaveNodes?: (nodes: NodeSnapshot[]) => void; // persist discovered nodes to the workspace network model
+  activeNet?: Network; // the keyed network whose nodes carry endpoints/clusters (for control)
+  onZclCommand?: (addr: string, endpoint: number, cluster: number, cmd: number, payloadHex?: string) => void;
 }) {
   const [mode, setMode] = useState<"nodes" | "packets" | "decoded">("nodes");
   const [decoded, setDecoded] = useState<DecodedRow[]>([]);
@@ -365,6 +370,7 @@ export function Ieee154Panel({
 
       <div ref={scrollRef} className="min-h-0 min-w-0 flex-1 overflow-auto rounded border">
         {mode === "nodes" ? (
+          <div className="flex flex-col gap-3 p-1">
           <table className="w-full text-left font-mono text-xs">
             <thead className="sticky top-0 bg-background text-muted-foreground">
               <tr>
@@ -394,6 +400,16 @@ export function Ieee154Panel({
               ))}
             </tbody>
           </table>
+          {/* Control: typed peers + cluster command buttons (from the network model). */}
+          {activeNet && onZclCommand && (
+            <div className="flex flex-col gap-1">
+              <div className="text-[11px] font-medium text-muted-foreground">
+                Control — peers on {activeNet.label || "network"}
+              </div>
+              <NetworkDevices net={activeNet} onCommand={onZclCommand} />
+            </div>
+          )}
+          </div>
         ) : mode === "packets" ? (
           <table className="w-full text-left font-mono text-xs">
             <thead className="sticky top-0 bg-background text-muted-foreground">
