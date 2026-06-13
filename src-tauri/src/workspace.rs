@@ -50,10 +50,33 @@ fn set(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::write(&marker, path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
-    let _ = std::fs::create_dir_all(path.join(".sutra").join("captures"));
-    seed_i2c_example(&path.join(".sutra").join("i2c"));
-    seed_yantra_example(&path.join(".sutra").join("yantra"));
+    let dot = path.join(".sutra");
+    let _ = std::fs::create_dir_all(dot.join("captures"));
+    ensure_gitignore(&dot);
+    seed_i2c_example(&dot.join("i2c"));
+    seed_yantra_example(&dot.join("yantra"));
     Ok(path.to_path_buf())
+}
+
+// Keep workspace secrets out of version control if the folder is a git repo.
+// Git honors this nested .gitignore; we only create it (never clobber a user's).
+const SUTRA_GITIGNORE: &str = "# Sutra: keep device secrets out of version control.\n\
+# Network keys + the discovered model:\n\
+networks.json\n\
+networks.json.bak\n\
+keys.json\n\
+# Macros — some are marked secret:\n\
+macros.json\n\
+# Captured traffic — can hold decrypted/sensitive frames:\n\
+captures/\n\
+# NOT ignored (shareable, no secrets): i2c/ device defs, yantra/ control surfaces.\n";
+
+fn ensure_gitignore(dot: &Path) {
+    let _ = std::fs::create_dir_all(dot);
+    let gi = dot.join(".gitignore");
+    if !gi.exists() {
+        let _ = std::fs::write(&gi, SUTRA_GITIGNORE);
+    }
 }
 
 // ---- I2C device definitions (.sutra/i2c/*.json) ----------------------------
