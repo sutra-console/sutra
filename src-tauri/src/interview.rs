@@ -134,6 +134,85 @@ pub fn merge_into_node(net: &mut Network, d: &ZdpDiscovery) {
     }
 }
 
+/// Passive: record that node `addr` is associated with `cluster` on `endpoint`,
+/// learned from normal decrypted traffic (no interrogation). Endpoints/clusters
+/// accumulate; duplicates are ignored.
+pub fn observe_into_node(net: &mut Network, addr: &str, endpoint: u8, cluster: u16) {
+    if !net.nodes.iter().any(|n| n.addr == addr) {
+        net.nodes.push(NetNode { addr: addr.to_string(), ..Default::default() });
+    }
+    let node = net.nodes.iter_mut().find(|n| n.addr == addr).unwrap();
+    if !node.endpoints.iter().any(|e| e.id == endpoint) {
+        node.endpoints.push(NetEndpoint { id: endpoint, clusters: vec![] });
+    }
+    let e = node.endpoints.iter_mut().find(|e| e.id == endpoint).unwrap();
+    let c = fmt_id(cluster);
+    if !e.clusters.contains(&c) {
+        e.clusters.push(c);
+    }
+}
+
+/// Pure: decrypt a sniffed application (non-ZDP) APS frame and return the
+/// (node, endpoint, cluster) associations it reveals — source end always, and
+/// the dest end when it's a unicast (not broadcast). Empty for anything that
+/// isn't a decryptable application APS data frame.
+pub fn observe_frame(key: &[u8; 16], mac: &[u8], level: u8) -> Vec<(u16, u8, u16)> {
+    let mut out = Vec::new();
+    let Some((mlen, _)) = mac_data_header(mac) else { return out };
+    let Some(nwk) = mac.get(mlen..) else { return out };
+    if nwk.len() < 6 {
+        return out;
+    }
+    let nwk_dst = u16::from_le_bytes([nwk[2], nwk[3]]);
+    let nwk_src = u16::from_le_bytes([nwk[4], nwk[5]]);
+    let Ok(aps_bytes) = decrypt_nwk(key, nwk, level) else { return out };
+    let Some(aps) = parse_aps_data(&aps_bytes) else { return out };
+    if aps.profile == 0x0000 {
+        return out; // ZDP / NWK-mgmt, not application clusters
+    }
+    out.push((nwk_src, aps.src_ep, aps.cluster));
+    if nwk_dst != 0xfffc && nwk_dst != 0xffff {
+        out.push((nwk_dst, aps.dst_ep, aps.cluster));
+    }
+    out
+}
+
+/// Batch-ingest sniffed MAC frames against the active network: decrypt each,
+/// route ZDP replies through the active-discovery merge, and passively record
+/// endpoints/clusters from any other application (APS) frame. One workspace
+/// write for the whole batch. Returns how many frames yielded model changes.
+pub fn ingest_frames(app: &AppHandle, frames: &[Vec<u8>]) -> usize {
+    let mut nets = workspace::load_networks(app);
+    let Some(idx) = workspace::active_network_index(&nets) else {
+        return 0;
+    };
+    let Some(key) = parse_key(&nets.networks[idx].key) else {
+        return 0;
+    };
+    let level = SEC_LEVEL_ENC_MIC32;
+    let mut changed = 0usize;
+    for mac in frames {
+        // ZDP reply addressed to our injector → active-discovery merge.
+        if let Some(d) = parse_zdp_response(&key, mac, level) {
+            merge_into_node(&mut nets.networks[idx], &d);
+            changed += 1;
+            continue;
+        }
+        // Otherwise: passive endpoint/cluster observation from any APS data frame.
+        let obs = observe_frame(&key, mac, level);
+        for (addr, ep, cl) in &obs {
+            observe_into_node(&mut nets.networks[idx], &fmt_addr(*addr), *ep, *cl);
+        }
+        if !obs.is_empty() {
+            changed += 1;
+        }
+    }
+    if changed > 0 {
+        let _ = workspace::save_networks(app, &nets);
+    }
+    changed
+}
+
 /// Try to ingest a sniffed MAC frame as a ZDP reply against the active network,
 /// persisting any discovery. Returns it (for the UI) or None if the frame isn't
 /// a ZDP reply we can decrypt + model.
@@ -184,6 +263,35 @@ mod tests {
         let mut bad = KEY;
         bad[0] ^= 0xff;
         assert!(parse_zdp_response(&bad, &frame, SEC_LEVEL_ENC_MIC32).is_none());
+    }
+
+    #[test]
+    fn observes_app_clusters_from_traffic() {
+        // A node (0xabcd, endpoint 1) reports On/Off (cluster 0x0006, HA profile
+        // 0x0104) to the coordinator — a normal frame we can decrypt + learn from.
+        let zcl = vec![0x18, 0x4a, 0x0a, 0x00, 0x00, 0x10, 0x01]; // ZCL Report Attributes
+        let mut aps = vec![0x00, 0x01, 0x06, 0x00, 0x04, 0x01, 0x01, 0x55]; // fc·dstEp·cluster·profile·srcEp·ctr
+        aps.extend_from_slice(&zcl);
+        let nwk = secure_nwk(&KEY, &nwk_header(0x0000, 0xabcd, 30, 0x20), &aps, &EUI, 7, 0, SEC_LEVEL_ENC_MIC32).unwrap();
+        let mut frame = mac_header(0x11, 0x0c84, 0x0000, 0xabcd);
+        frame.extend_from_slice(&nwk);
+
+        let obs = observe_frame(&KEY, &frame, SEC_LEVEL_ENC_MIC32);
+        // source (the reporting node) + dest (coordinator), both endpoint 1, cluster 0x0006
+        assert!(obs.contains(&(0xabcd, 1, 0x0006)), "node's own cluster observed");
+        assert!(obs.contains(&(0x0000, 1, 0x0006)), "coordinator end observed");
+
+        let mut net = Network::default();
+        for (a, e, c) in &obs {
+            observe_into_node(&mut net, &fmt_addr(*a), *e, *c);
+        }
+        let node = net.nodes.iter().find(|n| n.addr == "0xabcd").unwrap();
+        assert_eq!(node.endpoints[0].id, 1);
+        assert_eq!(node.endpoints[0].clusters, vec!["0x0006"]);
+        // idempotent: re-observing the same thing doesn't duplicate
+        observe_into_node(&mut net, "0xabcd", 1, 0x0006);
+        let node = net.nodes.iter().find(|n| n.addr == "0xabcd").unwrap();
+        assert_eq!(node.endpoints[0].clusters.len(), 1);
     }
 
     #[test]

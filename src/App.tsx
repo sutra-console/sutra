@@ -89,8 +89,7 @@ import {
   dataWrite,
   getNetworks,
   setNetworks as saveNetworksApi,
-  zdpIngest,
-  type ZdpDiscovery,
+  observeFrames,
   type Network,
   type NetNode,
   wifiStatus,
@@ -662,17 +661,17 @@ export default function App() {
         const chunk = ieeeBuf.splice(0);
         setIeee154Frames((fs) => [...fs, ...chunk].slice(-2000));
         setIeee154Total((t) => t + chunk.length);
-        // Live interview: ZDP replies addressed to our injector (0x7fff) get
-        // decrypted + parsed backend-side and merged into the node model.
-        const replies = chunk.filter((f) => f.dst === "0x7fff");
-        if (replies.length) {
-          Promise.all(replies.map((f) => zdpIngest(f.mac).catch(() => null))).then((ds) => {
-            const got = ds.filter((d): d is ZdpDiscovery => d != null);
-            if (got.length) {
-              getNetworks().then((n) => { setNetworks(n.networks ?? []); setNetworksActive(n.active ?? ""); }).catch(() => {});
-              setStatus(`interviewed ${got.map((d) => `${d.addr} ${d.kind}`).join(", ")}`);
-            }
-          });
+        // Interview: hand the whole batch to the backend, which decrypts each
+        // frame against the active network — ZDP replies feed active discovery,
+        // and any other application frame passively records its node's endpoints
+        // and clusters. Refresh the node model when something changed.
+        if (workspace) {
+          observeFrames(chunk.map((f) => f.mac))
+            .then((changed) => {
+              if (changed > 0)
+                getNetworks().then((n) => { setNetworks(n.networks ?? []); setNetworksActive(n.active ?? ""); }).catch(() => {});
+            })
+            .catch(() => {});
         }
       } else if (kind === DATA_KIND.I2C && i2cBuf.length) {
         const chunk = i2cBuf.splice(0);

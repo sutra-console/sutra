@@ -880,6 +880,12 @@ export interface ZdpDiscovery {
 export const zdpIngest = (mac: number[]) =>
   invoke<ZdpDiscovery | null>("zdp_ingest", { frame: mac });
 
+/** Batch-observe sniffed MAC frames against the active network: ZDP replies feed
+ *  active discovery, other application frames passively record endpoints/clusters.
+ *  Returns how many frames changed the node model. */
+export const observeFrames = (frames: number[][]) =>
+  invoke<number>("observe_frames", { frames });
+
 /** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */
 export async function wifiConfigure(ssid: string, password: string): Promise<void> {
   await cfgSetStr(CFG.WIFI_PASS, password);

@@ -287,6 +287,15 @@ fn zdp_ingest(app: tauri::AppHandle, frame: Vec<u8>) -> Option<interview::ZdpDis
     interview::ingest_mac_frame(&app, &frame)
 }
 
+/// Batch-observe sniffed MAC frames against the active network: ZDP replies feed
+/// active discovery, and any other application frame passively records its node's
+/// endpoints/clusters. Returns how many frames changed the model. The 802.15.4
+/// panel calls this for each batch of captured frames.
+#[tauri::command]
+fn observe_frames(app: tauri::AppHandle, frames: Vec<Vec<u8>>) -> usize {
+    interview::ingest_frames(&app, &frames)
+}
+
 /// The I2C device definitions in the workspace's .sutra/i2c/ (raw JSON).
 #[tauri::command]
 fn list_i2c_defs(app: tauri::AppHandle) -> Vec<serde_json::Value> {
@@ -395,6 +404,7 @@ pub fn run() {
             get_networks,
             set_networks,
             zdp_ingest,
+            observe_frames,
             list_i2c_defs,
             export_set,
             import_set,
