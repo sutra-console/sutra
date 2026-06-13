@@ -8,7 +8,10 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { WIFI, WS_PORT, type WifiStatus, wifiConfigure, wifiStatus } from "@/lib/skrit";
+import {
+  WIFI, WS_PORT, type WifiAp, type WifiStatus,
+  wifiConfigure, wifiScanResults, wifiScanStart, wifiStatus,
+} from "@/lib/skrit";
 
 const STATE_LABEL: Record<number, string> = {
   [WIFI.OFF]: "off — no network configured",
@@ -32,7 +35,26 @@ export function NetworkConfig({
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [aps, setAps] = useState<WifiAp[] | null>(null); // scan results (null = not scanned)
+  const [scanning, setScanning] = useState(false);
   const poll = useRef<number | null>(null);
+
+  // Scan for nearby APs using the board's radio, then pick one to fill the SSID.
+  async function scan() {
+    setScanning(true);
+    setErr(null);
+    try {
+      await wifiScanStart();
+      await new Promise((r) => setTimeout(r, 2500)); // async scan ~1.5–2s
+      const found = await wifiScanResults();
+      found.sort((a, b) => b.rssi - a.rssi);
+      setAps(found);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setScanning(false);
+    }
+  }
 
   async function refresh() {
     try {
@@ -109,11 +131,33 @@ export function NetworkConfig({
             </Button>
           )}
 
-          <label className="text-xs">
-            SSID
-            <Input className="mt-1 h-8" value={ssid} onChange={(e) => setSsid(e.target.value)}
-              placeholder={status?.state === WIFI.CONNECTED ? "change network…" : "network name"} />
-          </label>
+          <div className="flex items-end gap-1">
+            <label className="flex-1 text-xs">
+              SSID
+              <Input className="mt-1 h-8" value={ssid} onChange={(e) => setSsid(e.target.value)}
+                placeholder={status?.state === WIFI.CONNECTED ? "change network…" : "network name"} />
+            </label>
+            <Button variant="outline" size="sm" className="h-8 gap-1" onClick={scan} disabled={scanning}
+              title="Scan for nearby networks using the board's radio">
+              <RefreshCw className={`size-3.5 ${scanning ? "animate-spin" : ""}`} /> Scan
+            </Button>
+          </div>
+          {aps && (
+            <div className="max-h-32 overflow-y-auto rounded border text-xs">
+              {aps.length === 0 ? (
+                <div className="px-2 py-1 text-muted-foreground">no networks found</div>
+              ) : (
+                aps.map((ap, i) => (
+                  <button key={`${ap.ssid}-${i}`} type="button"
+                    className="flex w-full items-center justify-between gap-2 px-2 py-1 text-left hover:bg-accent"
+                    onClick={() => setSsid(ap.ssid)}>
+                    <span className="truncate">{ap.ssid || <span className="text-muted-foreground">(hidden)</span>}</span>
+                    <span className="shrink-0 tabular-nums text-muted-foreground">ch{ap.channel} · {ap.rssi}dBm</span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
           <label className="text-xs">
             Password
             <Input className="mt-1 h-8" type="password" value={pass}

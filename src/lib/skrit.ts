@@ -576,6 +576,7 @@ export const CFG = {
   WIFI_STATUS: 0x12,
   DATA_PINS: 0x13,
   DATA_KIND: 0x14,
+  WIFI_SCAN: 0x15,
 } as const;
 /** WIFI_STATUS state byte. */
 export const WIFI = { OFF: 0, CONNECTING: 1, CONNECTED: 2, PORTAL: 3, FAILED: 4 } as const;
@@ -923,6 +924,34 @@ export const observeFrames = (frames: number[][]) =>
   invoke<IngestResult>("observe_frames", { frames });
 
 /** Provision WiFi over the CMD link: password first, then SSID (SSID triggers the join). */
+export interface WifiAp {
+  ssid: string;
+  rssi: number; // signed dBm
+  channel: number;
+}
+/** Kick an async WiFi scan on the board's radio (WiFi-capable boards only). */
+export async function wifiScanStart(): Promise<void> {
+  const resp = await sendCmd(MSG.CFG_SET, [CFG.WIFI_SCAN, 0]);
+  if (resp.status !== 0) throw new Error(`scan: status 0x${(resp.status ?? 0).toString(16)}`);
+}
+/** Read the latest scan results: count(1) then per AP rssi·channel·ssid_len·ssid. */
+export async function wifiScanResults(): Promise<WifiAp[]> {
+  const v = await cfgGet(CFG.WIFI_SCAN);
+  const aps: WifiAp[] = [];
+  let i = 1; // v[0] = count
+  const count = v[0] ?? 0;
+  for (let n = 0; n < count && i + 3 <= v.length; n++) {
+    const rssi = v[i] >= 0x80 ? v[i] - 0x100 : v[i];
+    const channel = v[i + 1];
+    const len = v[i + 2];
+    i += 3;
+    const ssid = dec.decode(Uint8Array.from(v.slice(i, i + len)));
+    i += len;
+    aps.push({ ssid, rssi, channel });
+  }
+  return aps;
+}
+
 export async function wifiConfigure(ssid: string, password: string): Promise<void> {
   await cfgSetStr(CFG.WIFI_PASS, password);
   await cfgSetStr(CFG.WIFI_SSID, ssid);
