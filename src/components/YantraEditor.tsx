@@ -347,6 +347,23 @@ export function YantraEditor({
   // keep Moveable's box synced when geometry changes from outside a gesture
   useEffect(() => { moveableRef.current?.updateRect(); }, [draft, containerW, selected]);
 
+  // Set a dimension from a typed string like "50", "50%", "120px". A "%"/"px"
+  // suffix switches that axis's unit (converting the other fields), then applies
+  // the typed number literally.
+  const setDim = (field: "x" | "y" | "w" | "h", raw: string) => {
+    if (sel == null) return;
+    const w = widgets[sel];
+    const axis: "H" | "V" = field === "x" || field === "w" ? "H" : "V";
+    const m = raw.trim().match(/^(-?\d*\.?\d+)\s*(%|px)?$/i);
+    if (!m) return;
+    const val = parseFloat(m[1]);
+    const suffix = m[2]?.toLowerCase();
+    const curUnit = axis === "H" ? w.unitH ?? "pct" : w.unitV ?? "px";
+    const unit: "pct" | "px" = suffix === "%" ? "pct" : suffix === "px" ? "px" : curUnit;
+    if (unit !== curUnit) setUnit(axis, unit);
+    setWidget(sel, { [field]: val });
+  };
+
   // Switch a selected widget's axis unit (pct↔px), converting the stored value
   // through the measured parent so it doesn't jump on screen.
   const setUnit = (axis: "H" | "V", unit: "pct" | "px") => {
@@ -1093,6 +1110,7 @@ export function YantraEditor({
             tabOptions={widgets.flatMap((x) => (x.tabs ?? []).map((t) => ({ id: t.id, label: `${x.name || x.label || "tabs"} · ${t.label}` })))}
             onChange={(p) => setWidget(sel, p)}
             onUnit={setUnit}
+            onDim={setDim}
             onDelete={() => { removeMany([sel]); setSelected([]); }}
           />
         )}
@@ -1116,6 +1134,20 @@ function AlignBtn({
   );
 }
 
+// Unit-aware dimension input: shows the value with its unit (px/%); typing a
+// "%" or "px" suffix switches the axis unit. Commits on blur / Enter.
+function DimInput({ value, unit, onCommit }: { value: number; unit: "pct" | "px"; onCommit: (raw: string) => void }) {
+  const fmt = `${Math.round((value ?? 0) * 10) / 10}${unit === "pct" ? "%" : "px"}`;
+  const [s, setS] = useState(fmt);
+  useEffect(() => { setS(fmt); }, [fmt]);
+  return (
+    <Input className="h-7 px-1 text-xs" value={s}
+      onChange={(e) => setS(e.target.value)}
+      onBlur={() => onCommit(s)}
+      onKeyDown={(e) => { if (e.key === "Enter") { onCommit(s); (e.target as HTMLInputElement).blur(); } }} />
+  );
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="flex flex-col gap-1">
@@ -1126,12 +1158,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function WidgetProps({
-  w, tabOptions, onChange, onUnit, onDelete,
+  w, tabOptions, onChange, onUnit, onDim, onDelete,
 }: {
   w: YantraWidget;
   tabOptions: { id: string; label: string }[];
   onChange: (patch: Partial<YantraWidget>) => void;
   onUnit: (axis: "H" | "V", unit: "pct" | "px") => void;
+  onDim: (field: "x" | "y" | "w" | "h", raw: string) => void;
   onDelete: () => void;
 }) {
   return (
@@ -1200,8 +1233,8 @@ function WidgetProps({
       <div className="grid grid-cols-4 gap-1">
         {(["x", "y", "w", "h"] as const).map((k) => (
           <Field key={k} label={k.toUpperCase()}>
-            <Input className="h-7 px-1 text-xs" type="number" value={w[k] ?? (k === "w" || k === "h" ? 1 : 0)}
-              onChange={(e) => onChange({ [k]: Math.max(k === "w" || k === "h" ? 1 : 0, +e.target.value) })} />
+            <DimInput value={w[k] ?? 0} unit={(k === "x" || k === "w" ? w.unitH : w.unitV) ?? (k === "x" || k === "w" ? "pct" : "px")}
+              onCommit={(raw) => onDim(k, raw)} />
           </Field>
         ))}
       </div>
