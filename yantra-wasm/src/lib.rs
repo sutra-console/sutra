@@ -246,31 +246,14 @@ impl YantraApp {
             .show(ctx, |ui| {
                 let canvas = ui.max_rect();
                 for w in &widgets {
-                    let ty = w.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                    let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                    let ws = wstate.get(&name).cloned().unwrap_or(Value::Null);
+                    let ws = wstate.get(w.get("name").and_then(|n| n.as_str()).unwrap_or("")).cloned().unwrap_or(Value::Null);
                     let hidden = w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
                         || ws.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
                     if hidden {
                         continue;
                     }
                     let rect = widget_rect(w, canvas.min, canvas.width(), canvas.height());
-                    let val = ws
-                        .get("value")
-                        .map(|v| match v {
-                            Value::String(s) => s.clone(),
-                            Value::Null => String::new(),
-                            o => o.to_string(),
-                        })
-                        .unwrap_or_default();
-                    let label = ws
-                        .get("label")
-                        .and_then(|l| l.as_str())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| w.get("label").and_then(|l| l.as_str()).unwrap_or("").to_string());
-                    let bg = ws.get("color").and_then(|v| v.as_str()).and_then(parse_rgb);
-                    let fg = ws.get("fg").and_then(|v| v.as_str()).and_then(parse_rgb);
-
+                    let (ty, name, label, val, bg, fg) = display_of(w, &wstate);
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     child.set_clip_rect(rect);
                     draw_interact_widget(&mut child, rect, &ty, &name, &label, &val, bg, fg, &emit, w, self);
@@ -372,8 +355,10 @@ impl YantraApp {
                 let (cw, ch) = (canvas.width(), canvas.height());
                 let widgets = self.shared.borrow().spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
                 let selected = self.shared.borrow().selected.clone();
+                let wstate = self.shared.borrow().state.get("widgets").cloned().unwrap_or(Value::Null);
                 let shift = ui.input(|i| i.modifiers.shift);
                 let accent = ui.visuals().selection.stroke.color;
+                let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
 
                 // empty-canvas click clears selection. Register FIRST so the widget
                 // boxes (added after) sit on top and win the pointer.
@@ -391,6 +376,16 @@ impl YantraApp {
                     let rect = widget_rect(w, canvas.min, cw, ch);
                     let is_sel = selected.contains(&i);
                     let id = egui::Id::new(("ed", i));
+
+                    // WYSIWYG: render the actual styled widget first. A no-op emit and
+                    // the glass-pane interact below keep it non-functional in edit mode.
+                    let (ty, name, label, val, dbg, dfg) = display_of(w, &wstate);
+                    let noop = |_v: Value| {};
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                    child.set_clip_rect(rect);
+                    draw_interact_widget(&mut child, rect, &ty, &name, &label, &val, dbg, dfg, &noop, w, self);
+
+                    // glass pane on top: steals all pointer events for editing
                     let resp = ui.interact(rect, id, Sense::click_and_drag());
                     if resp.clicked() {
                         click_sel = Some((i, shift));
@@ -404,16 +399,15 @@ impl YantraApp {
                     if resp.drag_stopped() {
                         stop = true;
                     }
-                    // box
-                    let stroke = if is_sel { Stroke::new(2.0, accent) } else { Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color) };
-                    ui.painter().rect(rect, Rounding::same(5.0), ui.visuals().faint_bg_color, stroke);
-                    let lbl = w
-                        .get("label")
-                        .and_then(|l| l.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| w.get("type").and_then(|t| t.as_str()).unwrap_or("?").to_string());
-                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, lbl, FontId::proportional(11.0), ui.visuals().text_color());
+                    // selection outline (stroke only, so the widget shows through)
+                    let stroke = if is_sel {
+                        Stroke::new(2.0, accent)
+                    } else if resp.hovered() {
+                        Stroke::new(1.0, accent.gamma_multiply(0.5))
+                    } else {
+                        Stroke::new(1.0, border.gamma_multiply(0.5))
+                    };
+                    ui.painter().rect_stroke(rect, Rounding::same(5.0), stroke);
                     // resize handle on a single selection
                     if is_sel && selected.len() == 1 {
                         let h = Rect::from_min_size(rect.max - Vec2::splat(11.0), Vec2::splat(11.0));
@@ -605,6 +599,30 @@ fn align_selected(sh: &mut Shared, key: &str) {
             }
         }
     }
+}
+
+/// Resolve a widget's display fields from spec + host render-state.
+/// Returns (type, name, label, value, bg, fg).
+fn display_of(w: &Value, wstate: &Value) -> (String, String, String, String, Option<Color32>, Option<Color32>) {
+    let ty = w.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+    let ws = wstate.get(&name).cloned().unwrap_or(Value::Null);
+    let val = ws
+        .get("value")
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            o => o.to_string(),
+        })
+        .unwrap_or_default();
+    let label = ws
+        .get("label")
+        .and_then(|l| l.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| w.get("label").and_then(|l| l.as_str()).unwrap_or("").to_string());
+    let bg = ws.get("color").and_then(|v| v.as_str()).and_then(parse_rgb);
+    let fg = ws.get("fg").and_then(|v| v.as_str()).and_then(parse_rgb);
+    (ty, name, label, val, bg, fg)
 }
 
 // ---- interact widget drawing (styled cards) ---------------------------------
