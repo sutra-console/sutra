@@ -5,16 +5,24 @@
 // runAction). So the device/Lua side is unchanged; egui is render + input only.
 import { useEffect, useMemo, useRef } from "react";
 
-import init, { start, set_state, set_theme } from "../../yantra-wasm/pkg/yantra_wasm";
+import init, { start, set_state, set_theme, set_edit } from "../../yantra-wasm/pkg/yantra_wasm";
 import wasmUrl from "../../yantra-wasm/pkg/yantra_wasm_bg.wasm?url";
 import { useYantraRuntime } from "@/hooks/useYantraRuntime";
 import { resolveTokens, THEME_EVENT } from "@/lib/theme";
 import type { YantraSpec, YantraWidget } from "@/lib/skrit";
 
-export function WasmYantraCanvas({ spec, disabled }: { spec: YantraSpec; disabled?: boolean }) {
+export function WasmYantraCanvas({
+  spec, disabled, editing, onSave,
+}: {
+  spec: YantraSpec;
+  disabled?: boolean;
+  editing?: boolean; // edit mode (egui editable canvas) vs interact
+  onSave?: (spec: YantraSpec) => void; // edit-mode Save → write the .yantra
+}) {
   const ref = useRef<HTMLCanvasElement>(null);
   const rt = useYantraRuntime(spec, disabled);
   const ready = useRef(false);
+  const onSaveRef = useRef(onSave); onSaveRef.current = onSave;
 
   const widgetByName = useMemo(() => {
     const m: Record<string, YantraWidget> = {};
@@ -44,12 +52,25 @@ export function WasmYantraCanvas({ spec, disabled }: { spec: YantraSpec; disable
     (async () => {
       await init(wasmUrl);
       if (cancelled || !ref.current) return;
-      start(ref.current, JSON.stringify(spec), (s: string) => onEventRef.current(s));
+      start(
+        ref.current,
+        JSON.stringify(spec),
+        (s: string) => onEventRef.current(s),
+        (specJson: string) => {
+          try { onSaveRef.current?.(JSON.parse(specJson)); } catch { /* malformed */ }
+        },
+      );
+      set_edit(!!editing);
       ready.current = true;
       set_theme(JSON.stringify(resolveTokens()));
     })().catch((e) => console.error("yantra-wasm mount failed", e));
     return () => { cancelled = true; ready.current = false; };
   }, [spec]);
+
+  // toggle edit mode without remounting
+  useEffect(() => {
+    if (ready.current) set_edit(!!editing);
+  }, [editing]);
 
   // push the latest render-state every render (host is authoritative for display).
   useEffect(() => {

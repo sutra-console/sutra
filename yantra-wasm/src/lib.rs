@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use eframe::egui;
-use serde_json::Value;
+use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 
 #[derive(Default)]
@@ -19,19 +19,24 @@ struct Shared {
     state: Value, // { widgets: { name: { value, color, fg, label, hidden, disabled } } }
     theme: Value, // { background, foreground, card, primary, border, … } as "rgb(r, g, b)"
     on_event: Option<js_sys::Function>,
+    on_save: Option<js_sys::Function>,
     theme_dirty: bool,
+    editing: bool,
+    selected: Option<usize>, // edit mode: selected widget index
 }
 
 thread_local! {
     static SHARED: Rc<RefCell<Shared>> = Rc::new(RefCell::new(Shared::default()));
 }
 
-/// Boot egui onto a React-owned canvas. `on_event(json)` is called on widget input.
+/// Boot egui onto a React-owned canvas. `on_event(json)` is called on widget input;
+/// `on_save(specJson)` on a Save in edit mode.
 #[wasm_bindgen]
 pub fn start(
     canvas: web_sys::HtmlCanvasElement,
     spec_json: String,
     on_event: js_sys::Function,
+    on_save: js_sys::Function,
 ) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     let shared = SHARED.with(|s| s.clone());
@@ -39,6 +44,7 @@ pub fn start(
         let mut sh = shared.borrow_mut();
         sh.spec = serde_json::from_str(&spec_json).unwrap_or(Value::Null);
         sh.on_event = Some(on_event);
+        sh.on_save = Some(on_save);
         sh.theme_dirty = true;
     }
     let app_shared = shared.clone();
@@ -80,6 +86,12 @@ pub fn set_theme(theme_json: String) {
     });
 }
 
+/// Host → wasm: toggle edit mode (editable canvas) vs interact (live surface).
+#[wasm_bindgen]
+pub fn set_edit(editing: bool) {
+    SHARED.with(|s| s.borrow_mut().editing = editing);
+}
+
 struct YantraApp {
     shared: Rc<RefCell<Shared>>,
     sliders: HashMap<String, f32>,
@@ -102,6 +114,22 @@ fn resolve_axis(mode: &str, a: f32, b: f32, parent: f32) -> (f32, f32) {
         "stretch" => (a, (parent - a - b).max(0.0)),
         _ => (a, b),
     }
+}
+/// Inverse of resolve_axis: absolute (start, size) px → stored (a, b). (skrit.ts storeAxis)
+fn store_axis(mode: &str, start: f32, size: f32, parent: f32) -> (f32, f32) {
+    match mode {
+        "scale" => (
+            if parent != 0.0 { start / parent * 100.0 } else { 0.0 },
+            if parent != 0.0 { size / parent * 100.0 } else { 0.0 },
+        ),
+        "center" => (start + size / 2.0 - parent / 2.0, size),
+        "end" => (parent - start - size, size),
+        "stretch" => (start, (parent - start - size).max(0.0)),
+        _ => (start, size),
+    }
+}
+fn r2(n: f32) -> f32 {
+    (n * 100.0).round() / 100.0
 }
 fn parse_rgb(s: &str) -> Option<egui::Color32> {
     let inner = s.trim().trim_start_matches("rgba").trim_start_matches("rgb");
@@ -144,16 +172,20 @@ fn apply_visuals(ctx: &egui::Context, theme: &Value) {
 impl eframe::App for YantraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // snapshot shared, drop the borrow before rendering/emitting (on_event re-enters JS)
-        let (spec, state, theme, theme_dirty, on_event) = {
+        let (spec, state, theme, theme_dirty, on_event, editing) = {
             let mut sh = self.shared.borrow_mut();
             let td = sh.theme_dirty;
             sh.theme_dirty = false;
-            (sh.spec.clone(), sh.state.clone(), sh.theme.clone(), td, sh.on_event.clone())
+            (sh.spec.clone(), sh.state.clone(), sh.theme.clone(), td, sh.on_event.clone(), sh.editing)
         };
         if theme_dirty {
             apply_visuals(ctx, &theme);
         }
         ctx.request_repaint_after(Duration::from_millis(50)); // reflect host state pushes
+        if editing {
+            self.edit_ui(ctx);
+            return;
+        }
 
         let wstate = state.get("widgets").cloned().unwrap_or(Value::Null);
         let emit = |ev: serde_json::Value| {
@@ -247,5 +279,160 @@ impl eframe::App for YantraApp {
                     }
                 });
         }
+    }
+}
+
+// ---- edit mode (E1: select / drag-move / corner-resize / add / delete / save) ----
+const ADDABLE: &[&str] = &["button", "slider", "toggle", "readout", "label", "color"];
+
+fn add_widget(spec: &mut Value, ty: &str) {
+    if !spec.is_object() {
+        *spec = json!({});
+    }
+    let arr = spec.as_object_mut().unwrap().entry("widgets").or_insert(json!([]));
+    if let Some(a) = arr.as_array_mut() {
+        let n = a.iter().filter(|w| w.get("type").and_then(|t| t.as_str()) == Some(ty)).count() + 1;
+        a.push(json!({
+            "type": ty, "name": format!("{ty}{n}"), "label": ty,
+            "x": 4, "y": 8, "w": 30, "h": 48, "anchorH": "scale", "anchorV": "start"
+        }));
+    }
+}
+fn delete_widget(spec: &mut Value, i: usize) {
+    if let Some(a) = spec.get_mut("widgets").and_then(|w| w.as_array_mut()) {
+        if i < a.len() {
+            a.remove(i);
+        }
+    }
+}
+
+impl YantraApp {
+    fn edit_ui(&mut self, ctx: &egui::Context) {
+        // toolbar
+        let mut add: Option<String> = None;
+        let (mut do_delete, mut do_save) = (false, false);
+        egui::TopBottomPanel::top("ed_toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.menu_button("➕ Add", |ui| {
+                    for t in ADDABLE {
+                        if ui.button(*t).clicked() {
+                            add = Some((*t).to_string());
+                            ui.close_menu();
+                        }
+                    }
+                });
+                if ui.button("🗑 Delete").clicked() {
+                    do_delete = true;
+                }
+                ui.separator();
+                if ui.button("💾 Save").clicked() {
+                    do_save = true;
+                }
+                ui.weak("edit");
+            });
+        });
+        {
+            let mut sh = self.shared.borrow_mut();
+            if let Some(t) = add {
+                add_widget(&mut sh.spec, &t);
+                let n = sh.spec.get("widgets").and_then(|w| w.as_array()).map(|a| a.len()).unwrap_or(0);
+                sh.selected = if n > 0 { Some(n - 1) } else { None };
+            }
+            if do_delete {
+                if let Some(i) = sh.selected {
+                    delete_widget(&mut sh.spec, i);
+                    sh.selected = None;
+                }
+            }
+            if do_save {
+                let s = sh.spec.to_string();
+                if let Some(f) = &sh.on_save {
+                    let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&s));
+                }
+            }
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let canvas = ui.max_rect();
+            let (cw, ch) = (canvas.width(), canvas.height());
+            let widgets = self.shared.borrow().spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
+            let selected = self.shared.borrow().selected;
+            let mut new_sel: Option<usize> = None;
+            let mut muts: Vec<(usize, f32, f32, f32, f32)> = Vec::new(); // (i, x, y, w, h)
+
+            for (i, w) in widgets.iter().enumerate() {
+                let a_h = anchor(w, "anchorH", "scale");
+                let a_v = anchor(w, "anchorV", "start");
+                let dw = if a_h == "scale" { 25.0 } else { 100.0 };
+                let dh = if a_v == "scale" { 25.0 } else { 48.0 };
+                let (sx, ww) = resolve_axis(&a_h, num(w, "x", 0.0), num(w, "w", dw), cw);
+                let (sy, hh) = resolve_axis(&a_v, num(w, "y", 0.0), num(w, "h", dh), ch);
+                let mut rect = egui::Rect::from_min_size(
+                    canvas.min + egui::vec2(sx, sy),
+                    egui::vec2(ww.max(8.0), hh.max(8.0)),
+                );
+                let id = egui::Id::new(("ed", i));
+                let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
+                let mut moved = false;
+                if resp.dragged() {
+                    rect = rect.translate(resp.drag_delta());
+                    moved = true;
+                }
+                if resp.clicked() || resp.drag_started() {
+                    new_sel = Some(i);
+                }
+                let is_sel = selected == Some(i) || new_sel == Some(i);
+                let stroke = if is_sel {
+                    egui::Stroke::new(2.0, ui.visuals().selection.stroke.color)
+                } else {
+                    egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+                };
+                ui.painter().rect(rect, egui::Rounding::same(4.0), ui.visuals().faint_bg_color, stroke);
+                let lbl = w
+                    .get("label")
+                    .and_then(|l| l.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| w.get("type").and_then(|t| t.as_str()).unwrap_or("?").to_string());
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    lbl,
+                    egui::FontId::proportional(11.0),
+                    ui.visuals().text_color(),
+                );
+                if is_sel {
+                    let hr_rect = egui::Rect::from_min_size(rect.max - egui::vec2(11.0, 11.0), egui::vec2(11.0, 11.0));
+                    let hr = ui.interact(hr_rect, id.with("rs"), egui::Sense::drag());
+                    ui.painter().rect_filled(hr_rect, egui::Rounding::same(2.0), ui.visuals().selection.stroke.color);
+                    if hr.dragged() {
+                        rect.max += hr.drag_delta();
+                        moved = true;
+                    }
+                }
+                if moved {
+                    let (a, b) = store_axis(&a_h, rect.min.x - canvas.min.x, rect.width(), cw);
+                    let (c, d) = store_axis(&a_v, rect.min.y - canvas.min.y, rect.height(), ch);
+                    muts.push((i, r2(a), r2(c), r2(b), r2(d)));
+                }
+            }
+
+            if new_sel.is_some() || !muts.is_empty() {
+                let mut sh = self.shared.borrow_mut();
+                if let Some(s) = new_sel {
+                    sh.selected = Some(s);
+                }
+                if let Some(arr) = sh.spec.get_mut("widgets").and_then(|w| w.as_array_mut()) {
+                    for (i, x, y, ww, hh) in muts {
+                        if let Some(wm) = arr.get_mut(i) {
+                            wm["x"] = json!(x);
+                            wm["y"] = json!(y);
+                            wm["w"] = json!(ww);
+                            wm["h"] = json!(hh);
+                        }
+                    }
+                }
+            }
+        });
     }
 }
