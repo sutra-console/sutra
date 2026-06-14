@@ -4,150 +4,17 @@
 // device INVOKE command, or a CFG set. Readouts watch the live console stream
 // and surface a regex capture. v1 = render + interact; scripts/plugins/visual-
 // editor come later.
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
-  MSG, dataWrite, i2cXfer, invokeCommand, onData, sendCmd, outputRgb, outputPwm, outputSet, yantraEval,
-  axisStyle, bindOf, computeBus, evalArray, evalBind, evalCell, needsConsole, CURRENT_CONN,
+  axisStyle, evalCell,
   type AnchorMode, type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
+import { useYantraRuntime } from "@/hooks/useYantraRuntime";
 
-const enc = new TextEncoder();
-const dec = new TextDecoder();
-
-/** Dispatch a widget action over the right transport. `value` (slider) is
- *  substituted into a string action's {value}. */
-async function runAction(a: YantraAction | undefined, value?: string): Promise<void> {
-  if (a == null) return;
-  const sub = (s: string) => (value === undefined ? s : s.replace(/\{value\}/g, value));
-  if (typeof a === "string") return dataWrite(Array.from(enc.encode(sub(a))));
-  if ("send" in a) return dataWrite(Array.from(enc.encode(sub(a.send))));
-  if ("i2c" in a) {
-    await i2cXfer(a.i2c.addr, a.i2c.write ?? [], a.i2c.read ?? 0);
-    return;
-  }
-  if ("invoke" in a) {
-    await invokeCommand(a.invoke.id, a.invoke.args ?? []);
-    return;
-  }
-  if ("cfg" in a) {
-    const bytes = a.cfg.bytes ?? Array.from(enc.encode(a.cfg.str ?? ""));
-    await sendCmd(MSG.CFG_SET, [a.cfg.key, ...bytes]);
-    return;
-  }
-  if ("out" in a) {
-    const lvl = Math.max(0, Math.min(255, Math.round(Number(a.out.value ?? value ?? 0))));
-    const idx = a.out.index ?? 0;
-    if (a.out.kind === "pwm") await outputPwm(idx, lvl);
-    else if (a.out.kind === "set") await outputSet(idx, lvl > 0);
-    else await outputRgb(idx, { r: lvl, g: lvl, b: lvl }); // rgb (default): grey level
-    return;
-  }
-}
-
-export function YantraCanvas({
-  spec,
-  disabled,
-}: {
-  spec: YantraSpec;
-  disabled?: boolean;
-}) {
-  const fire = (a: YantraAction | undefined, value?: string) => {
-    runAction(a, value).catch(() => {});
-  };
-  const widgets = spec.widgets ?? [];
-  const frames = spec.frames ?? [];
-  const wantsConsole = needsConsole(widgets);
-
-  // active tab per `tabs` widget (keyed by its index); default = first pane
-  const [activeTabs, setActiveTabs] = useState<Record<number, string>>({});
-  const activeTabOf = (i: number) => activeTabs[i] ?? widgets[i].tabs?.[0]?.id;
-
-  // Rolling per-connection console buffers (only the current connection populated today).
-  const [bufs, setBufs] = useState<Record<string, string>>({});
-  useEffect(() => {
-    if (!wantsConsole) return;
-    let un: (() => void) | undefined;
-    onData((bytes) => {
-      const t = dec.decode(Uint8Array.from(bytes));
-      setBufs((b) => ({ ...b, [CURRENT_CONN]: ((b[CURRENT_CONN] ?? "") + t).slice(-4000) }));
-    }).then((u) => (un = u));
-    return () => un?.();
-  }, [wantsConsole]);
-
-  // Live control state (slider positions, toggle states) published under each widget's
-  // name, so a consume-output `emit` expr can reference them as vars.<name>.
-  const [controls, setControls] = useState<Record<string, unknown>>({});
-  const publish = useCallback((name: string, v: unknown) => {
-    setControls((c) => (c[name] === v ? c : { ...c, [name]: v }));
-  }, []);
-
-  // Reactive value bus: console/var-derived values, overlaid with live control state.
-  const consoleBus = useMemo(() => computeBus(widgets, bufs), [widgets, bufs]);
-  const vars = useMemo(() => ({ ...consoleBus, ...controls }), [consoleBus, controls]);
-  const valueOf = (w: YantraWidget): unknown => evalBind(bindOf(w), vars, bufs);
-  const rowsOf = (w: YantraWidget): unknown[] => evalArray(w, vars, bufs);
-
-  // Consume-output: when a widget's `emit` value changes, fire its action with the
-  // computed value. Deduped (only on change) and skipped while disconnected.
-  const lastEmit = useRef<Record<string, string>>({});
-  useEffect(() => {
-    if (disabled) return;
-    widgets.forEach((w, i) => {
-      if (!w.emit) return;
-      const val = evalBind(
-        { source: w.emit!.source, match: w.emit!.match, field: w.emit!.field, expr: w.emit!.expr },
-        vars, bufs,
-      );
-      if (val === undefined || val === null || (typeof val === "number" && Number.isNaN(val))) return;
-      const key = w.name ?? `#${i}`;
-      const s = String(val);
-      if (lastEmit.current[key] === s) return;
-      lastEmit.current[key] = s;
-      runAction(w.emit!.send, s).catch(() => {});
-    });
-  }, [vars, bufs, disabled, widgets]);
-
-  // --- Lua scripting: per-surface VM ticked in the backend ---------------------
-  // Presentation overrides written by scripts (name → {color,fg,label,image,hidden,…}).
-  const [overrides, setOverrides] = useState<Record<string, Record<string, unknown>>>({});
-  const [scriptLog, setScriptLog] = useState<string[]>([]); // log()/errors for the log view
-  const hasScripts = !!spec.script || widgets.some((w) => w.script);
-  // refs so the fixed-rate tick always sees the latest vars/spec without re-arming.
-  const varsRef = useRef(vars); varsRef.current = vars;
-  const specRef = useRef(spec); specRef.current = spec;
-  const lastTick = useRef(0);
-  useEffect(() => {
-    if (!hasScripts || disabled) return;
-    const key = spec.name || "yantra";
-    let alive = true;
-    const id = setInterval(async () => {
-      const s = specRef.current;
-      const ws = (s.widgets ?? []).filter((w) => w.name && w.script).map((w) => ({ name: w.name!, script: w.script! }));
-      const now = Date.now();
-      const dt = lastTick.current ? now - lastTick.current : 0;
-      lastTick.current = now;
-      try {
-        const out = await yantraEval(key, s.script ?? "", ws, { ...varsRef.current, t: now, dt });
-        if (!alive) return;
-        const ov: Record<string, Record<string, unknown>> = {};
-        for (const [name, attrs] of Object.entries(out.sets ?? {})) {
-          if (!attrs || typeof attrs !== "object") continue;
-          if ((attrs as { value?: unknown }).value !== undefined) publish(name, (attrs as { value?: unknown }).value);
-          ov[name] = attrs as Record<string, unknown>;
-        }
-        setOverrides(ov); // overrides are per-tick (scripts re-assert each tick via update())
-        for (const a of out.sends ?? []) runAction(a).catch(() => {});
-        if (out.logs?.length) setScriptLog((l) => [...l, ...out.logs].slice(-50));
-      } catch (e) {
-        setScriptLog((l) => [...l, `! ${e}`].slice(-50)); // keep ticking; surface the error
-      }
-    }, 100);
-    return () => { alive = false; clearInterval(id); };
-  }, [hasScripts, disabled, spec.name]); // eslint-disable-line react-hooks/exhaustive-deps
-  const ovOf = (w: YantraWidget): Record<string, unknown> | undefined => (w.name ? overrides[w.name] : undefined);
-
+export function YantraCanvas({ spec, disabled }: { spec: YantraSpec; disabled?: boolean }) {
+  const rt = useYantraRuntime(spec, disabled);
   return (
     <div className="flex h-full flex-col">
       <div className="scroll-stable min-h-0 flex-1 overflow-auto">
@@ -155,23 +22,23 @@ export function YantraCanvas({
             % resolves against this, matching the editor's measured surface. */}
         <div className="relative h-full">
           <CanvasNodes
-            container="root" widgets={widgets} frames={frames}
-            activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
-            disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish} ovOf={ovOf}
+            container="root" widgets={rt.widgets} frames={rt.frames}
+            activeTabOf={rt.activeTabOf} setActiveTabs={rt.setActiveTabs}
+            disabled={disabled} fire={rt.fire} valueOf={rt.valueOf} rowsOf={rt.rowsOf} publish={rt.publish} ovOf={rt.ovOf}
           />
         </div>
       </div>
-      {hasScripts && (
+      {rt.hasScripts && (
         <div className="shrink-0 border-t bg-muted/20 px-2 py-1">
           <div className="mb-0.5 flex items-center justify-between text-[10px] text-muted-foreground">
             <span>console — script print() / log()</span>
-            <button type="button" className="hover:text-foreground" onClick={() => setScriptLog([])}>clear</button>
+            <button type="button" className="hover:text-foreground" onClick={rt.clearLog}>clear</button>
           </div>
           <div className="max-h-24 overflow-auto font-mono text-[10px] leading-tight">
-            {scriptLog.length === 0 ? (
+            {rt.scriptLog.length === 0 ? (
               <div className="italic text-muted-foreground/60">— no output yet —</div>
             ) : (
-              scriptLog.map((l, i) => (
+              rt.scriptLog.map((l, i) => (
                 <div key={i} className={l.startsWith("!") ? "text-destructive" : "text-muted-foreground"}>{l}</div>
               ))
             )}
