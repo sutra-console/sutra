@@ -31,13 +31,14 @@ pub struct WidgetScript {
 /// What a tick produces for the frontend to apply.
 #[derive(serde::Serialize, Default)]
 pub struct EvalOut {
-    pub sets: Value,  // { name → { value?, color?, fg?, label?, image?, hidden?, disabled? } }
-    pub sends: Value, // [ action, … ]
+    pub sets: Value,   // { name → { value?, color?, fg?, label?, image?, hidden?, disabled? } }
+    pub frames: Value, // { id → { hidden? } } — container overrides (selector → show/hide panes)
+    pub sends: Value,  // [ action, … ]
     pub logs: Vec<String>,
 }
 
 const PREAMBLE: &str = r#"
-__sets = {}; __sends = {}; __logs = {}
+__sets = {}; __frames = {}; __sends = {}; __logs = {}
 function set(n, v)
   local t = __sets[n]; if t == nil then t = {}; __sets[n] = t end
   if type(v) == 'table' then for k, val in pairs(v) do t[k] = val end
@@ -46,6 +47,17 @@ end
 function attr(n, k, v)
   local t = __sets[n]; if t == nil then t = {}; __sets[n] = t end
   t[k] = v
+end
+-- frame(id, {hidden=…}) merges container overrides; frame(id, bool) sets hidden.
+function frame(id, v)
+  local t = __frames[id]; if t == nil then t = {}; __frames[id] = t end
+  if type(v) == 'table' then for k, val in pairs(v) do t[k] = val end
+  else t.hidden = v end
+end
+-- show one frame of a group, hide the rest (the common tab pattern):
+--   tabs('panelA', { 'panelA', 'panelB', 'panelC' })
+function tabs(active, ids)
+  for _, id in ipairs(ids) do frame(id, { hidden = id ~= active }) end
 end
 function send(a) __sends[#__sends + 1] = a end
 function log(m) __logs[#__logs + 1] = tostring(m) end
@@ -108,6 +120,7 @@ impl Surface {
         let g = lua.globals();
         // fresh accumulators each tick; user state (globals) persists
         g.set("__sets", lua.create_table()?)?;
+        g.set("__frames", lua.create_table()?)?;
         g.set("__sends", lua.create_table()?)?;
         g.set("__logs", lua.create_table()?)?;
         let vars_lua = lua.to_value(&vars)?;
@@ -139,12 +152,13 @@ impl Surface {
         }
 
         let sets: Value = lua.from_value(g.get("__sets")?)?;
+        let frames: Value = lua.from_value(g.get("__frames")?)?;
         // an empty Lua table serializes as {} (object); force the actions list to an array
         let sends_v: Value = lua.from_value(g.get("__sends")?)?;
         let sends = if sends_v.is_array() { sends_v } else { Value::Array(Vec::new()) };
         let mut logs: Vec<String> = lua.from_value(g.get("__logs")?).unwrap_or_default();
         logs.extend(errs);
-        Ok(EvalOut { sets, sends, logs })
+        Ok(EvalOut { sets, frames, sends, logs })
     }
 }
 
@@ -207,6 +221,21 @@ mod tests {
         assert_eq!(b.sets["out"]["color"], json!("#f00"));
         assert_eq!(b.sends.as_array().unwrap().len(), 1); // send fired on tick 2
         assert_eq!(b.sends[0]["out"]["index"], json!(0));
+    }
+
+    #[test]
+    fn frame_overrides_and_tabs_helper() {
+        let eng = LuaEngine::default();
+        let script = r#"
+            function update(vars)
+              tabs(vars.sel, { 'panelA', 'panelB' })  -- show the selected, hide the rest
+              frame('extra', { hidden = true })        -- explicit single override
+            end
+        "#;
+        let out = eng.eval("f", script, &[], json!({ "sel": "panelB" })).unwrap();
+        assert_eq!(out.frames["panelA"]["hidden"], json!(true));
+        assert_eq!(out.frames["panelB"]["hidden"], json!(false));
+        assert_eq!(out.frames["extra"]["hidden"], json!(true));
     }
 
     #[test]

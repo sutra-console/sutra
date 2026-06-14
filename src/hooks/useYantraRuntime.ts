@@ -54,6 +54,8 @@ export interface YantraRuntime {
   valueOf: (w: YantraWidget) => unknown;
   rowsOf: (w: YantraWidget) => unknown[];
   ovOf: (w: YantraWidget) => Record<string, unknown> | undefined;
+  frameOvOf: (id: string) => Record<string, unknown> | undefined;
+  frameOverrides: Record<string, Record<string, unknown>>;
   publish: (name: string, v: unknown) => void;
   fire: (a: YantraAction | undefined, value?: string) => void;
   hasScripts: boolean;
@@ -116,6 +118,7 @@ export function useYantraRuntime(spec: YantraSpec, disabled?: boolean): YantraRu
 
   // Per-surface Lua tick (native mlua via yantra_eval): writes overrides + sends + logs.
   const [overrides, setOverrides] = useState<Record<string, Record<string, unknown>>>({});
+  const [frameOverrides, setFrameOverrides] = useState<Record<string, Record<string, unknown>>>({});
   const [scriptLog, setScriptLog] = useState<string[]>([]);
   const hasScripts = !!spec.script || widgets.some((w) => w.script);
   const varsRef = useRef(vars); varsRef.current = vars;
@@ -141,6 +144,7 @@ export function useYantraRuntime(spec: YantraSpec, disabled?: boolean): YantraRu
           ov[name] = attrs as Record<string, unknown>;
         }
         setOverrides(ov);
+        setFrameOverrides(out.frames ?? {});
         for (const a of out.sends ?? []) runAction(a).catch(() => {});
         if (out.logs?.length) setScriptLog((l) => [...l, ...out.logs].slice(-50));
       } catch (e) {
@@ -150,10 +154,11 @@ export function useYantraRuntime(spec: YantraSpec, disabled?: boolean): YantraRu
     return () => { alive = false; clearInterval(id); };
   }, [hasScripts, disabled, spec.name]); // eslint-disable-line react-hooks/exhaustive-deps
   const ovOf = (w: YantraWidget): Record<string, unknown> | undefined => (w.name ? overrides[w.name] : undefined);
+  const frameOvOf = (id: string): Record<string, unknown> | undefined => frameOverrides[id];
 
   return {
     widgets, frames, vars, activeTabs, setActiveTabs, activeTabOf,
-    valueOf, rowsOf, ovOf, publish, fire, hasScripts, scriptLog,
+    valueOf, rowsOf, ovOf, frameOvOf, frameOverrides, publish, fire, hasScripts, scriptLog,
     clearLog: useCallback(() => setScriptLog([]), []),
   };
 }

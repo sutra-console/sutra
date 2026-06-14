@@ -919,6 +919,7 @@ export interface YantraFrame {
   tab?: string; // if set, this frame lives inside a tabs pane (id of that tab)
   collapsed?: boolean; // layer-tree collapse (UI only)
   locked?: boolean; // editor: not selectable on the canvas; still in the layer tree
+  hidden?: boolean; // static visibility; a script can also override via frame(id,{hidden})
   // Phase C: the frame's own rect, relative to ITS parent container's content box.
   x?: number; y?: number; w?: number; h?: number;
   anchorH?: AnchorMode;
@@ -945,6 +946,7 @@ export interface YantraSpec {
 /** Result of one yantra Lua tick (mirrors the Rust lua::EvalOut). */
 export interface YantraEval {
   sets: Record<string, Record<string, unknown>>; // name → { value?, color?, fg?, label?, image?, hidden?, disabled? }
+  frames: Record<string, Record<string, unknown>>; // frame id → { hidden? } (container overrides)
   sends: YantraAction[]; // actions to dispatch
   logs: string[]; // script log lines / errors
 }

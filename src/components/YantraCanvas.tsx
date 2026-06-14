@@ -24,7 +24,7 @@ export function YantraCanvas({ spec, disabled }: { spec: YantraSpec; disabled?: 
           <CanvasNodes
             container="root" widgets={rt.widgets} frames={rt.frames}
             activeTabOf={rt.activeTabOf} setActiveTabs={rt.setActiveTabs}
-            disabled={disabled} fire={rt.fire} valueOf={rt.valueOf} rowsOf={rt.rowsOf} publish={rt.publish} ovOf={rt.ovOf}
+            disabled={disabled} fire={rt.fire} valueOf={rt.valueOf} rowsOf={rt.rowsOf} publish={rt.publish} ovOf={rt.ovOf} frameOvOf={rt.frameOvOf}
           />
         </div>
       </div>
@@ -63,7 +63,7 @@ function nodeStyle(n: YantraWidget | YantraFrame): CSSProperties {
 
 // Recursively render the children of one container (root | a frame id | a tab-pane id).
 function CanvasNodes({
-  container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, valueOf, rowsOf, publish, ovOf,
+  container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, valueOf, rowsOf, publish, ovOf, frameOvOf,
 }: {
   container: string; // "root" | frame id | pane id
   widgets: YantraWidget[];
@@ -76,10 +76,12 @@ function CanvasNodes({
   rowsOf: (w: YantraWidget) => unknown[];
   publish: (name: string, v: unknown) => void;
   ovOf: (w: YantraWidget) => Record<string, unknown> | undefined;
+  frameOvOf: (id: string) => Record<string, unknown> | undefined;
 }) {
   const isRoot = container === "root";
   const childFrames = frames.filter((f) =>
-    isRoot ? !f.parent && !f.tab : f.tab === container || (f.parent === container && !f.tab),
+    (isRoot ? !f.parent && !f.tab : f.tab === container || (f.parent === container && !f.tab)) &&
+    !f.hidden && !frameOvOf(f.id)?.hidden, // static or script-hidden container
   );
   const childWidgetIdx = widgets
     .map((_, i) => i)
@@ -91,7 +93,7 @@ function CanvasNodes({
 
   const sub = (c: string) => (
     <CanvasNodes container={c} widgets={widgets} frames={frames} activeTabOf={activeTabOf}
-      setActiveTabs={setActiveTabs} disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish} ovOf={ovOf} />
+      setActiveTabs={setActiveTabs} disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish} ovOf={ovOf} frameOvOf={frameOvOf} />
   );
 
   return (

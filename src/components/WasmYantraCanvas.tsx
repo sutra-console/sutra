@@ -90,7 +90,13 @@ export function WasmYantraCanvas({
         color: ov.color, fg: ov.fg, label: ov.label, hidden: ov.hidden, disabled: ov.disabled,
       };
     }
-    set_state(JSON.stringify({ widgets }));
+    // frame overrides (script-driven hide/show → selector composes tabs)
+    const frames: Record<string, Record<string, unknown>> = {};
+    for (const f of rt.frames) {
+      const fo = rt.frameOvOf(f.id);
+      if (fo) frames[f.id] = { hidden: fo.hidden };
+    }
+    set_state(JSON.stringify({ widgets, frames }));
   });
 
   // re-sync egui visuals when the app theme changes.
