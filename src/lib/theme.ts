@@ -37,6 +37,9 @@ export function isDark(mode: Mode): boolean {
   return mode === "dark" || (mode === "system" && prefersDark());
 }
 
+/** Event fired after the theme changes (the egui surface re-syncs off this). */
+export const THEME_EVENT = "sutra:theme";
+
 /** Apply a theme: toggle `.dark`, set the accent overlay + color-scheme on <html>. */
 export function applyTheme(theme: Theme): void {
   const root = document.documentElement;
@@ -44,6 +47,7 @@ export function applyTheme(theme: Theme): void {
   root.classList.toggle("dark", dark);
   root.dataset.accent = theme.accent;
   root.style.colorScheme = dark ? "dark" : "light";
+  window.dispatchEvent(new Event(THEME_EVENT));
 }
 
 /** Re-apply on OS scheme change while in `system` mode. Returns an unsubscribe. */
