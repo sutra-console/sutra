@@ -34,7 +34,7 @@ export function WasmYantraCanvas({
   // latest closure without re-mounting.
   const onEventRef = useRef<(json: string) => void>(() => {});
   onEventRef.current = (json: string) => {
-    let ev: { kind?: string; name?: string; value?: unknown };
+    let ev: { kind?: string; name?: string; value?: unknown; index?: number };
     try { ev = JSON.parse(json); } catch { return; }
     const w = ev.name ? widgetByName[ev.name] : undefined;
     if (!w || !ev.name) return;
@@ -42,7 +42,13 @@ export function WasmYantraCanvas({
       rt.publish(ev.name, ev.value); // slider/toggle/color → the bus
       if (w.send) rt.fire(w.send, String(ev.value));
     } else if (ev.kind === "press") {
-      rt.fire(w.send); // button / select option
+      rt.fire(w.send); // button
+    } else if (ev.kind === "select") {
+      // selector: publish the chosen value (scripts read it to show/hide frames)
+      // and fire the chosen option's own action.
+      rt.publish(ev.name, ev.value);
+      const opt = typeof ev.index === "number" ? w.options?.[ev.index] : undefined;
+      if (opt?.send) rt.fire(opt.send, String(ev.value));
     }
   };
 

@@ -27,6 +27,7 @@ struct Shared {
     redo: Vec<Value>,
     drag: Option<Drag>,
     marquee: Option<Pos2>, // rubber-band select origin (canvas px)
+    selected_frame: Option<usize>, // index into spec.frames (frames select one at a time)
 }
 
 /// An in-progress move/resize. Captured once at drag-start so we map the *absolute*
@@ -85,6 +86,7 @@ pub fn start(
                         toggles: HashMap::new(),
                         colors: HashMap::new(),
                         tabs: HashMap::new(),
+                        selects: HashMap::new(),
                     }))
                 }),
             )
@@ -124,7 +126,8 @@ struct YantraApp {
     sliders: HashMap<String, f32>,
     toggles: HashMap<String, bool>,
     colors: HashMap<String, [u8; 3]>,
-    tabs: HashMap<String, String>, // tabs-widget key → active tab id
+    tabs: HashMap<String, String>, // tabs-widget key → active tab id (legacy widget)
+    selects: HashMap<String, usize>, // select-widget key → active option index
 }
 
 // ---- anchor math (ported from skrit.ts) -------------------------------------
@@ -241,6 +244,7 @@ impl YantraApp {
             (sh.spec.clone(), sh.state.clone(), sh.on_event.clone())
         };
         let wstate = state.get("widgets").cloned().unwrap_or(Value::Null);
+        let fstate = state.get("frames").cloned().unwrap_or(Value::Null); // per-frame overrides (hidden)
         let emit = |ev: Value| {
             if let Some(f) = &on_event {
                 let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&ev.to_string()));
@@ -257,7 +261,7 @@ impl YantraApp {
             });
         // recurse outside the panel closure so `self` is free to be borrowed mutably
         if let Some((canvas, mut ui)) = root {
-            self.render_container(&mut ui, "root", canvas, &widgets, &frames, &wstate, &emit);
+            self.render_container(&mut ui, "root", canvas, &widgets, &frames, &wstate, &fstate, &emit);
         }
     }
 
@@ -272,6 +276,7 @@ impl YantraApp {
         widgets: &[Value],
         frames: &[Value],
         wstate: &Value,
+        fstate: &Value,
         emit: &dyn Fn(Value),
     ) {
         let is_root = container == "root";
@@ -288,6 +293,12 @@ impl YantraApp {
             if !is_child {
                 continue;
             }
+            // frame visibility: static `hidden` OR a host/script override
+            let fhidden = f.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
+                || fstate.get(id).and_then(|s| s.get("hidden")).and_then(|h| h.as_bool()).unwrap_or(false);
+            if fhidden {
+                continue;
+            }
             let fr = widget_rect(f, rect.min, rect.width(), rect.height());
             ui.painter().rect(
                 fr,
@@ -300,7 +311,7 @@ impl YantraApp {
             if clip {
                 child.set_clip_rect(fr);
             }
-            self.render_container(&mut child, id, fr, widgets, frames, wstate, emit);
+            self.render_container(&mut child, id, fr, widgets, frames, wstate, fstate, emit);
         }
         // child widgets
         for (i, w) in widgets.iter().enumerate() {
@@ -323,7 +334,7 @@ impl YantraApp {
             }
             let wr = widget_rect(w, rect.min, rect.width(), rect.height());
             if w.get("type").and_then(|t| t.as_str()) == Some("tabs") {
-                self.render_tabs(ui, i, w, wr, widgets, frames, wstate, emit);
+                self.render_tabs(ui, i, w, wr, widgets, frames, wstate, fstate, emit);
                 continue;
             }
             let (ty, _n, label, val, bg, fg) = display_of(w, wstate);
@@ -344,6 +355,7 @@ impl YantraApp {
         widgets: &[Value],
         frames: &[Value],
         wstate: &Value,
+        fstate: &Value,
         emit: &dyn Fn(Value),
     ) {
         let tabs = w.get("tabs").and_then(|t| t.as_array()).cloned().unwrap_or_default();
@@ -390,7 +402,7 @@ impl YantraApp {
 
         let mut content = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
         content.set_clip_rect(content_rect);
-        self.render_container(&mut content, &active, content_rect, widgets, frames, wstate, emit);
+        self.render_container(&mut content, &active, content_rect, widgets, frames, wstate, fstate, emit);
     }
 
     // ---- edit: multi-select, drag, resize, snap, align, undo ----------------
@@ -408,7 +420,7 @@ impl YantraApp {
             // ASCII-only labels: egui's default font lacks box-drawing/emoji glyphs.
             ui.horizontal_wrapped(|ui| {
                 ui.menu_button("Add", |ui| {
-                    for t in ["button", "slider", "toggle", "readout", "label", "color"] {
+                    for t in ["button", "slider", "toggle", "readout", "label", "color", "select", "frame"] {
                         if ui.button(t).clicked() {
                             add = Some(t.to_string());
                             ui.close_menu();
@@ -447,9 +459,17 @@ impl YantraApp {
             let mut sh = self.shared.borrow_mut();
             if let Some(t) = add {
                 push_undo(&mut sh);
-                add_widget(&mut sh.spec, &t);
-                let n = sh.spec.get("widgets").and_then(|w| w.as_array()).map(|a| a.len()).unwrap_or(0);
-                sh.selected = if n > 0 { vec![n - 1] } else { vec![] };
+                if t == "frame" {
+                    add_frame(&mut sh.spec);
+                    let n = sh.spec.get("frames").and_then(|f| f.as_array()).map(|a| a.len()).unwrap_or(0);
+                    sh.selected.clear();
+                    sh.selected_frame = if n > 0 { Some(n - 1) } else { None };
+                } else {
+                    add_widget(&mut sh.spec, &t);
+                    let n = sh.spec.get("widgets").and_then(|w| w.as_array()).map(|a| a.len()).unwrap_or(0);
+                    sh.selected_frame = None;
+                    sh.selected = if n > 0 { vec![n - 1] } else { vec![] };
+                }
             }
             if do_delete && !sh.selected.is_empty() {
                 push_undo(&mut sh);
@@ -459,6 +479,14 @@ impl YantraApp {
                     delete_widget(&mut sh.spec, *i);
                 }
                 sh.selected.clear();
+            } else if do_delete {
+                if let Some(fi) = sh.selected_frame {
+                    push_undo(&mut sh);
+                    if let Some(a) = sh.spec.get_mut("frames").and_then(|f| f.as_array_mut()) {
+                        if fi < a.len() { a.remove(fi); }
+                    }
+                    sh.selected_frame = None;
+                }
             }
             if let Some(key) = align {
                 push_undo(&mut sh);
@@ -613,6 +641,7 @@ impl YantraApp {
                     sh.marquee = None;
                 }
                 if let Some((i, sh_held)) = click_sel {
+                    sh.selected_frame = None;
                     if sh_held {
                         if let Some(p) = sh.selected.iter().position(|x| *x == i) {
                             sh.selected.remove(p);
@@ -624,6 +653,7 @@ impl YantraApp {
                     }
                 } else if clicked_empty {
                     sh.selected.clear();
+                    sh.selected_frame = None;
                 }
                 if let Some((i, resize, start)) = begin {
                     if resize {
@@ -651,6 +681,11 @@ impl YantraApp {
         egui::SidePanel::right("ed_inspector").default_width(230.0).show(ctx, |ui| {
             let mut sh = self.shared.borrow_mut();
             let count = sh.spec.get("widgets").and_then(|w| w.as_array()).map(|a| a.len()).unwrap_or(0);
+            let fcount = sh.spec.get("frames").and_then(|f| f.as_array()).map(|a| a.len()).unwrap_or(0);
+            // frame ids (for the membership dropdown)
+            let frame_ids: Vec<String> = (0..fcount)
+                .map(|i| sh.spec["frames"][i].get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                .collect();
 
             ui.add_space(4.0);
             ui.strong("Layers");
@@ -659,7 +694,28 @@ impl YantraApp {
             let mut del: Option<usize> = None;
             let mut move_up: Option<usize> = None;
             let mut move_down: Option<usize> = None;
+            let mut sel_frame: Option<usize> = None;
+            let mut hide_frame: Option<usize> = None;
+            let mut del_frame: Option<usize> = None;
             egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                // frames first
+                for fi in (0..fcount).rev() {
+                    let f = &sh.spec["frames"][fi];
+                    let nm = f.get("name").and_then(|n| n.as_str()).or_else(|| f.get("id").and_then(|n| n.as_str())).unwrap_or("").to_string();
+                    let hidden = f.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+                    let is_sel = sh.selected_frame == Some(fi);
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false)).on_hover_text("Show/hide").clicked() {
+                            hide_frame = Some(fi);
+                        }
+                        if ui.selectable_label(is_sel, format!("[ ] {nm}")).clicked() {
+                            sel_frame = Some(fi);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("x").on_hover_text("Delete frame").clicked() { del_frame = Some(fi); }
+                        });
+                    });
+                }
                 // top widget = last in array (painted last); list top-down
                 for i in (0..count).rev() {
                     let w = &sh.spec["widgets"][i];
@@ -685,7 +741,24 @@ impl YantraApp {
                     });
                 }
             });
+            if let Some(fi) = sel_frame {
+                sh.selected.clear();
+                sh.selected_frame = Some(fi);
+            }
+            if let Some(fi) = hide_frame {
+                push_undo(&mut sh);
+                let cur = sh.spec["frames"][fi].get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+                sh.spec["frames"][fi]["hidden"] = json!(!cur);
+            }
+            if let Some(fi) = del_frame {
+                push_undo(&mut sh);
+                if let Some(a) = sh.spec.get_mut("frames").and_then(|f| f.as_array_mut()) {
+                    if fi < a.len() { a.remove(fi); }
+                }
+                sh.selected_frame = None;
+            }
             if let Some(i) = toggle_sel {
+                sh.selected_frame = None;
                 if shift {
                     if let Some(p) = sh.selected.iter().position(|x| *x == i) { sh.selected.remove(p); }
                     else { sh.selected.push(i); }
@@ -712,6 +785,18 @@ impl YantraApp {
 
             ui.separator();
             ui.strong("Properties");
+
+            // frame inspector
+            if let Some(fi) = sh.selected_frame {
+                if fi >= fcount {
+                    sh.selected_frame = None;
+                    return;
+                }
+                let f = sh.spec["frames"][fi].clone();
+                edit_frame_props(ui, &mut sh, fi, &f);
+                return;
+            }
+
             let sel = sh.selected.clone();
             if sel.len() != 1 {
                 ui.weak(if sel.is_empty() { "No selection" } else { "Multiple selected" });
@@ -727,6 +812,8 @@ impl YantraApp {
             let (mut x, mut y, mut ww, mut hh) = (num(&w, "x", 0.0), num(&w, "y", 0.0), num(&w, "w", 30.0), num(&w, "h", 48.0));
             let mut ah = anchor(&w, "anchorH", "scale");
             let mut av = anchor(&w, "anchorV", "start");
+            // current frame membership ("" = root)
+            let mut member = w.get("frame").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let mut changed = false;
             let mut snapshot = false; // gesture start → one undo entry
 
@@ -761,6 +848,18 @@ impl YantraApp {
                     if *cur != before { snapshot = true; changed = true; }
                     ui.end_row();
                 }
+                // frame membership
+                ui.label("in frame");
+                let before = member.clone();
+                let shown = if member.is_empty() { "(root)".to_string() } else { member.clone() };
+                egui::ComboBox::from_id_salt("memb").selected_text(shown).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut member, String::new(), "(root)");
+                    for fid in &frame_ids {
+                        ui.selectable_value(&mut member, fid.clone(), fid.as_str());
+                    }
+                });
+                if member != before { snapshot = true; changed = true; }
+                ui.end_row();
             });
             if changed {
                 if snapshot { push_undo(&mut sh); }
@@ -773,8 +872,74 @@ impl YantraApp {
                 wm["h"] = json!(r2(hh));
                 wm["anchorH"] = json!(ah);
                 wm["anchorV"] = json!(av);
+                if member.is_empty() {
+                    wm.as_object_mut().map(|o| o.remove("frame"));
+                } else {
+                    wm["frame"] = json!(member);
+                }
             }
         });
+    }
+}
+
+/// Frame property editor (name, geometry, anchors, clip), used by the inspector.
+fn edit_frame_props(ui: &mut egui::Ui, sh: &mut Shared, fi: usize, f: &Value) {
+    let mut name = f.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mut id = f.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let (mut x, mut y, mut ww, mut hh) = (num(f, "x", 0.0), num(f, "y", 0.0), num(f, "w", 40.0), num(f, "h", 40.0));
+    let mut ah = anchor(f, "anchorH", "scale");
+    let mut av = anchor(f, "anchorV", "scale");
+    let mut clip = f.get("clip").and_then(|c| c.as_bool()).unwrap_or(true);
+    let mut changed = false;
+    let mut snapshot = false;
+
+    ui.add_space(2.0);
+    ui.label(RichText::new("frame").weak());
+    egui::Grid::new("fprops").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
+        ui.label("id");
+        let r = ui.text_edit_singleline(&mut id);
+        if r.gained_focus() { snapshot = true; }
+        if r.changed() { changed = true; }
+        ui.end_row();
+        ui.label("name");
+        let r = ui.text_edit_singleline(&mut name);
+        if r.gained_focus() { snapshot = true; }
+        if r.changed() { changed = true; }
+        ui.end_row();
+        for (lbl, v) in [("x", &mut x), ("y", &mut y), ("w", &mut ww), ("h", &mut hh)] {
+            ui.label(lbl);
+            let r = ui.add(egui::DragValue::new(v).speed(0.5));
+            if r.drag_started() { snapshot = true; }
+            if r.changed() { changed = true; }
+            ui.end_row();
+        }
+        for (lbl, cur, gid) in [("anchor H", &mut ah, "fah"), ("anchor V", &mut av, "fav")] {
+            ui.label(lbl);
+            let before = cur.clone();
+            egui::ComboBox::from_id_salt(gid).selected_text(cur.as_str()).show_ui(ui, |ui| {
+                for opt in ["scale", "start", "center", "end", "stretch"] {
+                    ui.selectable_value(cur, opt.to_string(), opt);
+                }
+            });
+            if *cur != before { snapshot = true; changed = true; }
+            ui.end_row();
+        }
+        ui.label("clip");
+        if ui.checkbox(&mut clip, "").changed() { snapshot = true; changed = true; }
+        ui.end_row();
+    });
+    if changed {
+        if snapshot { push_undo(sh); }
+        let fm = &mut sh.spec["frames"][fi];
+        fm["id"] = json!(id);
+        fm["name"] = json!(name);
+        fm["x"] = json!(r2(x));
+        fm["y"] = json!(r2(y));
+        fm["w"] = json!(r2(ww));
+        fm["h"] = json!(r2(hh));
+        fm["anchorH"] = json!(ah);
+        fm["anchorV"] = json!(av);
+        fm["clip"] = json!(clip);
     }
 }
 
@@ -971,9 +1136,27 @@ fn add_widget(spec: &mut Value, ty: &str) {
     let arr = spec.as_object_mut().unwrap().entry("widgets").or_insert(json!([]));
     if let Some(a) = arr.as_array_mut() {
         let n = a.iter().filter(|w| w.get("type").and_then(|t| t.as_str()) == Some(ty)).count() + 1;
-        a.push(json!({
+        let mut w = json!({
             "type": ty, "name": format!("{ty}{n}"), "label": ty,
             "x": 4, "y": 8, "w": 30, "h": 48, "anchorH": "scale", "anchorV": "start"
+        });
+        if ty == "select" {
+            // a starter selector: two options, no actions wired yet
+            w["options"] = json!([{ "label": "A" }, { "label": "B" }]);
+        }
+        a.push(w);
+    }
+}
+fn add_frame(spec: &mut Value) {
+    if !spec.is_object() {
+        *spec = json!({});
+    }
+    let arr = spec.as_object_mut().unwrap().entry("frames").or_insert(json!([]));
+    if let Some(a) = arr.as_array_mut() {
+        let n = a.len() + 1;
+        a.push(json!({
+            "id": format!("frame{n}"), "name": format!("frame{n}"),
+            "x": 4, "y": 8, "w": 40, "h": 40, "anchorH": "scale", "anchorV": "scale", "clip": true
         }));
     }
 }
@@ -1140,6 +1323,35 @@ fn draw_interact_widget(
                 });
             if changed {
                 emit(json!({ "kind": "value", "name": name, "value": *v }));
+            }
+        }
+        "select" => {
+            let opts = w.get("options").and_then(|o| o.as_array()).cloned().unwrap_or_default();
+            let active = app.selects.get(name).copied();
+            let mut pick: Option<usize> = None;
+            egui::Frame::none()
+                .fill(bg.unwrap_or(ui.visuals().faint_bg_color))
+                .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::symmetric(8.0, 5.0))
+                .show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    if !label.is_empty() {
+                        ui.label(RichText::new(label).size(11.0).color(muted));
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        for (oi, o) in opts.iter().enumerate() {
+                            let olabel = o.get("label").and_then(|l| l.as_str()).unwrap_or("?");
+                            if ui.selectable_label(active == Some(oi), olabel).clicked() {
+                                pick = Some(oi);
+                            }
+                        }
+                    });
+                });
+            if let Some(oi) = pick {
+                app.selects.insert(name.to_string(), oi);
+                let olabel = opts.get(oi).and_then(|o| o.get("label")).and_then(|l| l.as_str()).unwrap_or("").to_string();
+                emit(json!({ "kind": "select", "name": name, "index": oi, "value": olabel }));
             }
         }
         "color" => {
