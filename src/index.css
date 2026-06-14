@@ -48,6 +48,15 @@
   --success: oklch(0.696 0.17 162.48);
 }
 
+/* Accent presets: re-point --primary/--ring (the base neutral stays zinc). Placed
+   after :root/.dark so they win the same-specificity tie in both modes. `zinc` has
+   no rule (uses the base). See src/lib/theme.ts. */
+[data-accent="blue"] { --primary: oklch(0.62 0.19 259); --primary-foreground: oklch(0.985 0 0); --ring: oklch(0.62 0.19 259); }
+[data-accent="green"] { --primary: oklch(0.7 0.17 162); --primary-foreground: oklch(0.985 0 0); --ring: oklch(0.7 0.17 162); }
+[data-accent="violet"] { --primary: oklch(0.61 0.22 293); --primary-foreground: oklch(0.985 0 0); --ring: oklch(0.61 0.22 293); }
+[data-accent="rose"] { --primary: oklch(0.64 0.23 16); --primary-foreground: oklch(0.985 0 0); --ring: oklch(0.64 0.23 16); }
+[data-accent="amber"] { --primary: oklch(0.77 0.16 70); --primary-foreground: oklch(0.21 0.006 285.885); --ring: oklch(0.77 0.16 70); }
+
 @theme inline {
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
