@@ -9,16 +9,17 @@ import { useEffect, useRef } from "react";
 import init, { start } from "../../yantra-wasm/pkg/yantra_wasm";
 import wasmUrl from "../../yantra-wasm/pkg/yantra_wasm_bg.wasm?url";
 
-export function WasmYantraCanvas() {
+export function WasmYantraCanvas({ spec }: { spec: unknown }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       await init(wasmUrl);
       if (cancelled || !ref.current) return;
-      start(ref.current);
+      start(ref.current, JSON.stringify(spec ?? {}));
     })().catch((e) => console.error("yantra-wasm mount failed", e));
     return () => { cancelled = true; };
-  }, []);
+    // re-mount when the surface changes (slice 1: a live set_spec bridge comes later)
+  }, [spec]);
   return <canvas ref={ref} className="h-full w-full" />;
 }
