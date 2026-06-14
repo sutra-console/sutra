@@ -37,7 +37,7 @@ async function runAction(a: YantraAction | undefined, value?: string): Promise<v
     return;
   }
   if ("out" in a) {
-    const lvl = Math.max(0, Math.min(255, Math.round(Number(value ?? 0))));
+    const lvl = Math.max(0, Math.min(255, Math.round(Number(a.out.value ?? value ?? 0))));
     const idx = a.out.index ?? 0;
     if (a.out.kind === "pwm") await outputPwm(idx, lvl);
     else if (a.out.kind === "set") await outputSet(idx, lvl > 0);
@@ -112,6 +112,7 @@ export function YantraCanvas({
   // --- Lua scripting: per-surface VM ticked in the backend ---------------------
   // Presentation overrides written by scripts (name → {color,fg,label,image,hidden,…}).
   const [overrides, setOverrides] = useState<Record<string, Record<string, unknown>>>({});
+  const [scriptLog, setScriptLog] = useState<string[]>([]); // log()/errors for the log view
   const hasScripts = !!spec.script || widgets.some((w) => w.script);
   // refs so the fixed-rate tick always sees the latest vars/spec without re-arming.
   const varsRef = useRef(vars); varsRef.current = vars;
@@ -138,8 +139,9 @@ export function YantraCanvas({
         }
         setOverrides(ov); // overrides are per-tick (scripts re-assert each tick via update())
         for (const a of out.sends ?? []) runAction(a).catch(() => {});
-      } catch {
-        /* keep ticking; a bad eval shouldn't wedge the surface */
+        if (out.logs?.length) setScriptLog((l) => [...l, ...out.logs].slice(-50));
+      } catch (e) {
+        setScriptLog((l) => [...l, `! ${e}`].slice(-50)); // keep ticking; surface the error
       }
     }, 100);
     return () => { alive = false; clearInterval(id); };
@@ -147,16 +149,35 @@ export function YantraCanvas({
   const ovOf = (w: YantraWidget): Record<string, unknown> | undefined => (w.name ? overrides[w.name] : undefined);
 
   return (
-    <div className="scroll-stable h-full overflow-auto">
-      {/* inner surface = the content area (scrollbar gutter excluded); widgets'
-          % resolves against this, matching the editor's measured surface. */}
-      <div className="relative h-full">
-        <CanvasNodes
-          container="root" widgets={widgets} frames={frames}
-          activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
-          disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish} ovOf={ovOf}
-        />
+    <div className="flex h-full flex-col">
+      <div className="scroll-stable min-h-0 flex-1 overflow-auto">
+        {/* inner surface = the content area (scrollbar gutter excluded); widgets'
+            % resolves against this, matching the editor's measured surface. */}
+        <div className="relative h-full">
+          <CanvasNodes
+            container="root" widgets={widgets} frames={frames}
+            activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
+            disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish} ovOf={ovOf}
+          />
+        </div>
       </div>
+      {hasScripts && (
+        <div className="shrink-0 border-t bg-muted/20 px-2 py-1">
+          <div className="mb-0.5 flex items-center justify-between text-[10px] text-muted-foreground">
+            <span>console — script print() / log()</span>
+            <button type="button" className="hover:text-foreground" onClick={() => setScriptLog([])}>clear</button>
+          </div>
+          <div className="max-h-24 overflow-auto font-mono text-[10px] leading-tight">
+            {scriptLog.length === 0 ? (
+              <div className="italic text-muted-foreground/60">— no output yet —</div>
+            ) : (
+              scriptLog.map((l, i) => (
+                <div key={i} className={l.startsWith("!") ? "text-destructive" : "text-muted-foreground"}>{l}</div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

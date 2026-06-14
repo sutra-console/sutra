@@ -653,7 +653,8 @@ export type YantraAction =
   | { cfg: { key: number; bytes?: number[]; str?: string } }
   // drive a device OUTPUT with the action's value (0–255): rgb = grey level on the
   // pixel, pwm = duty, set = on/off (value > 0). `index` = the output's table index.
-  | { out: { index: number; kind?: "rgb" | "pwm" | "set" } };
+  // `value` carries the level inline (Lua `send`); else the caller's value is used.
+  | { out: { index: number; kind?: "rgb" | "pwm" | "set"; value?: number } };
 
 /** A data source ("stream") a widget can be filled from. Loose string by design so
  *  new sources slot in. Wired now: "uart" (current connection console), "var:<name>"
