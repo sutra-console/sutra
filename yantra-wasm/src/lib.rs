@@ -25,6 +25,26 @@ struct Shared {
     selected: Vec<usize>,
     undo: Vec<Value>,
     redo: Vec<Value>,
+    drag: Option<Drag>,
+}
+
+/// An in-progress move/resize. Captured once at drag-start so we map the *absolute*
+/// pointer delta onto the original geometry — pointer-following, never accumulating.
+#[derive(Clone)]
+struct Drag {
+    resize: bool, // false = move whole selection, true = resize the single item
+    start: Pos2,  // pointer pos at drag start
+    items: Vec<DragItem>,
+}
+#[derive(Clone)]
+struct DragItem {
+    idx: usize,
+    ah: String,
+    av: String,
+    sx: f32, // original resolved px geometry within the canvas
+    sy: f32,
+    w: f32,
+    h: f32,
 }
 
 thread_local! {
@@ -270,8 +290,9 @@ impl YantraApp {
         let (mut do_delete, mut do_save, mut do_undo, mut do_redo) = (false, false, undo_key, redo_key);
         let mut align: Option<&str> = None;
         egui::TopBottomPanel::top("ed_toolbar").show(ctx, |ui| {
+            // ASCII-only labels: egui's default font lacks box-drawing/emoji glyphs.
             ui.horizontal_wrapped(|ui| {
-                ui.menu_button("➕ Add", |ui| {
+                ui.menu_button("Add", |ui| {
                     for t in ["button", "slider", "toggle", "readout", "label", "color"] {
                         if ui.button(t).clicked() {
                             add = Some(t.to_string());
@@ -279,30 +300,30 @@ impl YantraApp {
                         }
                     }
                 });
-                if ui.button("🗑").on_hover_text("Delete selected").clicked() {
+                if ui.button("Delete").on_hover_text("Delete selected").clicked() {
                     do_delete = true;
                 }
                 ui.separator();
-                if ui.button("↶").on_hover_text("Undo").clicked() {
+                if ui.button("Undo").clicked() {
                     do_undo = true;
                 }
-                if ui.button("↷").on_hover_text("Redo").clicked() {
+                if ui.button("Redo").clicked() {
                     do_redo = true;
                 }
                 ui.separator();
+                ui.label("Align");
                 for (lbl, key, tip) in [
-                    ("⊢", "left", "Align left"), ("｜", "cx", "Align center"), ("⊣", "right", "Align right"),
-                    ("⊤", "top", "Align top"), ("－", "cy", "Align middle"), ("⊥", "bottom", "Align bottom"),
+                    ("L", "left", "Align left"), ("C", "cx", "Align centers (horizontal)"), ("R", "right", "Align right"),
+                    ("T", "top", "Align top"), ("M", "cy", "Align middles (vertical)"), ("B", "bottom", "Align bottom"),
                 ] {
                     if ui.button(lbl).on_hover_text(tip).clicked() {
                         align = Some(key);
                     }
                 }
                 ui.separator();
-                if ui.button("💾 Save").clicked() {
+                if ui.button("Save").clicked() {
                     do_save = true;
                 }
-                ui.weak("edit");
             });
         });
 
@@ -352,11 +373,16 @@ impl YantraApp {
                 let widgets = self.shared.borrow().spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
                 let selected = self.shared.borrow().selected.clone();
                 let shift = ui.input(|i| i.modifiers.shift);
-
-                let mut click_sel: Option<(usize, bool)> = None; // (index, shift)
-                let mut drag_delta: Option<Vec2> = None; // move whole selection
-                let mut resize: Option<(usize, Vec2)> = None;
                 let accent = ui.visuals().selection.stroke.color;
+
+                // empty-canvas click clears selection. Register FIRST so the widget
+                // boxes (added after) sit on top and win the pointer.
+                let bg_resp = ui.interact(canvas, egui::Id::new("ed_bg"), Sense::click());
+
+                let mut click_sel: Option<(usize, bool)> = None; // (index, shift) toggle/select
+                let mut begin: Option<(usize, bool, Pos2)> = None; // (index, resize?, start pos)
+                let mut pointer: Option<Pos2> = None; // live pointer while dragging
+                let mut stop = false;
 
                 for (i, w) in widgets.iter().enumerate() {
                     if w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
@@ -369,15 +395,14 @@ impl YantraApp {
                     if resp.clicked() {
                         click_sel = Some((i, shift));
                     }
-                    if resp.drag_started() && !is_sel {
-                        click_sel = Some((i, shift));
+                    if resp.drag_started() {
+                        begin = Some((i, false, resp.interact_pointer_pos().unwrap_or(rect.min)));
                     }
-                    if resp.dragged() && (is_sel || click_sel.map(|c| c.0 == i).unwrap_or(false)) {
-                        let mut d = resp.drag_delta();
-                        if shift {
-                            d = Vec2::new((d.x / 8.0).round() * 8.0, (d.y / 8.0).round() * 8.0);
-                        }
-                        drag_delta = Some(d);
+                    if resp.dragged() {
+                        pointer = resp.interact_pointer_pos();
+                    }
+                    if resp.drag_stopped() {
+                        stop = true;
                     }
                     // box
                     let stroke = if is_sel { Stroke::new(2.0, accent) } else { Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color) };
@@ -394,47 +419,102 @@ impl YantraApp {
                         let h = Rect::from_min_size(rect.max - Vec2::splat(11.0), Vec2::splat(11.0));
                         let hr = ui.interact(h, id.with("rs"), Sense::drag());
                         ui.painter().rect_filled(h, Rounding::same(2.0), accent);
+                        if hr.drag_started() {
+                            begin = Some((i, true, hr.interact_pointer_pos().unwrap_or(rect.max)));
+                        }
                         if hr.dragged() {
-                            let mut d = hr.drag_delta();
-                            if shift {
-                                d = Vec2::new((d.x / 8.0).round() * 8.0, (d.y / 8.0).round() * 8.0);
-                            }
-                            resize = Some((i, d));
+                            pointer = hr.interact_pointer_pos();
+                        }
+                        if hr.drag_stopped() {
+                            stop = true;
                         }
                     }
                 }
-                // empty-canvas click clears selection
-                let bg_resp = ui.interact(canvas, egui::Id::new("ed_bg"), Sense::click());
-                let clicked_empty = bg_resp.clicked() && click_sel.is_none();
+                let clicked_empty = bg_resp.clicked() && click_sel.is_none() && begin.is_none();
 
-                if click_sel.is_some() || drag_delta.is_some() || resize.is_some() || clicked_empty {
-                    let mut sh = self.shared.borrow_mut();
-                    if let Some((i, sh_held)) = click_sel {
-                        if sh_held {
-                            if let Some(p) = sh.selected.iter().position(|x| *x == i) {
-                                sh.selected.remove(p);
-                            } else {
-                                sh.selected.push(i);
-                            }
-                        } else if !sh.selected.contains(&i) {
-                            sh.selected = vec![i];
+                let mut sh = self.shared.borrow_mut();
+                // selection update (plain click / shift-toggle / empty clear)
+                if let Some((i, sh_held)) = click_sel {
+                    if sh_held {
+                        if let Some(p) = sh.selected.iter().position(|x| *x == i) {
+                            sh.selected.remove(p);
+                        } else {
+                            sh.selected.push(i);
                         }
-                    } else if clicked_empty {
-                        sh.selected.clear();
+                    } else if !sh.selected.contains(&i) {
+                        sh.selected = vec![i];
                     }
-                    if let Some(d) = drag_delta {
-                        push_undo(&mut sh);
-                        let sel = sh.selected.clone();
-                        for i in sel {
-                            move_widget(&mut sh.spec, i, d, cw, ch);
-                        }
+                } else if clicked_empty {
+                    sh.selected.clear();
+                }
+                // drag start: settle selection, snapshot undo, capture origin geometry
+                if let Some((i, resize, start)) = begin {
+                    if resize {
+                        // keep current selection (single)
+                    } else if !sh.selected.contains(&i) {
+                        sh.selected = if shift { let mut s = sh.selected.clone(); s.push(i); s } else { vec![i] };
                     }
-                    if let Some((i, d)) = resize {
-                        push_undo(&mut sh);
-                        resize_widget(&mut sh.spec, i, d, cw, ch);
-                    }
+                    push_undo(&mut sh);
+                    let idxs: Vec<usize> = if resize { vec![i] } else { sh.selected.clone() };
+                    sh.drag = Some(capture_drag(resize, start, &sh.spec, &idxs, cw, ch));
+                }
+                // live drag: map absolute pointer delta onto captured origins (1:1)
+                if let (Some(pos), Some(drag)) = (pointer, sh.drag.clone()) {
+                    let total = pos - drag.start;
+                    apply_drag(&mut sh.spec, &drag, total, shift, cw, ch);
+                }
+                if stop {
+                    sh.drag = None;
                 }
             });
+    }
+}
+
+/// Snapshot the resolved px geometry of `idxs` at drag start.
+fn capture_drag(resize: bool, start: Pos2, spec: &Value, idxs: &[usize], cw: f32, ch: f32) -> Drag {
+    let mut items = Vec::new();
+    if let Some(arr) = spec.get("widgets").and_then(|w| w.as_array()) {
+        for &idx in idxs {
+            if let Some(w) = arr.get(idx) {
+                let ah = anchor(w, "anchorH", "scale");
+                let av = anchor(w, "anchorV", "start");
+                let dw = if ah == "scale" { 25.0 } else { 100.0 };
+                let dh = if av == "scale" { 25.0 } else { 48.0 };
+                let (sx, ww) = resolve_axis(&ah, num(w, "x", 0.0), num(w, "w", dw), cw);
+                let (sy, hh) = resolve_axis(&av, num(w, "y", 0.0), num(w, "h", dh), ch);
+                items.push(DragItem { idx, ah, av, sx, sy, w: ww, h: hh });
+            }
+        }
+    }
+    Drag { resize, start, items }
+}
+fn snap(v: f32, on: bool) -> f32 {
+    if on { (v / 8.0).round() * 8.0 } else { v }
+}
+/// Apply the total pointer delta to the captured drag, writing stored units back.
+fn apply_drag(spec: &mut Value, drag: &Drag, total: Vec2, snap_on: bool, cw: f32, ch: f32) {
+    let Some(arr) = spec.get_mut("widgets").and_then(|w| w.as_array_mut()) else { return };
+    for it in &drag.items {
+        let Some(w) = arr.get_mut(it.idx) else { continue };
+        if drag.resize {
+            let nw = snap((it.w + total.x).max(8.0), snap_on);
+            let nh = snap((it.h + total.y).max(8.0), snap_on);
+            let (x, ww) = store_axis(&it.ah, it.sx, nw, cw);
+            let (y, hh) = store_axis(&it.av, it.sy, nh, ch);
+            w["x"] = json!(r2(x));
+            w["w"] = json!(r2(ww));
+            w["y"] = json!(r2(y));
+            w["h"] = json!(r2(hh));
+        } else {
+            let nx = snap(it.sx + total.x, snap_on);
+            let ny = snap(it.sy + total.y, snap_on);
+            let (x, ww) = store_axis(&it.ah, nx, it.w, cw);
+            let (y, hh) = store_axis(&it.av, ny, it.h, ch);
+            w["x"] = json!(r2(x));
+            w["w"] = json!(r2(ww));
+            w["y"] = json!(r2(y));
+            w["h"] = json!(r2(hh));
+        }
     }
 }
 
@@ -493,36 +573,6 @@ fn delete_widget(spec: &mut Value, i: usize) {
             a.remove(i);
         }
     }
-}
-fn move_widget(spec: &mut Value, i: usize, d: Vec2, cw: f32, ch: f32) {
-    let Some(w) = spec.get_mut("widgets").and_then(|x| x.as_array_mut()).and_then(|a| a.get_mut(i)) else { return };
-    let a_h = anchor(w, "anchorH", "scale");
-    let a_v = anchor(w, "anchorV", "start");
-    let dw = if a_h == "scale" { 25.0 } else { 100.0 };
-    let dh = if a_v == "scale" { 25.0 } else { 48.0 };
-    let (sx, ww) = resolve_axis(&a_h, num(w, "x", 0.0), num(w, "w", dw), cw);
-    let (sy, hh) = resolve_axis(&a_v, num(w, "y", 0.0), num(w, "h", dh), ch);
-    let (a, b) = store_axis(&a_h, sx + d.x, ww, cw);
-    let (c, e) = store_axis(&a_v, sy + d.y, hh, ch);
-    w["x"] = json!(r2(a));
-    w["w"] = json!(r2(b));
-    w["y"] = json!(r2(c));
-    w["h"] = json!(r2(e));
-}
-fn resize_widget(spec: &mut Value, i: usize, d: Vec2, cw: f32, ch: f32) {
-    let Some(w) = spec.get_mut("widgets").and_then(|x| x.as_array_mut()).and_then(|a| a.get_mut(i)) else { return };
-    let a_h = anchor(w, "anchorH", "scale");
-    let a_v = anchor(w, "anchorV", "start");
-    let dw = if a_h == "scale" { 25.0 } else { 100.0 };
-    let dh = if a_v == "scale" { 25.0 } else { 48.0 };
-    let (sx, ww) = resolve_axis(&a_h, num(w, "x", 0.0), num(w, "w", dw), cw);
-    let (sy, hh) = resolve_axis(&a_v, num(w, "y", 0.0), num(w, "h", dh), ch);
-    let (a, b) = store_axis(&a_h, sx, (ww + d.x).max(8.0), cw);
-    let (c, e) = store_axis(&a_v, sy, (hh + d.y).max(8.0), ch);
-    w["x"] = json!(r2(a));
-    w["w"] = json!(r2(b));
-    w["y"] = json!(r2(c));
-    w["h"] = json!(r2(e));
 }
 /// Align the selection (in stored units, like the React editor's align).
 fn align_selected(sh: &mut Shared, key: &str) {
