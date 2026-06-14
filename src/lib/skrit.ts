@@ -706,6 +706,10 @@ export interface YantraWidget {
   match?: string; // readout/table: regex over the console; capture group 1 is shown (legacy ⇒ bind{source:"uart"})
   bind?: YantraBind; // data-flow: fill this control from a source (readout/label/toggle/slider)
   emit?: YantraEmit; // data-flow (reverse): drive a device output from a watched value
+  script?: string; // Lua transform: (v, vars) → value/attrs published under `name` (wins over bind expr)
+  color?: string; // presentation: background colour (CSS); script-overridable via attr(name,"color",…)
+  fg?: string; // presentation: text colour (CSS)
+  image?: string; // presentation: image src / data-URI (the "image" widget; script-overridable)
   all?: boolean; // table text source: matchAll → one row per match
   source?: YantraSource; // table: an array-valued source ("var:<name>" or a text source with `all`)
   columns?: YantraColumn[]; // table: per-cell row template
@@ -932,9 +936,24 @@ export interface YantraSpec {
   layout?: "grid" | "free"; // legacy (pre-C)
   design?: { w: number; h: number }; // legacy (pre-C anchor reference)
   coordV?: number; // coordinate-model version: 2 = container-relative (Phase C). absent = pre-C grid
+  script?: string; // surface-level Lua: defines `function update(vars) … end`, run each tick
   frames?: YantraFrame[]; // container tree (each has its own bounds; children relative)
   widgets?: YantraWidget[];
 }
+
+/** Result of one yantra Lua tick (mirrors the Rust lua::EvalOut). */
+export interface YantraEval {
+  sets: Record<string, Record<string, unknown>>; // name → { value?, color?, fg?, label?, image?, hidden?, disabled? }
+  sends: YantraAction[]; // actions to dispatch
+  logs: string[]; // script log lines / errors
+}
+/** Run one reactive tick of a surface's Lua scripts in the backend (per-surface VM). */
+export const yantraEval = (
+  key: string,
+  script: string,
+  widgets: { name: string; script: string }[],
+  vars: Record<string, unknown>,
+) => invoke<YantraEval>("yantra_eval", { key, script, widgets, vars });
 export interface YantraDoc {
   file: string; // "gps.yantra"
   doc: YantraSpec;

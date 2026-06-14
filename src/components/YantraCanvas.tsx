@@ -8,7 +8,7 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 
 import { Button } from "@/components/ui/button";
 import {
-  MSG, dataWrite, i2cXfer, invokeCommand, onData, sendCmd, outputRgb, outputPwm, outputSet,
+  MSG, dataWrite, i2cXfer, invokeCommand, onData, sendCmd, outputRgb, outputPwm, outputSet, yantraEval,
   axisStyle, bindOf, computeBus, evalArray, evalBind, evalCell, needsConsole, CURRENT_CONN,
   type AnchorMode, type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
@@ -109,6 +109,43 @@ export function YantraCanvas({
     });
   }, [vars, bufs, disabled, widgets]);
 
+  // --- Lua scripting: per-surface VM ticked in the backend ---------------------
+  // Presentation overrides written by scripts (name → {color,fg,label,image,hidden,…}).
+  const [overrides, setOverrides] = useState<Record<string, Record<string, unknown>>>({});
+  const hasScripts = !!spec.script || widgets.some((w) => w.script);
+  // refs so the fixed-rate tick always sees the latest vars/spec without re-arming.
+  const varsRef = useRef(vars); varsRef.current = vars;
+  const specRef = useRef(spec); specRef.current = spec;
+  const lastTick = useRef(0);
+  useEffect(() => {
+    if (!hasScripts || disabled) return;
+    const key = spec.name || "yantra";
+    let alive = true;
+    const id = setInterval(async () => {
+      const s = specRef.current;
+      const ws = (s.widgets ?? []).filter((w) => w.name && w.script).map((w) => ({ name: w.name!, script: w.script! }));
+      const now = Date.now();
+      const dt = lastTick.current ? now - lastTick.current : 0;
+      lastTick.current = now;
+      try {
+        const out = await yantraEval(key, s.script ?? "", ws, { ...varsRef.current, t: now, dt });
+        if (!alive) return;
+        const ov: Record<string, Record<string, unknown>> = {};
+        for (const [name, attrs] of Object.entries(out.sets ?? {})) {
+          if (!attrs || typeof attrs !== "object") continue;
+          if ((attrs as { value?: unknown }).value !== undefined) publish(name, (attrs as { value?: unknown }).value);
+          ov[name] = attrs as Record<string, unknown>;
+        }
+        setOverrides(ov); // overrides are per-tick (scripts re-assert each tick via update())
+        for (const a of out.sends ?? []) runAction(a).catch(() => {});
+      } catch {
+        /* keep ticking; a bad eval shouldn't wedge the surface */
+      }
+    }, 100);
+    return () => { alive = false; clearInterval(id); };
+  }, [hasScripts, disabled, spec.name]); // eslint-disable-line react-hooks/exhaustive-deps
+  const ovOf = (w: YantraWidget): Record<string, unknown> | undefined => (w.name ? overrides[w.name] : undefined);
+
   return (
     <div className="scroll-stable h-full overflow-auto">
       {/* inner surface = the content area (scrollbar gutter excluded); widgets'
@@ -117,7 +154,7 @@ export function YantraCanvas({
         <CanvasNodes
           container="root" widgets={widgets} frames={frames}
           activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
-          disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish}
+          disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish} ovOf={ovOf}
         />
       </div>
     </div>
@@ -138,7 +175,7 @@ function nodeStyle(n: YantraWidget | YantraFrame): CSSProperties {
 
 // Recursively render the children of one container (root | a frame id | a tab-pane id).
 function CanvasNodes({
-  container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, valueOf, rowsOf, publish,
+  container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, valueOf, rowsOf, publish, ovOf,
 }: {
   container: string; // "root" | frame id | pane id
   widgets: YantraWidget[];
@@ -150,6 +187,7 @@ function CanvasNodes({
   valueOf: (w: YantraWidget) => unknown;
   rowsOf: (w: YantraWidget) => unknown[];
   publish: (name: string, v: unknown) => void;
+  ovOf: (w: YantraWidget) => Record<string, unknown> | undefined;
 }) {
   const isRoot = container === "root";
   const childFrames = frames.filter((f) =>
@@ -159,13 +197,13 @@ function CanvasNodes({
     .map((_, i) => i)
     .filter((i) => {
       const w = widgets[i];
-      if (w.hidden) return false;
+      if (w.hidden || ovOf(w)?.hidden) return false; // static or script-hidden
       return isRoot ? !w.frame && !w.tab : w.tab === container || (w.frame === container && !w.tab);
     });
 
   const sub = (c: string) => (
     <CanvasNodes container={c} widgets={widgets} frames={frames} activeTabOf={activeTabOf}
-      setActiveTabs={setActiveTabs} disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish} />
+      setActiveTabs={setActiveTabs} disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish} ovOf={ovOf} />
   );
 
   return (
@@ -194,9 +232,11 @@ function CanvasNodes({
             </div>
           );
         }
+        const ov = ovOf(w);
+        const bg = (ov?.color as string) ?? w.color;
         return (
-          <div key={i} style={nodeStyle(w)}>
-            <Widget w={w} disabled={disabled} fire={fire} value={valueOf(w)} rows={rowsOf(w)} publish={publish} />
+          <div key={i} style={{ ...nodeStyle(w), ...(bg ? { background: bg } : {}) }}>
+            <Widget w={w} disabled={disabled || !!ov?.disabled} fire={fire} value={ov?.value ?? valueOf(w)} rows={rowsOf(w)} publish={publish} ov={ov} />
           </div>
         );
       })}
@@ -218,6 +258,7 @@ export function Widget({
   value,
   rows,
   publish,
+  ov,
 }: {
   w: YantraWidget;
   disabled?: boolean;
@@ -225,10 +266,16 @@ export function Widget({
   value?: unknown; // bound scalar (undefined = unbound → use internal state)
   rows?: unknown[]; // table row items
   publish?: (name: string, v: unknown) => void; // push live control state to the bus
+  ov?: Record<string, unknown>; // script presentation overrides (label/fg/image/…)
 }) {
   const [on, setOn] = useState(!!w.value);
   const [val, setVal] = useState((w.value ?? w.min ?? 0).toString());
   const bound = value !== undefined;
+  // static field → script override for presentation
+  const label = (ov?.label as string) ?? w.label;
+  const fg = (ov?.fg as string) ?? w.fg;
+  const img = (ov?.image as string) ?? w.image;
+  const fgStyle = fg ? { color: fg } : undefined;
   // publish the initial control value once so emit exprs can reference it immediately
   useEffect(() => {
     if (!w.name || !publish) return;
@@ -242,7 +289,7 @@ export function Widget({
       return (
         <Button className="h-full w-full" size="sm" disabled={disabled}
           title={w.help} onClick={() => fire(w.send)}>
-          {w.label}
+          {label}
         </Button>
       );
 
@@ -257,7 +304,7 @@ export function Widget({
             if (w.name && publish) publish(w.name, next);
             fire(next ? w.on : w.off);
           }}>
-          {w.label}: {state ? "on" : "off"}
+          {label}: {state ? "on" : "off"}
         </Button>
       );
     }
@@ -267,7 +314,7 @@ export function Widget({
       return (
         <div className="flex h-full flex-col justify-center rounded border bg-muted/20 px-2 py-1">
           <div className="flex justify-between text-[11px]">
-            <span className="text-muted-foreground">{w.label}</span>
+            <span className="text-muted-foreground">{label}</span>
             <span className="font-mono tabular-nums">{shown}</span>
           </div>
           <input type="range" disabled={disabled}
@@ -316,7 +363,7 @@ export function Widget({
     case "select":
       return (
         <div className="flex h-full flex-col justify-center rounded border bg-muted/20 px-2 py-1">
-          <div className="text-[11px] text-muted-foreground">{w.label}</div>
+          <div className="text-[11px] text-muted-foreground">{label}</div>
           <div className="flex flex-wrap gap-1">
             {(w.options ?? []).map((o, i) => (
               <button key={i} type="button" disabled={disabled}
@@ -332,16 +379,22 @@ export function Widget({
     case "readout":
       return (
         <div className="flex h-full flex-col justify-center rounded border bg-muted/20 px-2 py-1" title={w.help}>
-          <div className="text-[11px] text-muted-foreground">{w.label}</div>
-          <div className="truncate font-mono text-lg tabular-nums">{asText(value)}</div>
+          <div className="text-[11px] text-muted-foreground">{label}</div>
+          <div className="truncate font-mono text-lg tabular-nums" style={fgStyle}>{asText(value)}</div>
         </div>
       );
 
     case "label":
       return (
-        <div className="flex h-full items-center text-xs font-medium">
-          {bound ? asText(value) : w.label}
+        <div className="flex h-full items-center text-xs font-medium" style={fgStyle}>
+          {bound ? asText(value) : label}
         </div>
+      );
+
+    case "image":
+      return (
+        <img src={img ?? (typeof value === "string" ? value : undefined)} alt={label ?? ""}
+          title={w.help} className="h-full w-full rounded object-contain" />
       );
 
     default:

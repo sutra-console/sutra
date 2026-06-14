@@ -35,7 +35,7 @@ const ANCHORS: AnchorMode[] = ["scale", "start", "center", "end", "stretch"];
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
 const ROW_H = 56; // px per grid row in the editor (renderer auto-sizes rows)
-const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label", "table", "tabs"] as const;
+const WIDGET_TYPES = ["button", "toggle", "slider", "select", "readout", "label", "table", "image", "tabs"] as const;
 // widget types that can be FILLED from a scalar binding (the Data section)
 const SINK_TYPES = ["readout", "label", "toggle", "slider"];
 const tid = () => `t${crypto.randomUUID().slice(0, 5)}`;
@@ -117,6 +117,7 @@ function defaultWidget(type: string, y: number): YantraWidget {
     case "select": return { ...base, w: 50, options: [{ label: "Option", send: "" }] };
     case "readout": return { ...base, w: 50, match: "" };
     case "table": return { ...base, w: 60, h: 160, label: "Table", source: "uart", all: true, match: "", columns: [{ label: "col1", field: "1" }] };
+    case "image": return { ...base, w: 40, h: 40, label: "", image: "" };
     case "tabs": return { ...base, w: 60, h: 220, label: "Tabs", tabs: [{ id: tid(), label: "Tab 1" }, { id: tid(), label: "Tab 2" }] };
     default: return base;
   }
@@ -1181,8 +1182,13 @@ export function YantraEditor({
               <Input className="h-7 w-20 text-xs" type="number" min={1} max={24} value={cols}
                 onChange={(e) => setDraft((d) => ({ ...d, cols: Math.max(1, +e.target.value) }))} />
             </Field>
+            <Field label="Script (Lua) — function update(vars)">
+              <Textarea className="min-h-24 font-mono text-[11px]" placeholder="-- runs every tick&#10;function update(vars)&#10;  -- set(name,v) · attr(name,k,v) · send(action) · log(msg) · state persists&#10;end"
+                value={draft.script ?? ""} onChange={(e) => setDraft((d) => ({ ...d, script: e.target.value }))} />
+            </Field>
             <p className="text-[10px] text-muted-foreground">
-              Click a widget to edit it (shift-click or marquee for many); drag to move, handles to resize.
+              Lua runs in the backend each tick (~100 ms). Scope: <code>vars</code> (bus + <code>t</code>/<code>dt</code>),
+              <code>set</code>, <code>attr</code>, <code>send</code>, <code>log</code>, persistent <code>state</code>.
             </p>
           </div>
         ) : (
@@ -1494,6 +1500,30 @@ function WidgetProps({
           </Button>
         </div>
       )}
+
+      {/* Presentation (static; scripts can override via attr(name,"color"|"fg"|"image",…)) */}
+      <div className="grid grid-cols-2 gap-1">
+        <Field label="Color (bg)">
+          <Input className="h-7 px-1 text-xs" value={w.color ?? ""} placeholder="#222 / red"
+            onChange={(e) => onChange({ color: e.target.value || undefined })} />
+        </Field>
+        <Field label="Text">
+          <Input className="h-7 px-1 text-xs" value={w.fg ?? ""} placeholder="#0f0"
+            onChange={(e) => onChange({ fg: e.target.value || undefined })} />
+        </Field>
+      </div>
+      {w.type === "image" && (
+        <Field label="Image (src / data-URI)">
+          <Input className="h-7 font-mono text-[11px]" value={w.image ?? ""} placeholder="https://… or data:image/…"
+            onChange={(e) => onChange({ image: e.target.value || undefined })} />
+        </Field>
+      )}
+
+      {/* Per-widget Lua transform: (v, vars) -> value/attrs, published under `name` */}
+      <Field label="Script (Lua) — (v, vars) → value">
+        <Textarea className="min-h-16 font-mono text-[11px]" placeholder="-- return a value, or a table {value=…, color=…}&#10;return n and n*0.1 or v"
+          value={w.script ?? ""} onChange={(e) => onChange({ script: e.target.value || undefined })} />
+      </Field>
 
       <Field label="Help (tooltip)">
         <Input className="h-7 text-xs" value={w.help ?? ""} onChange={(e) => onChange({ help: e.target.value })} />
