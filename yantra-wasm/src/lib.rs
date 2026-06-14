@@ -1,36 +1,36 @@
-// Path-B runtime (W2 bridge): egui renders a YantraSpec; the host (React) owns the
-// data-flow and is authoritative. Each change the host pushes a render-state
-// (`set_state`) + theme (`set_theme`); egui draws from it. Widget input is reported
-// back via the host `on_event` callback — the host routes it through runAction / the
-// native mlua tick. So the WASM never touches the device; it's render + input only.
-// Flat render for now (tab/frame nesting is a follow-up); `hidden` overrides honored.
+// egui yantra runtime (Path B): renders a YantraSpec in the webview; the React host
+// owns the data-flow (bus + native mlua) and is authoritative. Two modes:
+//  - interact: draw host-pushed values/overrides; report input via on_event.
+//  - edit: an egui visual editor (multi-select, drag, resize, snap, align, undo) that
+//    saves the spec back via on_save.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
 use eframe::egui;
+use egui::{Align2, Color32, FontId, Margin, Pos2, Rect, RichText, Rounding, Sense, Stroke, Vec2};
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 
 #[derive(Default)]
 struct Shared {
     spec: Value,
-    state: Value, // { widgets: { name: { value, color, fg, label, hidden, disabled } } }
-    theme: Value, // { background, foreground, card, primary, border, … } as "rgb(r, g, b)"
+    state: Value,
+    theme: Value,
     on_event: Option<js_sys::Function>,
     on_save: Option<js_sys::Function>,
     theme_dirty: bool,
     editing: bool,
-    selected: Option<usize>, // edit mode: selected widget index
+    selected: Vec<usize>,
+    undo: Vec<Value>,
+    redo: Vec<Value>,
 }
 
 thread_local! {
     static SHARED: Rc<RefCell<Shared>> = Rc::new(RefCell::new(Shared::default()));
 }
 
-/// Boot egui onto a React-owned canvas. `on_event(json)` is called on widget input;
-/// `on_save(specJson)` on a Save in edit mode.
 #[wasm_bindgen]
 pub fn start(
     canvas: web_sys::HtmlCanvasElement,
@@ -68,14 +68,11 @@ pub fn start(
     Ok(())
 }
 
-/// Host → wasm: the per-widget render state (display values + presentation overrides).
 #[wasm_bindgen]
 pub fn set_state(state_json: String) {
     let v: Value = serde_json::from_str(&state_json).unwrap_or(Value::Null);
     SHARED.with(|s| s.borrow_mut().state = v);
 }
-
-/// Host → wasm: the resolved theme token colours (so egui matches the app).
 #[wasm_bindgen]
 pub fn set_theme(theme_json: String) {
     let v: Value = serde_json::from_str(&theme_json).unwrap_or(Value::Null);
@@ -85,11 +82,15 @@ pub fn set_theme(theme_json: String) {
         sh.theme_dirty = true;
     });
 }
-
-/// Host → wasm: toggle edit mode (editable canvas) vs interact (live surface).
 #[wasm_bindgen]
 pub fn set_edit(editing: bool) {
-    SHARED.with(|s| s.borrow_mut().editing = editing);
+    SHARED.with(|s| {
+        let mut sh = s.borrow_mut();
+        sh.editing = editing;
+        if !editing {
+            sh.selected.clear();
+        }
+    });
 }
 
 struct YantraApp {
@@ -99,7 +100,7 @@ struct YantraApp {
     colors: HashMap<String, [u8; 3]>,
 }
 
-// ---- helpers ----------------------------------------------------------------
+// ---- anchor math (ported from skrit.ts) -------------------------------------
 fn num(w: &Value, k: &str, d: f32) -> f32 {
     w.get(k).and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(d)
 }
@@ -115,7 +116,6 @@ fn resolve_axis(mode: &str, a: f32, b: f32, parent: f32) -> (f32, f32) {
         _ => (a, b),
     }
 }
-/// Inverse of resolve_axis: absolute (start, size) px → stored (a, b). (skrit.ts storeAxis)
 fn store_axis(mode: &str, start: f32, size: f32, parent: f32) -> (f32, f32) {
     match mode {
         "scale" => (
@@ -131,20 +131,30 @@ fn store_axis(mode: &str, start: f32, size: f32, parent: f32) -> (f32, f32) {
 fn r2(n: f32) -> f32 {
     (n * 100.0).round() / 100.0
 }
-fn parse_rgb(s: &str) -> Option<egui::Color32> {
+/// Absolute px rect of a widget within a canvas of (cw, ch).
+fn widget_rect(w: &Value, origin: Pos2, cw: f32, ch: f32) -> Rect {
+    let a_h = anchor(w, "anchorH", "scale");
+    let a_v = anchor(w, "anchorV", "start");
+    let dw = if a_h == "scale" { 25.0 } else { 100.0 };
+    let dh = if a_v == "scale" { 25.0 } else { 48.0 };
+    let (sx, ww) = resolve_axis(&a_h, num(w, "x", 0.0), num(w, "w", dw), cw);
+    let (sy, hh) = resolve_axis(&a_v, num(w, "y", 0.0), num(w, "h", dh), ch);
+    Rect::from_min_size(origin + Vec2::new(sx, sy), Vec2::new(ww.max(8.0), hh.max(8.0)))
+}
+
+// ---- theme ------------------------------------------------------------------
+fn parse_rgb(s: &str) -> Option<Color32> {
     let inner = s.trim().trim_start_matches("rgba").trim_start_matches("rgb");
     let inner = inner.trim_matches(|c| c == '(' || c == ')');
     let mut it = inner.split(',').map(|p| p.trim().parse::<f32>().ok());
     let r = it.next()??;
     let g = it.next()??;
     let b = it.next()??;
-    Some(egui::Color32::from_rgb(r as u8, g as u8, b as u8))
+    Some(Color32::from_rgb(r as u8, g as u8, b as u8))
 }
-fn token(theme: &Value, key: &str) -> Option<egui::Color32> {
+fn token(theme: &Value, key: &str) -> Option<Color32> {
     theme.get(key).and_then(|v| v.as_str()).and_then(parse_rgb)
 }
-
-/// Build egui visuals from the app theme tokens.
 fn apply_visuals(ctx: &egui::Context, theme: &Value) {
     let bg = token(theme, "background");
     let dark = bg.map(|c| (c.r() as u32 + c.g() as u32 + c.b() as u32) < 384).unwrap_or(true);
@@ -155,136 +165,315 @@ fn apply_visuals(ctx: &egui::Context, theme: &Value) {
     if let Some(c) = token(theme, "card") {
         v.window_fill = c;
         v.extreme_bg_color = c;
+        v.widgets.noninteractive.bg_fill = c;
+        v.widgets.inactive.bg_fill = c;
     }
     if let Some(c) = token(theme, "foreground") {
         v.override_text_color = Some(c);
     }
     if let Some(c) = token(theme, "primary") {
-        v.selection.bg_fill = c.gamma_multiply(0.5);
+        v.selection.bg_fill = c.gamma_multiply(0.35);
+        v.selection.stroke.color = c;
         v.hyperlink_color = c;
     }
     if let Some(c) = token(theme, "border") {
-        v.widgets.noninteractive.bg_stroke.color = c;
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, c);
     }
+    v.widgets.inactive.rounding = Rounding::same(6.0);
+    v.widgets.hovered.rounding = Rounding::same(6.0);
+    v.widgets.active.rounding = Rounding::same(6.0);
     ctx.set_visuals(v);
 }
 
 impl eframe::App for YantraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // snapshot shared, drop the borrow before rendering/emitting (on_event re-enters JS)
-        let (spec, state, theme, theme_dirty, on_event, editing) = {
+        let (theme, theme_dirty, editing) = {
             let mut sh = self.shared.borrow_mut();
             let td = sh.theme_dirty;
             sh.theme_dirty = false;
-            (sh.spec.clone(), sh.state.clone(), sh.theme.clone(), td, sh.on_event.clone(), sh.editing)
+            (sh.theme.clone(), td, sh.editing)
         };
         if theme_dirty {
             apply_visuals(ctx, &theme);
         }
-        ctx.request_repaint_after(Duration::from_millis(50)); // reflect host state pushes
+        ctx.request_repaint_after(Duration::from_millis(50));
         if editing {
             self.edit_ui(ctx);
-            return;
-        }
-
-        let wstate = state.get("widgets").cloned().unwrap_or(Value::Null);
-        let emit = |ev: serde_json::Value| {
-            if let Some(f) = &on_event {
-                let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&ev.to_string()));
-            }
-        };
-
-        let screen = ctx.screen_rect();
-        let (cw, ch) = (screen.width(), screen.height());
-        egui::CentralPanel::default().show(ctx, |_ui| {});
-
-        let widgets = spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
-        for w in &widgets {
-            let ty = w.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
-            let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-            // per-widget host state (overrides + display value)
-            let ws = wstate.get(&name).cloned().unwrap_or(Value::Null);
-            let hidden = w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
-                || ws.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
-            if hidden {
-                continue;
-            }
-            let val_str = ws
-                .get("value")
-                .map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    Value::Null => String::new(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_default();
-            let label = ws
-                .get("label")
-                .and_then(|l| l.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| w.get("label").and_then(|l| l.as_str()).unwrap_or("").to_string());
-
-            let dw = if anchor(w, "anchorH", "scale") == "scale" { 25.0 } else { 100.0 };
-            let dh = if anchor(w, "anchorV", "start") == "scale" { 25.0 } else { 48.0 };
-            let (sx, ww) = resolve_axis(&anchor(w, "anchorH", "scale"), num(w, "x", 0.0), num(w, "w", dw), cw);
-            let (sy, hh) = resolve_axis(&anchor(w, "anchorV", "start"), num(w, "y", 0.0), num(w, "h", dh), ch);
-            let pos = screen.min + egui::vec2(sx, sy);
-            let size = egui::vec2(ww.max(1.0), hh.max(1.0));
-
-            egui::Area::new(egui::Id::new(("yw", &name)))
-                .fixed_pos(pos)
-                .order(egui::Order::Middle)
-                .show(ctx, |ui| {
-                    ui.set_max_size(size);
-                    if let Some(c) = ws.get("fg").and_then(|v| v.as_str()).and_then(parse_rgb) {
-                        ui.visuals_mut().override_text_color = Some(c);
-                    }
-                    match ty.as_str() {
-                        "label" | "readout" => {
-                            ui.label(if val_str.is_empty() { label } else { val_str });
-                        }
-                        "button" => {
-                            if ui.add_sized(size, egui::Button::new(&label)).clicked() {
-                                emit(serde_json::json!({ "kind": "press", "name": name }));
-                            }
-                        }
-                        "slider" => {
-                            let init = num(w, "value", num(w, "min", 0.0));
-                            let v = self.sliders.entry(name.clone()).or_insert(init);
-                            let (min, max) = (num(w, "min", 0.0), num(w, "max", 100.0));
-                            if ui.add(egui::Slider::new(v, min..=max).text(&label)).changed() {
-                                emit(serde_json::json!({ "kind": "value", "name": name, "value": *v }));
-                            }
-                        }
-                        "toggle" => {
-                            let on = self.toggles.entry(name.clone()).or_insert(false);
-                            if ui.checkbox(on, &label).changed() {
-                                emit(serde_json::json!({ "kind": "value", "name": name, "value": *on }));
-                            }
-                        }
-                        "color" => {
-                            let c = self.colors.entry(name.clone()).or_insert([128, 128, 128]);
-                            ui.horizontal(|ui| {
-                                if ui.color_edit_button_srgb(c).changed() {
-                                    let hex = format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
-                                    emit(serde_json::json!({ "kind": "value", "name": name, "value": hex }));
-                                }
-                                if !label.is_empty() {
-                                    ui.label(&label);
-                                }
-                            });
-                        }
-                        other => {
-                            ui.weak(format!("{other}?"));
-                        }
-                    }
-                });
+        } else {
+            self.interact_ui(ctx);
         }
     }
 }
 
-// ---- edit mode (E1: select / drag-move / corner-resize / add / delete / save) ----
-const ADDABLE: &[&str] = &["button", "slider", "toggle", "readout", "label", "color"];
+impl YantraApp {
+    // ---- interact: styled widget cards, host-authoritative values ----------
+    fn interact_ui(&mut self, ctx: &egui::Context) {
+        let (spec, state, on_event) = {
+            let sh = self.shared.borrow();
+            (sh.spec.clone(), sh.state.clone(), sh.on_event.clone())
+        };
+        let wstate = state.get("widgets").cloned().unwrap_or(Value::Null);
+        let emit = |ev: Value| {
+            if let Some(f) = &on_event {
+                let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&ev.to_string()));
+            }
+        };
+        let widgets = spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
+        let panel_fill = ctx.style().visuals.panel_fill;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(panel_fill))
+            .show(ctx, |ui| {
+                let canvas = ui.max_rect();
+                for w in &widgets {
+                    let ty = w.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                    let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let ws = wstate.get(&name).cloned().unwrap_or(Value::Null);
+                    let hidden = w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
+                        || ws.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+                    if hidden {
+                        continue;
+                    }
+                    let rect = widget_rect(w, canvas.min, canvas.width(), canvas.height());
+                    let val = ws
+                        .get("value")
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            Value::Null => String::new(),
+                            o => o.to_string(),
+                        })
+                        .unwrap_or_default();
+                    let label = ws
+                        .get("label")
+                        .and_then(|l| l.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| w.get("label").and_then(|l| l.as_str()).unwrap_or("").to_string());
+                    let bg = ws.get("color").and_then(|v| v.as_str()).and_then(parse_rgb);
+                    let fg = ws.get("fg").and_then(|v| v.as_str()).and_then(parse_rgb);
 
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                    child.set_clip_rect(rect);
+                    draw_interact_widget(&mut child, rect, &ty, &name, &label, &val, bg, fg, &emit, w, self);
+                }
+            });
+    }
+
+    // ---- edit: multi-select, drag, resize, snap, align, undo ----------------
+    fn edit_ui(&mut self, ctx: &egui::Context) {
+        // keyboard: ctrl+z / ctrl+shift+z (or ctrl+y)
+        let (undo_key, redo_key) = ctx.input(|i| {
+            let z = i.modifiers.command && i.key_pressed(egui::Key::Z);
+            (z && !i.modifiers.shift, (z && i.modifiers.shift) || (i.modifiers.command && i.key_pressed(egui::Key::Y)))
+        });
+
+        let mut add: Option<String> = None;
+        let (mut do_delete, mut do_save, mut do_undo, mut do_redo) = (false, false, undo_key, redo_key);
+        let mut align: Option<&str> = None;
+        egui::TopBottomPanel::top("ed_toolbar").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.menu_button("➕ Add", |ui| {
+                    for t in ["button", "slider", "toggle", "readout", "label", "color"] {
+                        if ui.button(t).clicked() {
+                            add = Some(t.to_string());
+                            ui.close_menu();
+                        }
+                    }
+                });
+                if ui.button("🗑").on_hover_text("Delete selected").clicked() {
+                    do_delete = true;
+                }
+                ui.separator();
+                if ui.button("↶").on_hover_text("Undo").clicked() {
+                    do_undo = true;
+                }
+                if ui.button("↷").on_hover_text("Redo").clicked() {
+                    do_redo = true;
+                }
+                ui.separator();
+                for (lbl, key, tip) in [
+                    ("⊢", "left", "Align left"), ("｜", "cx", "Align center"), ("⊣", "right", "Align right"),
+                    ("⊤", "top", "Align top"), ("－", "cy", "Align middle"), ("⊥", "bottom", "Align bottom"),
+                ] {
+                    if ui.button(lbl).on_hover_text(tip).clicked() {
+                        align = Some(key);
+                    }
+                }
+                ui.separator();
+                if ui.button("💾 Save").clicked() {
+                    do_save = true;
+                }
+                ui.weak("edit");
+            });
+        });
+
+        // toolbar mutations
+        {
+            let mut sh = self.shared.borrow_mut();
+            if let Some(t) = add {
+                push_undo(&mut sh);
+                add_widget(&mut sh.spec, &t);
+                let n = sh.spec.get("widgets").and_then(|w| w.as_array()).map(|a| a.len()).unwrap_or(0);
+                sh.selected = if n > 0 { vec![n - 1] } else { vec![] };
+            }
+            if do_delete && !sh.selected.is_empty() {
+                push_undo(&mut sh);
+                let mut sel = sh.selected.clone();
+                sel.sort_unstable();
+                for i in sel.iter().rev() {
+                    delete_widget(&mut sh.spec, *i);
+                }
+                sh.selected.clear();
+            }
+            if let Some(key) = align {
+                push_undo(&mut sh);
+                align_selected(&mut sh, key);
+            }
+            if do_undo {
+                undo(&mut sh);
+            }
+            if do_redo {
+                redo(&mut sh);
+            }
+            if do_save {
+                let s = sh.spec.to_string();
+                if let Some(f) = &sh.on_save {
+                    let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&s));
+                }
+            }
+        }
+
+        let bg = ctx.style().visuals.panel_fill;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(bg))
+            .show(ctx, |ui| {
+                let canvas = ui.max_rect();
+                draw_grid(ui, canvas);
+                let (cw, ch) = (canvas.width(), canvas.height());
+                let widgets = self.shared.borrow().spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
+                let selected = self.shared.borrow().selected.clone();
+                let shift = ui.input(|i| i.modifiers.shift);
+
+                let mut click_sel: Option<(usize, bool)> = None; // (index, shift)
+                let mut drag_delta: Option<Vec2> = None; // move whole selection
+                let mut resize: Option<(usize, Vec2)> = None;
+                let accent = ui.visuals().selection.stroke.color;
+
+                for (i, w) in widgets.iter().enumerate() {
+                    if w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
+                        continue;
+                    }
+                    let rect = widget_rect(w, canvas.min, cw, ch);
+                    let is_sel = selected.contains(&i);
+                    let id = egui::Id::new(("ed", i));
+                    let resp = ui.interact(rect, id, Sense::click_and_drag());
+                    if resp.clicked() {
+                        click_sel = Some((i, shift));
+                    }
+                    if resp.drag_started() && !is_sel {
+                        click_sel = Some((i, shift));
+                    }
+                    if resp.dragged() && (is_sel || click_sel.map(|c| c.0 == i).unwrap_or(false)) {
+                        let mut d = resp.drag_delta();
+                        if shift {
+                            d = Vec2::new((d.x / 8.0).round() * 8.0, (d.y / 8.0).round() * 8.0);
+                        }
+                        drag_delta = Some(d);
+                    }
+                    // box
+                    let stroke = if is_sel { Stroke::new(2.0, accent) } else { Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color) };
+                    ui.painter().rect(rect, Rounding::same(5.0), ui.visuals().faint_bg_color, stroke);
+                    let lbl = w
+                        .get("label")
+                        .and_then(|l| l.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| w.get("type").and_then(|t| t.as_str()).unwrap_or("?").to_string());
+                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, lbl, FontId::proportional(11.0), ui.visuals().text_color());
+                    // resize handle on a single selection
+                    if is_sel && selected.len() == 1 {
+                        let h = Rect::from_min_size(rect.max - Vec2::splat(11.0), Vec2::splat(11.0));
+                        let hr = ui.interact(h, id.with("rs"), Sense::drag());
+                        ui.painter().rect_filled(h, Rounding::same(2.0), accent);
+                        if hr.dragged() {
+                            let mut d = hr.drag_delta();
+                            if shift {
+                                d = Vec2::new((d.x / 8.0).round() * 8.0, (d.y / 8.0).round() * 8.0);
+                            }
+                            resize = Some((i, d));
+                        }
+                    }
+                }
+                // empty-canvas click clears selection
+                let bg_resp = ui.interact(canvas, egui::Id::new("ed_bg"), Sense::click());
+                let clicked_empty = bg_resp.clicked() && click_sel.is_none();
+
+                if click_sel.is_some() || drag_delta.is_some() || resize.is_some() || clicked_empty {
+                    let mut sh = self.shared.borrow_mut();
+                    if let Some((i, sh_held)) = click_sel {
+                        if sh_held {
+                            if let Some(p) = sh.selected.iter().position(|x| *x == i) {
+                                sh.selected.remove(p);
+                            } else {
+                                sh.selected.push(i);
+                            }
+                        } else if !sh.selected.contains(&i) {
+                            sh.selected = vec![i];
+                        }
+                    } else if clicked_empty {
+                        sh.selected.clear();
+                    }
+                    if let Some(d) = drag_delta {
+                        push_undo(&mut sh);
+                        let sel = sh.selected.clone();
+                        for i in sel {
+                            move_widget(&mut sh.spec, i, d, cw, ch);
+                        }
+                    }
+                    if let Some((i, d)) = resize {
+                        push_undo(&mut sh);
+                        resize_widget(&mut sh.spec, i, d, cw, ch);
+                    }
+                }
+            });
+    }
+}
+
+// ---- edit helpers -----------------------------------------------------------
+fn draw_grid(ui: &egui::Ui, canvas: Rect) {
+    let col = ui.visuals().widgets.noninteractive.bg_stroke.color.gamma_multiply(0.25);
+    let step = 24.0;
+    let mut x = canvas.min.x;
+    while x < canvas.max.x {
+        ui.painter().line_segment([Pos2::new(x, canvas.min.y), Pos2::new(x, canvas.max.y)], Stroke::new(1.0, col));
+        x += step;
+    }
+    let mut y = canvas.min.y;
+    while y < canvas.max.y {
+        ui.painter().line_segment([Pos2::new(canvas.min.x, y), Pos2::new(canvas.max.x, y)], Stroke::new(1.0, col));
+        y += step;
+    }
+}
+fn push_undo(sh: &mut Shared) {
+    sh.undo.push(sh.spec.clone());
+    if sh.undo.len() > 100 {
+        sh.undo.remove(0);
+    }
+    sh.redo.clear();
+}
+fn undo(sh: &mut Shared) {
+    if let Some(prev) = sh.undo.pop() {
+        sh.redo.push(sh.spec.clone());
+        sh.spec = prev;
+        sh.selected.clear();
+    }
+}
+fn redo(sh: &mut Shared) {
+    if let Some(next) = sh.redo.pop() {
+        sh.undo.push(sh.spec.clone());
+        sh.spec = next;
+        sh.selected.clear();
+    }
+}
 fn add_widget(spec: &mut Value, ty: &str) {
     if !spec.is_object() {
         *spec = json!({});
@@ -305,134 +494,143 @@ fn delete_widget(spec: &mut Value, i: usize) {
         }
     }
 }
-
-impl YantraApp {
-    fn edit_ui(&mut self, ctx: &egui::Context) {
-        // toolbar
-        let mut add: Option<String> = None;
-        let (mut do_delete, mut do_save) = (false, false);
-        egui::TopBottomPanel::top("ed_toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.menu_button("➕ Add", |ui| {
-                    for t in ADDABLE {
-                        if ui.button(*t).clicked() {
-                            add = Some((*t).to_string());
-                            ui.close_menu();
-                        }
-                    }
-                });
-                if ui.button("🗑 Delete").clicked() {
-                    do_delete = true;
-                }
-                ui.separator();
-                if ui.button("💾 Save").clicked() {
-                    do_save = true;
-                }
-                ui.weak("edit");
-            });
-        });
-        {
-            let mut sh = self.shared.borrow_mut();
-            if let Some(t) = add {
-                add_widget(&mut sh.spec, &t);
-                let n = sh.spec.get("widgets").and_then(|w| w.as_array()).map(|a| a.len()).unwrap_or(0);
-                sh.selected = if n > 0 { Some(n - 1) } else { None };
-            }
-            if do_delete {
-                if let Some(i) = sh.selected {
-                    delete_widget(&mut sh.spec, i);
-                    sh.selected = None;
-                }
-            }
-            if do_save {
-                let s = sh.spec.to_string();
-                if let Some(f) = &sh.on_save {
-                    let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&s));
-                }
+fn move_widget(spec: &mut Value, i: usize, d: Vec2, cw: f32, ch: f32) {
+    let Some(w) = spec.get_mut("widgets").and_then(|x| x.as_array_mut()).and_then(|a| a.get_mut(i)) else { return };
+    let a_h = anchor(w, "anchorH", "scale");
+    let a_v = anchor(w, "anchorV", "start");
+    let dw = if a_h == "scale" { 25.0 } else { 100.0 };
+    let dh = if a_v == "scale" { 25.0 } else { 48.0 };
+    let (sx, ww) = resolve_axis(&a_h, num(w, "x", 0.0), num(w, "w", dw), cw);
+    let (sy, hh) = resolve_axis(&a_v, num(w, "y", 0.0), num(w, "h", dh), ch);
+    let (a, b) = store_axis(&a_h, sx + d.x, ww, cw);
+    let (c, e) = store_axis(&a_v, sy + d.y, hh, ch);
+    w["x"] = json!(r2(a));
+    w["w"] = json!(r2(b));
+    w["y"] = json!(r2(c));
+    w["h"] = json!(r2(e));
+}
+fn resize_widget(spec: &mut Value, i: usize, d: Vec2, cw: f32, ch: f32) {
+    let Some(w) = spec.get_mut("widgets").and_then(|x| x.as_array_mut()).and_then(|a| a.get_mut(i)) else { return };
+    let a_h = anchor(w, "anchorH", "scale");
+    let a_v = anchor(w, "anchorV", "start");
+    let dw = if a_h == "scale" { 25.0 } else { 100.0 };
+    let dh = if a_v == "scale" { 25.0 } else { 48.0 };
+    let (sx, ww) = resolve_axis(&a_h, num(w, "x", 0.0), num(w, "w", dw), cw);
+    let (sy, hh) = resolve_axis(&a_v, num(w, "y", 0.0), num(w, "h", dh), ch);
+    let (a, b) = store_axis(&a_h, sx, (ww + d.x).max(8.0), cw);
+    let (c, e) = store_axis(&a_v, sy, (hh + d.y).max(8.0), ch);
+    w["x"] = json!(r2(a));
+    w["w"] = json!(r2(b));
+    w["y"] = json!(r2(c));
+    w["h"] = json!(r2(e));
+}
+/// Align the selection (in stored units, like the React editor's align).
+fn align_selected(sh: &mut Shared, key: &str) {
+    let sel = sh.selected.clone();
+    if sel.len() < 2 {
+        return;
+    }
+    let Some(arr) = sh.spec.get_mut("widgets").and_then(|w| w.as_array_mut()) else { return };
+    // operate in stored x/y/w/h (close enough; assumes a shared anchor family)
+    let xs: Vec<(f32, f32)> = sel.iter().filter_map(|&i| arr.get(i)).map(|w| (num(w, "x", 0.0), num(w, "w", 30.0))).collect();
+    let ys: Vec<(f32, f32)> = sel.iter().filter_map(|&i| arr.get(i)).map(|w| (num(w, "y", 0.0), num(w, "h", 48.0))).collect();
+    let min_x = xs.iter().map(|t| t.0).fold(f32::MAX, f32::min);
+    let max_r = xs.iter().map(|t| t.0 + t.1).fold(f32::MIN, f32::max);
+    let cx = (min_x + max_r) / 2.0;
+    let min_y = ys.iter().map(|t| t.0).fold(f32::MAX, f32::min);
+    let max_b = ys.iter().map(|t| t.0 + t.1).fold(f32::MIN, f32::max);
+    let cy = (min_y + max_b) / 2.0;
+    for &i in &sel {
+        if let Some(w) = arr.get_mut(i) {
+            let ww = num(w, "w", 30.0);
+            let hh = num(w, "h", 48.0);
+            match key {
+                "left" => w["x"] = json!(r2(min_x)),
+                "cx" => w["x"] = json!(r2(cx - ww / 2.0)),
+                "right" => w["x"] = json!(r2(max_r - ww)),
+                "top" => w["y"] = json!(r2(min_y)),
+                "cy" => w["y"] = json!(r2(cy - hh / 2.0)),
+                "bottom" => w["y"] = json!(r2(max_b - hh)),
+                _ => {}
             }
         }
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let canvas = ui.max_rect();
-            let (cw, ch) = (canvas.width(), canvas.height());
-            let widgets = self.shared.borrow().spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
-            let selected = self.shared.borrow().selected;
-            let mut new_sel: Option<usize> = None;
-            let mut muts: Vec<(usize, f32, f32, f32, f32)> = Vec::new(); // (i, x, y, w, h)
-
-            for (i, w) in widgets.iter().enumerate() {
-                let a_h = anchor(w, "anchorH", "scale");
-                let a_v = anchor(w, "anchorV", "start");
-                let dw = if a_h == "scale" { 25.0 } else { 100.0 };
-                let dh = if a_v == "scale" { 25.0 } else { 48.0 };
-                let (sx, ww) = resolve_axis(&a_h, num(w, "x", 0.0), num(w, "w", dw), cw);
-                let (sy, hh) = resolve_axis(&a_v, num(w, "y", 0.0), num(w, "h", dh), ch);
-                let mut rect = egui::Rect::from_min_size(
-                    canvas.min + egui::vec2(sx, sy),
-                    egui::vec2(ww.max(8.0), hh.max(8.0)),
-                );
-                let id = egui::Id::new(("ed", i));
-                let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
-                let mut moved = false;
-                if resp.dragged() {
-                    rect = rect.translate(resp.drag_delta());
-                    moved = true;
-                }
-                if resp.clicked() || resp.drag_started() {
-                    new_sel = Some(i);
-                }
-                let is_sel = selected == Some(i) || new_sel == Some(i);
-                let stroke = if is_sel {
-                    egui::Stroke::new(2.0, ui.visuals().selection.stroke.color)
-                } else {
-                    egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
-                };
-                ui.painter().rect(rect, egui::Rounding::same(4.0), ui.visuals().faint_bg_color, stroke);
-                let lbl = w
-                    .get("label")
-                    .and_then(|l| l.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| w.get("type").and_then(|t| t.as_str()).unwrap_or("?").to_string());
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    lbl,
-                    egui::FontId::proportional(11.0),
-                    ui.visuals().text_color(),
-                );
-                if is_sel {
-                    let hr_rect = egui::Rect::from_min_size(rect.max - egui::vec2(11.0, 11.0), egui::vec2(11.0, 11.0));
-                    let hr = ui.interact(hr_rect, id.with("rs"), egui::Sense::drag());
-                    ui.painter().rect_filled(hr_rect, egui::Rounding::same(2.0), ui.visuals().selection.stroke.color);
-                    if hr.dragged() {
-                        rect.max += hr.drag_delta();
-                        moved = true;
-                    }
-                }
-                if moved {
-                    let (a, b) = store_axis(&a_h, rect.min.x - canvas.min.x, rect.width(), cw);
-                    let (c, d) = store_axis(&a_v, rect.min.y - canvas.min.y, rect.height(), ch);
-                    muts.push((i, r2(a), r2(c), r2(b), r2(d)));
-                }
-            }
-
-            if new_sel.is_some() || !muts.is_empty() {
-                let mut sh = self.shared.borrow_mut();
-                if let Some(s) = new_sel {
-                    sh.selected = Some(s);
-                }
-                if let Some(arr) = sh.spec.get_mut("widgets").and_then(|w| w.as_array_mut()) {
-                    for (i, x, y, ww, hh) in muts {
-                        if let Some(wm) = arr.get_mut(i) {
-                            wm["x"] = json!(x);
-                            wm["y"] = json!(y);
-                            wm["w"] = json!(ww);
-                            wm["h"] = json!(hh);
-                        }
-                    }
-                }
-            }
-        });
     }
+}
+
+// ---- interact widget drawing (styled cards) ---------------------------------
+#[allow(clippy::too_many_arguments)]
+fn draw_interact_widget(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    ty: &str,
+    name: &str,
+    label: &str,
+    val: &str,
+    bg: Option<Color32>,
+    fg: Option<Color32>,
+    emit: &dyn Fn(Value),
+    w: &Value,
+    app: &mut YantraApp,
+) {
+    let muted = ui.visuals().weak_text_color();
+    let card = bg.unwrap_or(ui.visuals().widgets.noninteractive.bg_fill);
+    let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let frame = egui::Frame::none()
+        .fill(card)
+        .stroke(Stroke::new(1.0, border))
+        .rounding(Rounding::same(6.0))
+        .inner_margin(Margin::same(6.0));
+    let _ = rect;
+    frame.show(ui, |ui| {
+        ui.set_min_size(ui.available_size());
+        if let Some(c) = fg {
+            ui.visuals_mut().override_text_color = Some(c);
+        }
+        match ty {
+            "label" => {
+                ui.label(RichText::new(if val.is_empty() { label } else { val }).strong());
+            }
+            "readout" => {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(label).size(10.0).color(muted));
+                    ui.label(RichText::new(if val.is_empty() { "—" } else { val }).size(18.0).monospace());
+                });
+            }
+            "button" => {
+                if ui.add_sized(ui.available_size(), egui::Button::new(label)).clicked() {
+                    emit(json!({ "kind": "press", "name": name }));
+                }
+            }
+            "slider" => {
+                let init = num(w, "value", num(w, "min", 0.0));
+                let v = app.sliders.entry(name.to_string()).or_insert(init);
+                let (min, max) = (num(w, "min", 0.0), num(w, "max", 100.0));
+                ui.label(RichText::new(label).size(10.0).color(muted));
+                if ui.add(egui::Slider::new(v, min..=max)).changed() {
+                    emit(json!({ "kind": "value", "name": name, "value": *v }));
+                }
+            }
+            "toggle" => {
+                let on = app.toggles.entry(name.to_string()).or_insert(false);
+                if ui.add_sized(ui.available_size(), egui::SelectableLabel::new(*on, format!("{label}: {}", if *on { "on" } else { "off" }))).clicked() {
+                    *on = !*on;
+                    emit(json!({ "kind": "value", "name": name, "value": *on }));
+                }
+            }
+            "color" => {
+                let c = app.colors.entry(name.to_string()).or_insert([128, 128, 128]);
+                ui.horizontal(|ui| {
+                    if ui.color_edit_button_srgb(c).changed() {
+                        emit(json!({ "kind": "value", "name": name, "value": format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]) }));
+                    }
+                    if !label.is_empty() {
+                        ui.label(RichText::new(label).size(10.0).color(muted));
+                    }
+                });
+            }
+            other => {
+                ui.weak(format!("{other}?"));
+            }
+        }
+    });
 }
