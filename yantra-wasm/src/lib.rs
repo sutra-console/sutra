@@ -623,64 +623,117 @@ fn draw_interact_widget(
     app: &mut YantraApp,
 ) {
     let muted = ui.visuals().weak_text_color();
-    let card = bg.unwrap_or(ui.visuals().widgets.noninteractive.bg_fill);
-    let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
-    let frame = egui::Frame::none()
-        .fill(card)
-        .stroke(Stroke::new(1.0, border))
-        .rounding(Rounding::same(6.0))
-        .inner_margin(Margin::same(6.0));
     let _ = rect;
-    frame.show(ui, |ui| {
-        ui.set_min_size(ui.available_size());
-        if let Some(c) = fg {
-            ui.visuals_mut().override_text_color = Some(c);
+    if let Some(c) = fg {
+        ui.visuals_mut().override_text_color = Some(c);
+    }
+    // A faint "bg-muted/20" card, used only by readout/slider/select widgets —
+    // labels and buttons render bare, matching the React renderer.
+    let card = |ui: &mut egui::Ui, body: &dyn Fn(&mut egui::Ui)| {
+        let fill = bg.unwrap_or(ui.visuals().faint_bg_color);
+        egui::Frame::none()
+            .fill(fill)
+            .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+            .rounding(Rounding::same(6.0))
+            .inner_margin(Margin::symmetric(8.0, 5.0))
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                body(ui);
+            });
+    };
+    match ty {
+        // bare text, vertically centered (React: flex h-full items-center text-xs font-medium)
+        "label" => {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(RichText::new(if val.is_empty() { label } else { val }).size(12.0).strong());
+            });
         }
-        match ty {
-            "label" => {
-                ui.label(RichText::new(if val.is_empty() { label } else { val }).strong());
+        // bare full-size button
+        "button" => {
+            if ui.add_sized(ui.available_size(), egui::Button::new(label)).clicked() {
+                emit(json!({ "kind": "press", "name": name }));
             }
-            "readout" => {
+        }
+        // bare full-size toggle (default/outline like the React Button variant)
+        "toggle" => {
+            let on = app.toggles.entry(name.to_string()).or_insert(false);
+            let txt = if label.is_empty() { (if *on { "on" } else { "off" }).to_string() } else { label.to_string() };
+            let btn = egui::Button::new(txt).fill(if *on {
+                ui.visuals().selection.bg_fill
+            } else {
+                Color32::TRANSPARENT
+            });
+            if ui.add_sized(ui.available_size(), btn).clicked() {
+                *on = !*on;
+                emit(json!({ "kind": "value", "name": name, "value": *on }));
+            }
+        }
+        "readout" => {
+            let value = if val.is_empty() { "—".to_string() } else { val.to_string() };
+            card(ui, &|ui| {
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(label).size(10.0).color(muted));
-                    ui.label(RichText::new(if val.is_empty() { "—" } else { val }).size(18.0).monospace());
+                    ui.label(RichText::new(label).size(11.0).color(muted));
+                    ui.label(RichText::new(&value).size(18.0).monospace());
                 });
-            }
-            "button" => {
-                if ui.add_sized(ui.available_size(), egui::Button::new(label)).clicked() {
-                    emit(json!({ "kind": "press", "name": name }));
-                }
-            }
-            "slider" => {
-                let init = num(w, "value", num(w, "min", 0.0));
-                let v = app.sliders.entry(name.to_string()).or_insert(init);
-                let (min, max) = (num(w, "min", 0.0), num(w, "max", 100.0));
-                ui.label(RichText::new(label).size(10.0).color(muted));
-                if ui.add(egui::Slider::new(v, min..=max)).changed() {
-                    emit(json!({ "kind": "value", "name": name, "value": *v }));
-                }
-            }
-            "toggle" => {
-                let on = app.toggles.entry(name.to_string()).or_insert(false);
-                if ui.add_sized(ui.available_size(), egui::SelectableLabel::new(*on, format!("{label}: {}", if *on { "on" } else { "off" }))).clicked() {
-                    *on = !*on;
-                    emit(json!({ "kind": "value", "name": name, "value": *on }));
-                }
-            }
-            "color" => {
-                let c = app.colors.entry(name.to_string()).or_insert([128, 128, 128]);
-                ui.horizontal(|ui| {
-                    if ui.color_edit_button_srgb(c).changed() {
-                        emit(json!({ "kind": "value", "name": name, "value": format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]) }));
-                    }
-                    if !label.is_empty() {
-                        ui.label(RichText::new(label).size(10.0).color(muted));
+            });
+        }
+        "slider" => {
+            let init = num(w, "value", num(w, "min", 0.0));
+            let v = app.sliders.entry(name.to_string()).or_insert(init);
+            let (min, max) = (num(w, "min", 0.0), num(w, "max", 100.0));
+            let shown = format!("{}", r2(*v));
+            let mut changed = false;
+            // a card with interactive content (the `card` helper's closure can't borrow v)
+            let fill = bg.unwrap_or(ui.visuals().faint_bg_color);
+            egui::Frame::none()
+                .fill(fill)
+                .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::symmetric(8.0, 5.0))
+                .show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(label).size(11.0).color(muted));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(&shown).monospace());
+                        });
+                    });
+                    if ui.add(egui::Slider::new(v, min..=max).show_value(false)).changed() {
+                        changed = true;
                     }
                 });
-            }
-            other => {
-                ui.weak(format!("{other}?"));
+            if changed {
+                emit(json!({ "kind": "value", "name": name, "value": *v }));
             }
         }
-    });
+        "color" => {
+            let c = app.colors.entry(name.to_string()).or_insert([128, 128, 128]);
+            let mut changed = false;
+            egui::Frame::none()
+                .fill(bg.unwrap_or(ui.visuals().faint_bg_color))
+                .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::symmetric(8.0, 5.0))
+                .show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    ui.horizontal(|ui| {
+                        if ui.color_edit_button_srgb(c).changed() {
+                            changed = true;
+                        }
+                        if !label.is_empty() {
+                            ui.label(RichText::new(label).size(11.0).color(muted));
+                        }
+                    });
+                });
+            if changed {
+                emit(json!({ "kind": "value", "name": name, "value": format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]) }));
+            }
+        }
+        other => {
+            // dashed placeholder (React: border-dashed, muted)
+            let r = ui.max_rect();
+            ui.painter().rect_stroke(r, Rounding::same(6.0), Stroke::new(1.0, muted));
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, format!("{other}?"), FontId::proportional(10.0), muted);
+        }
+    }
 }
