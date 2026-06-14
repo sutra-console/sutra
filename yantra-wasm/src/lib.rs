@@ -42,10 +42,14 @@ struct DragItem {
     idx: usize,
     ah: String,
     av: String,
-    sx: f32, // original resolved px geometry within the canvas
+    sx: f32, // original resolved absolute px geometry
     sy: f32,
     w: f32,
     h: f32,
+    px: f32, // parent container origin + size (for nested store_axis)
+    py: f32,
+    pw: f32,
+    ph: f32,
 }
 
 thread_local! {
@@ -80,6 +84,7 @@ pub fn start(
                         sliders: HashMap::new(),
                         toggles: HashMap::new(),
                         colors: HashMap::new(),
+                        tabs: HashMap::new(),
                     }))
                 }),
             )
@@ -119,6 +124,7 @@ struct YantraApp {
     sliders: HashMap<String, f32>,
     toggles: HashMap<String, bool>,
     colors: HashMap<String, [u8; 3]>,
+    tabs: HashMap<String, String>, // tabs-widget key → active tab id
 }
 
 // ---- anchor math (ported from skrit.ts) -------------------------------------
@@ -241,25 +247,150 @@ impl YantraApp {
             }
         };
         let widgets = spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
+        let frames = spec.get("frames").and_then(|f| f.as_array()).cloned().unwrap_or_default();
         let panel_fill = ctx.style().visuals.panel_fill;
+        let mut root = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(panel_fill))
             .show(ctx, |ui| {
-                let canvas = ui.max_rect();
-                for w in &widgets {
-                    let ws = wstate.get(w.get("name").and_then(|n| n.as_str()).unwrap_or("")).cloned().unwrap_or(Value::Null);
-                    let hidden = w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
-                        || ws.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
-                    if hidden {
-                        continue;
-                    }
-                    let rect = widget_rect(w, canvas.min, canvas.width(), canvas.height());
-                    let (ty, name, label, val, bg, fg) = display_of(w, &wstate);
-                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                    child.set_clip_rect(rect);
-                    draw_interact_widget(&mut child, rect, &ty, &name, &label, &val, bg, fg, &emit, w, self);
-                }
+                root = Some((ui.max_rect(), ui.new_child(egui::UiBuilder::new().max_rect(ui.max_rect()))));
             });
+        // recurse outside the panel closure so `self` is free to be borrowed mutably
+        if let Some((canvas, mut ui)) = root {
+            self.render_container(&mut ui, "root", canvas, &widgets, &frames, &wstate, &emit);
+        }
+    }
+
+    /// Recursively render a container ("root" | frame id | tab-pane id) and its
+    /// child frames + widgets, relative to `rect`. Mirrors React's CanvasNodes.
+    #[allow(clippy::too_many_arguments)]
+    fn render_container(
+        &mut self,
+        ui: &mut egui::Ui,
+        container: &str,
+        rect: Rect,
+        widgets: &[Value],
+        frames: &[Value],
+        wstate: &Value,
+        emit: &dyn Fn(Value),
+    ) {
+        let is_root = container == "root";
+        // child frames first (so widgets paint on top within this container)
+        for f in frames {
+            let id = f.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let parent = f.get("parent").and_then(|v| v.as_str());
+            let tab = f.get("tab").and_then(|v| v.as_str());
+            let is_child = if is_root {
+                parent.is_none() && tab.is_none()
+            } else {
+                tab == Some(container) || (parent == Some(container) && tab.is_none())
+            };
+            if !is_child {
+                continue;
+            }
+            let fr = widget_rect(f, rect.min, rect.width(), rect.height());
+            ui.painter().rect(
+                fr,
+                Rounding::same(6.0),
+                Color32::TRANSPARENT,
+                Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color.gamma_multiply(0.6)),
+            );
+            let clip = f.get("clip").and_then(|c| c.as_bool()).unwrap_or(true);
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(fr));
+            if clip {
+                child.set_clip_rect(fr);
+            }
+            self.render_container(&mut child, id, fr, widgets, frames, wstate, emit);
+        }
+        // child widgets
+        for (i, w) in widgets.iter().enumerate() {
+            let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let ws = wstate.get(name).cloned().unwrap_or(Value::Null);
+            let hidden = w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
+                || ws.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+            if hidden {
+                continue;
+            }
+            let frame = w.get("frame").and_then(|v| v.as_str());
+            let tab = w.get("tab").and_then(|v| v.as_str());
+            let is_child = if is_root {
+                frame.is_none() && tab.is_none()
+            } else {
+                tab == Some(container) || (frame == Some(container) && tab.is_none())
+            };
+            if !is_child {
+                continue;
+            }
+            let wr = widget_rect(w, rect.min, rect.width(), rect.height());
+            if w.get("type").and_then(|t| t.as_str()) == Some("tabs") {
+                self.render_tabs(ui, i, w, wr, widgets, frames, wstate, emit);
+                continue;
+            }
+            let (ty, _n, label, val, bg, fg) = display_of(w, wstate);
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(wr));
+            child.set_clip_rect(wr);
+            draw_interact_widget(&mut child, wr, &ty, name, &label, &val, bg, fg, emit, w, self);
+        }
+    }
+
+    /// A `tabs` widget: a card with a tab bar over the active pane's content.
+    #[allow(clippy::too_many_arguments)]
+    fn render_tabs(
+        &mut self,
+        ui: &mut egui::Ui,
+        i: usize,
+        w: &Value,
+        rect: Rect,
+        widgets: &[Value],
+        frames: &[Value],
+        wstate: &Value,
+        emit: &dyn Fn(Value),
+    ) {
+        let tabs = w.get("tabs").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+        let key = w.get("name").and_then(|n| n.as_str()).map(str::to_string).unwrap_or_else(|| format!("#{i}"));
+        let first = tabs.first().and_then(|t| t.get("id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let mut active = self.tabs.get(&key).cloned().unwrap_or_else(|| first.clone());
+        if !tabs.iter().any(|t| t.get("id").and_then(|v| v.as_str()) == Some(active.as_str())) {
+            active = first;
+        }
+
+        // card frame
+        ui.painter().rect(
+            rect,
+            Rounding::same(6.0),
+            ui.visuals().widgets.noninteractive.bg_fill,
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
+        let bar_h = 26.0;
+        let bar_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), bar_h));
+        let content_rect = Rect::from_min_max(Pos2::new(rect.min.x, rect.min.y + bar_h), rect.max);
+
+        let mut clicked: Option<String> = None;
+        let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(bar_rect.shrink(4.0)));
+        bar.set_clip_rect(bar_rect);
+        bar.horizontal_wrapped(|ui| {
+            for t in &tabs {
+                let tid = t.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let tlabel = t.get("label").and_then(|v| v.as_str()).unwrap_or(&tid).to_string();
+                if ui.selectable_label(active == tid, tlabel).clicked() {
+                    clicked = Some(tid);
+                }
+            }
+        });
+        if let Some(t) = clicked {
+            active = t;
+        }
+        self.tabs.insert(key, active.clone());
+
+        // separator under the bar
+        ui.painter().line_segment(
+            [Pos2::new(rect.min.x, rect.min.y + bar_h), Pos2::new(rect.max.x, rect.min.y + bar_h)],
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
+
+        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
+        content.set_clip_rect(content_rect);
+        self.render_container(&mut content, &active, content_rect, widgets, frames, wstate, emit);
     }
 
     // ---- edit: multi-select, drag, resize, snap, align, undo ----------------
@@ -355,41 +486,64 @@ impl YantraApp {
             .show(ctx, |ui| {
                 let canvas = ui.max_rect();
                 draw_grid(ui, canvas);
-                let (cw, ch) = (canvas.width(), canvas.height());
                 let widgets = self.shared.borrow().spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
+                let frames = self.shared.borrow().spec.get("frames").and_then(|f| f.as_array()).cloned().unwrap_or_default();
                 let selected = self.shared.borrow().selected.clone();
                 let wstate = self.shared.borrow().state.get("widgets").cloned().unwrap_or(Value::Null);
                 let shift = ui.input(|i| i.modifiers.shift);
                 let accent = ui.visuals().selection.stroke.color;
                 let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
 
-                // empty-canvas click clears selection; drag = marquee select. Registered
-                // FIRST so the widget boxes (added after) sit on top and win the pointer.
+                // walk the container tree (honoring active tabs) into placements
+                let tabs_snapshot = self.tabs.clone();
+                let mut placements: Vec<(usize, Rect, Rect)> = Vec::new();
+                let mut frame_rects: Vec<Rect> = Vec::new();
+                let mut tabbars: Vec<EditTabBar> = Vec::new();
+                collect_edit_layout("root", canvas, &widgets, &frames, &tabs_snapshot, &mut placements, &mut frame_rects, &mut tabbars);
+                let parent_of: HashMap<usize, Rect> = placements.iter().map(|(i, _, p)| (*i, *p)).collect();
+
+                // empty-canvas click clears selection; drag = marquee. Registered FIRST so
+                // the widget glass-panes (added after) sit on top and win the pointer.
                 let bg_resp = ui.interact(canvas, egui::Id::new("ed_bg"), Sense::click_and_drag());
                 let marquee0 = self.shared.borrow().marquee;
 
-                let mut click_sel: Option<(usize, bool)> = None; // (index, shift) toggle/select
-                let mut begin: Option<(usize, bool, Pos2)> = None; // (index, resize?, start pos)
-                let mut pointer: Option<Pos2> = None; // live pointer while dragging
-                let mut stop = false;
+                // frame outlines
+                for fr in &frame_rects {
+                    ui.painter().rect_stroke(*fr, Rounding::same(6.0), Stroke::new(1.0, border.gamma_multiply(0.8)));
+                }
 
-                for (i, w) in widgets.iter().enumerate() {
-                    if w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
-                        continue;
-                    }
-                    let rect = widget_rect(w, canvas.min, cw, ch);
+                let mut click_sel: Option<(usize, bool)> = None;
+                let mut begin: Option<(usize, bool, Pos2)> = None;
+                let mut pointer: Option<Pos2> = None;
+                let mut stop = false;
+                let mut tab_switch: Option<(String, String)> = None;
+
+                // tabs widgets: chrome + clickable bar (children render as placements below)
+                for tb in &tabbars {
+                    ui.painter().rect(tb.rect, Rounding::same(6.0), ui.visuals().widgets.noninteractive.bg_fill, Stroke::new(1.0, border));
+                    let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(tb.bar_rect.shrink(4.0)));
+                    bar.set_clip_rect(tb.bar_rect);
+                    bar.horizontal_wrapped(|ui| {
+                        for (id, label) in &tb.tabs {
+                            if ui.selectable_label(&tb.active == id, label).clicked() {
+                                tab_switch = Some((tb.key.clone(), id.clone()));
+                            }
+                        }
+                    });
+                    ui.painter().line_segment([tb.bar_rect.left_bottom(), tb.bar_rect.right_bottom()], Stroke::new(1.0, border));
+                }
+
+                // widget placements: WYSIWYG render + glass-pane select/drag/resize
+                for (i, rect, _parent) in placements.iter().copied() {
+                    let w = &widgets[i];
                     let is_sel = selected.contains(&i);
                     let id = egui::Id::new(("ed", i));
-
-                    // WYSIWYG: render the actual styled widget first. A no-op emit and
-                    // the glass-pane interact below keep it non-functional in edit mode.
                     let (ty, name, label, val, dbg, dfg) = display_of(w, &wstate);
                     let noop = |_v: Value| {};
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     child.set_clip_rect(rect);
                     draw_interact_widget(&mut child, rect, &ty, &name, &label, &val, dbg, dfg, &noop, w, self);
 
-                    // glass pane on top: steals all pointer events for editing
                     let resp = ui.interact(rect, id, Sense::click_and_drag());
                     if resp.clicked() {
                         click_sel = Some((i, shift));
@@ -403,7 +557,6 @@ impl YantraApp {
                     if resp.drag_stopped() {
                         stop = true;
                     }
-                    // selection outline (stroke only, so the widget shows through)
                     let stroke = if is_sel {
                         Stroke::new(2.0, accent)
                     } else if resp.hovered() {
@@ -412,7 +565,6 @@ impl YantraApp {
                         Stroke::new(1.0, border.gamma_multiply(0.5))
                     };
                     ui.painter().rect_stroke(rect, Rounding::same(5.0), stroke);
-                    // resize handle on a single selection
                     if is_sel && selected.len() == 1 {
                         let h = Rect::from_min_size(rect.max - Vec2::splat(11.0), Vec2::splat(11.0));
                         let hr = ui.interact(h, id.with("rs"), Sense::drag());
@@ -428,6 +580,9 @@ impl YantraApp {
                         }
                     }
                 }
+                if let Some((k, v)) = tab_switch {
+                    self.tabs.insert(k, v);
+                }
                 let clicked_empty = bg_resp.clicked() && click_sel.is_none() && begin.is_none();
 
                 // marquee rubber-band (drag started on empty canvas)
@@ -442,26 +597,21 @@ impl YantraApp {
                 }
 
                 let mut sh = self.shared.borrow_mut();
-                // marquee lifecycle
                 if bg_resp.drag_started() {
                     sh.marquee = bg_resp.interact_pointer_pos();
                 }
                 if bg_resp.drag_stopped() {
                     if let Some(r) = marquee_rect {
                         let mut sel: Vec<usize> = if shift { sh.selected.clone() } else { vec![] };
-                        for (i, w) in widgets.iter().enumerate() {
-                            if w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
-                                continue;
-                            }
-                            if r.intersects(widget_rect(w, canvas.min, cw, ch)) && !sel.contains(&i) {
-                                sel.push(i);
+                        for (i, wr, _p) in &placements {
+                            if r.intersects(*wr) && !sel.contains(i) {
+                                sel.push(*i);
                             }
                         }
                         sh.selected = sel;
                     }
                     sh.marquee = None;
                 }
-                // selection update (plain click / shift-toggle / empty clear)
                 if let Some((i, sh_held)) = click_sel {
                     if sh_held {
                         if let Some(p) = sh.selected.iter().position(|x| *x == i) {
@@ -475,7 +625,6 @@ impl YantraApp {
                 } else if clicked_empty {
                     sh.selected.clear();
                 }
-                // drag start: settle selection, snapshot undo, capture origin geometry
                 if let Some((i, resize, start)) = begin {
                     if resize {
                         // keep current selection (single)
@@ -484,12 +633,11 @@ impl YantraApp {
                     }
                     push_undo(&mut sh);
                     let idxs: Vec<usize> = if resize { vec![i] } else { sh.selected.clone() };
-                    sh.drag = Some(capture_drag(resize, start, &sh.spec, &idxs, cw, ch));
+                    sh.drag = Some(capture_drag(resize, start, &sh.spec, &idxs, &parent_of));
                 }
-                // live drag: map absolute pointer delta onto captured origins (1:1)
                 if let (Some(pos), Some(drag)) = (pointer, sh.drag.clone()) {
                     let total = pos - drag.start;
-                    apply_drag(&mut sh.spec, &drag, total, shift, cw, ch);
+                    apply_drag(&mut sh.spec, &drag, total, shift);
                 }
                 if stop {
                     sh.drag = None;
@@ -647,19 +795,27 @@ fn remap_sel(sel: &mut [usize], a: usize, b: usize) {
     }
 }
 
-/// Snapshot the resolved px geometry of `idxs` at drag start.
-fn capture_drag(resize: bool, start: Pos2, spec: &Value, idxs: &[usize], cw: f32, ch: f32) -> Drag {
+/// Snapshot the resolved absolute px geometry of `idxs` at drag start, plus each
+/// widget's parent container rect (so store-back is parent-relative for nesting).
+fn capture_drag(resize: bool, start: Pos2, spec: &Value, idxs: &[usize], parent_of: &HashMap<usize, Rect>) -> Drag {
     let mut items = Vec::new();
     if let Some(arr) = spec.get("widgets").and_then(|w| w.as_array()) {
         for &idx in idxs {
+            let Some(pr) = parent_of.get(&idx) else { continue };
             if let Some(w) = arr.get(idx) {
                 let ah = anchor(w, "anchorH", "scale");
                 let av = anchor(w, "anchorV", "start");
                 let dw = if ah == "scale" { 25.0 } else { 100.0 };
                 let dh = if av == "scale" { 25.0 } else { 48.0 };
-                let (sx, ww) = resolve_axis(&ah, num(w, "x", 0.0), num(w, "w", dw), cw);
-                let (sy, hh) = resolve_axis(&av, num(w, "y", 0.0), num(w, "h", dh), ch);
-                items.push(DragItem { idx, ah, av, sx, sy, w: ww, h: hh });
+                let (sx, ww) = resolve_axis(&ah, num(w, "x", 0.0), num(w, "w", dw), pr.width());
+                let (sy, hh) = resolve_axis(&av, num(w, "y", 0.0), num(w, "h", dh), pr.height());
+                items.push(DragItem {
+                    idx, ah, av,
+                    sx: pr.min.x + sx, // absolute
+                    sy: pr.min.y + sy,
+                    w: ww, h: hh,
+                    px: pr.min.x, py: pr.min.y, pw: pr.width(), ph: pr.height(),
+                });
             }
         }
     }
@@ -668,29 +824,103 @@ fn capture_drag(resize: bool, start: Pos2, spec: &Value, idxs: &[usize], cw: f32
 fn snap(v: f32, on: bool) -> f32 {
     if on { (v / 8.0).round() * 8.0 } else { v }
 }
-/// Apply the total pointer delta to the captured drag, writing stored units back.
-fn apply_drag(spec: &mut Value, drag: &Drag, total: Vec2, snap_on: bool, cw: f32, ch: f32) {
+/// Apply the total pointer delta to the captured drag, writing stored (parent-relative) units back.
+fn apply_drag(spec: &mut Value, drag: &Drag, total: Vec2, snap_on: bool) {
     let Some(arr) = spec.get_mut("widgets").and_then(|w| w.as_array_mut()) else { return };
     for it in &drag.items {
         let Some(w) = arr.get_mut(it.idx) else { continue };
         if drag.resize {
             let nw = snap((it.w + total.x).max(8.0), snap_on);
             let nh = snap((it.h + total.y).max(8.0), snap_on);
-            let (x, ww) = store_axis(&it.ah, it.sx, nw, cw);
-            let (y, hh) = store_axis(&it.av, it.sy, nh, ch);
+            let (x, ww) = store_axis(&it.ah, it.sx - it.px, nw, it.pw);
+            let (y, hh) = store_axis(&it.av, it.sy - it.py, nh, it.ph);
             w["x"] = json!(r2(x));
             w["w"] = json!(r2(ww));
             w["y"] = json!(r2(y));
             w["h"] = json!(r2(hh));
         } else {
-            let nx = snap(it.sx + total.x, snap_on);
-            let ny = snap(it.sy + total.y, snap_on);
-            let (x, ww) = store_axis(&it.ah, nx, it.w, cw);
-            let (y, hh) = store_axis(&it.av, ny, it.h, ch);
+            let nax = snap(it.sx + total.x, snap_on);
+            let nay = snap(it.sy + total.y, snap_on);
+            let (x, ww) = store_axis(&it.ah, nax - it.px, it.w, it.pw);
+            let (y, hh) = store_axis(&it.av, nay - it.py, it.h, it.ph);
             w["x"] = json!(r2(x));
             w["w"] = json!(r2(ww));
             w["y"] = json!(r2(y));
             w["h"] = json!(r2(hh));
+        }
+    }
+}
+
+/// One placed tabs widget in the editor: chrome to draw + clickable tab bar.
+struct EditTabBar {
+    rect: Rect,
+    bar_rect: Rect,
+    tabs: Vec<(String, String)>, // (id, label)
+    active: String,
+    key: String,
+}
+
+/// Walk the container tree (honoring active tabs) into a flat placement list:
+/// `out_w` = (widget idx, abs rect, parent rect); `out_f` = frame rects;
+/// `out_t` = tabs widgets (drawn as chrome, their children become placements).
+#[allow(clippy::too_many_arguments)]
+fn collect_edit_layout(
+    container: &str,
+    rect: Rect,
+    widgets: &[Value],
+    frames: &[Value],
+    tabs: &HashMap<String, String>,
+    out_w: &mut Vec<(usize, Rect, Rect)>,
+    out_f: &mut Vec<Rect>,
+    out_t: &mut Vec<EditTabBar>,
+) {
+    let is_root = container == "root";
+    for f in frames {
+        let id = f.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let parent = f.get("parent").and_then(|v| v.as_str());
+        let tab = f.get("tab").and_then(|v| v.as_str());
+        let is_child = if is_root { parent.is_none() && tab.is_none() } else { tab == Some(container) || (parent == Some(container) && tab.is_none()) };
+        if !is_child {
+            continue;
+        }
+        let fr = widget_rect(f, rect.min, rect.width(), rect.height());
+        out_f.push(fr);
+        collect_edit_layout(id, fr, widgets, frames, tabs, out_w, out_f, out_t);
+    }
+    for (i, w) in widgets.iter().enumerate() {
+        if w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let frame = w.get("frame").and_then(|v| v.as_str());
+        let tab = w.get("tab").and_then(|v| v.as_str());
+        let is_child = if is_root { frame.is_none() && tab.is_none() } else { tab == Some(container) || (frame == Some(container) && tab.is_none()) };
+        if !is_child {
+            continue;
+        }
+        let wr = widget_rect(w, rect.min, rect.width(), rect.height());
+        if w.get("type").and_then(|t| t.as_str()) == Some("tabs") {
+            let key = w.get("name").and_then(|n| n.as_str()).map(str::to_string).unwrap_or_else(|| format!("#{i}"));
+            let arr = w.get("tabs").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+            let list: Vec<(String, String)> = arr
+                .iter()
+                .map(|t| {
+                    let id = t.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let lbl = t.get("label").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
+                    (id, lbl)
+                })
+                .collect();
+            let first = list.first().map(|t| t.0.clone()).unwrap_or_default();
+            let mut active = tabs.get(&key).cloned().unwrap_or_else(|| first.clone());
+            if !list.iter().any(|t| t.0 == active) {
+                active = first;
+            }
+            let bar_h = 26.0;
+            let bar_rect = Rect::from_min_size(wr.min, Vec2::new(wr.width(), bar_h));
+            let content_rect = Rect::from_min_max(Pos2::new(wr.min.x, wr.min.y + bar_h), wr.max);
+            out_t.push(EditTabBar { rect: wr, bar_rect, tabs: list, active: active.clone(), key });
+            collect_edit_layout(&active, content_rect, widgets, frames, tabs, out_w, out_f, out_t);
+        } else {
+            out_w.push((i, wr, rect));
         }
     }
 }
