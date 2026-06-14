@@ -716,6 +716,8 @@ fn draw_interact_widget(
                             ui.label(RichText::new(&shown).monospace());
                         });
                     });
+                    // stretch the slider track to the card width (egui defaults to a fixed width)
+                    ui.spacing_mut().slider_width = (ui.available_width() - 8.0).max(40.0);
                     if ui.add(egui::Slider::new(v, min..=max).show_value(false)).changed() {
                         changed = true;
                     }
