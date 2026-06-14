@@ -26,6 +26,7 @@ struct Shared {
     undo: Vec<Value>,
     redo: Vec<Value>,
     drag: Option<Drag>,
+    marquee: Option<Pos2>, // rubber-band select origin (canvas px)
 }
 
 /// An in-progress move/resize. Captured once at drag-start so we map the *absolute*
@@ -346,6 +347,8 @@ impl YantraApp {
             }
         }
 
+        self.inspector_panel(ctx);
+
         let bg = ctx.style().visuals.panel_fill;
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(bg))
@@ -360,9 +363,10 @@ impl YantraApp {
                 let accent = ui.visuals().selection.stroke.color;
                 let border = ui.visuals().widgets.noninteractive.bg_stroke.color;
 
-                // empty-canvas click clears selection. Register FIRST so the widget
-                // boxes (added after) sit on top and win the pointer.
-                let bg_resp = ui.interact(canvas, egui::Id::new("ed_bg"), Sense::click());
+                // empty-canvas click clears selection; drag = marquee select. Registered
+                // FIRST so the widget boxes (added after) sit on top and win the pointer.
+                let bg_resp = ui.interact(canvas, egui::Id::new("ed_bg"), Sense::click_and_drag());
+                let marquee0 = self.shared.borrow().marquee;
 
                 let mut click_sel: Option<(usize, bool)> = None; // (index, shift) toggle/select
                 let mut begin: Option<(usize, bool, Pos2)> = None; // (index, resize?, start pos)
@@ -426,7 +430,37 @@ impl YantraApp {
                 }
                 let clicked_empty = bg_resp.clicked() && click_sel.is_none() && begin.is_none();
 
+                // marquee rubber-band (drag started on empty canvas)
+                let mut marquee_rect: Option<Rect> = None;
+                let mq_start = marquee0.or_else(|| if bg_resp.drag_started() { bg_resp.interact_pointer_pos() } else { None });
+                if let (Some(start), Some(cur)) = (mq_start, bg_resp.interact_pointer_pos()) {
+                    if bg_resp.dragged() || bg_resp.drag_stopped() {
+                        let r = Rect::from_two_pos(start, cur);
+                        ui.painter().rect(r, Rounding::same(0.0), accent.gamma_multiply(0.10), Stroke::new(1.0, accent));
+                        marquee_rect = Some(r);
+                    }
+                }
+
                 let mut sh = self.shared.borrow_mut();
+                // marquee lifecycle
+                if bg_resp.drag_started() {
+                    sh.marquee = bg_resp.interact_pointer_pos();
+                }
+                if bg_resp.drag_stopped() {
+                    if let Some(r) = marquee_rect {
+                        let mut sel: Vec<usize> = if shift { sh.selected.clone() } else { vec![] };
+                        for (i, w) in widgets.iter().enumerate() {
+                            if w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
+                                continue;
+                            }
+                            if r.intersects(widget_rect(w, canvas.min, cw, ch)) && !sel.contains(&i) {
+                                sel.push(i);
+                            }
+                        }
+                        sh.selected = sel;
+                    }
+                    sh.marquee = None;
+                }
                 // selection update (plain click / shift-toggle / empty clear)
                 if let Some((i, sh_held)) = click_sel {
                     if sh_held {
@@ -461,6 +495,155 @@ impl YantraApp {
                     sh.drag = None;
                 }
             });
+    }
+
+    // ---- layers + property inspector (right side panel) ---------------------
+    fn inspector_panel(&mut self, ctx: &egui::Context) {
+        let shift = ctx.input(|i| i.modifiers.shift);
+        egui::SidePanel::right("ed_inspector").default_width(230.0).show(ctx, |ui| {
+            let mut sh = self.shared.borrow_mut();
+            let count = sh.spec.get("widgets").and_then(|w| w.as_array()).map(|a| a.len()).unwrap_or(0);
+
+            ui.add_space(4.0);
+            ui.strong("Layers");
+            let mut toggle_sel: Option<usize> = None;
+            let mut hide_toggle: Option<usize> = None;
+            let mut del: Option<usize> = None;
+            let mut move_up: Option<usize> = None;
+            let mut move_down: Option<usize> = None;
+            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                // top widget = last in array (painted last); list top-down
+                for i in (0..count).rev() {
+                    let w = &sh.spec["widgets"][i];
+                    let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let ty = w.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                    let hidden = w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+                    let is_sel = sh.selected.contains(&i);
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false))
+                            .on_hover_text("Show/hide").clicked()
+                        {
+                            hide_toggle = Some(i);
+                        }
+                        let txt = if name.is_empty() { format!("{ty} #{i}") } else { format!("{name}  ({ty})") };
+                        if ui.selectable_label(is_sel, txt).clicked() {
+                            toggle_sel = Some(i);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("x").on_hover_text("Delete").clicked() { del = Some(i); }
+                            if ui.small_button("v").on_hover_text("Send down").clicked() { move_down = Some(i); }
+                            if ui.small_button("^").on_hover_text("Bring up").clicked() { move_up = Some(i); }
+                        });
+                    });
+                }
+            });
+            if let Some(i) = toggle_sel {
+                if shift {
+                    if let Some(p) = sh.selected.iter().position(|x| *x == i) { sh.selected.remove(p); }
+                    else { sh.selected.push(i); }
+                } else {
+                    sh.selected = vec![i];
+                }
+            }
+            if let Some(i) = hide_toggle {
+                push_undo(&mut sh);
+                let cur = sh.spec["widgets"][i].get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+                sh.spec["widgets"][i]["hidden"] = json!(!cur);
+            }
+            if let Some(i) = del {
+                push_undo(&mut sh);
+                delete_widget(&mut sh.spec, i);
+                sh.selected.clear();
+            }
+            if let Some(i) = move_up {
+                if i + 1 < count { push_undo(&mut sh); swap_widgets(&mut sh.spec, i, i + 1); remap_sel(&mut sh.selected, i, i + 1); }
+            }
+            if let Some(i) = move_down {
+                if i > 0 { push_undo(&mut sh); swap_widgets(&mut sh.spec, i, i - 1); remap_sel(&mut sh.selected, i, i - 1); }
+            }
+
+            ui.separator();
+            ui.strong("Properties");
+            let sel = sh.selected.clone();
+            if sel.len() != 1 {
+                ui.weak(if sel.is_empty() { "No selection" } else { "Multiple selected" });
+                return;
+            }
+            let i = sel[0];
+            if i >= count {
+                return;
+            }
+            let w = sh.spec["widgets"][i].clone();
+            let mut name = w.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut label = w.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let (mut x, mut y, mut ww, mut hh) = (num(&w, "x", 0.0), num(&w, "y", 0.0), num(&w, "w", 30.0), num(&w, "h", 48.0));
+            let mut ah = anchor(&w, "anchorH", "scale");
+            let mut av = anchor(&w, "anchorV", "start");
+            let mut changed = false;
+            let mut snapshot = false; // gesture start → one undo entry
+
+            ui.add_space(2.0);
+            ui.label(RichText::new(w.get("type").and_then(|t| t.as_str()).unwrap_or("?")).weak());
+            egui::Grid::new("props").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
+                ui.label("name");
+                let r = ui.text_edit_singleline(&mut name);
+                if r.gained_focus() { snapshot = true; }
+                if r.changed() { changed = true; }
+                ui.end_row();
+                ui.label("label");
+                let r = ui.text_edit_singleline(&mut label);
+                if r.gained_focus() { snapshot = true; }
+                if r.changed() { changed = true; }
+                ui.end_row();
+                for (lbl, v) in [("x", &mut x), ("y", &mut y), ("w", &mut ww), ("h", &mut hh)] {
+                    ui.label(lbl);
+                    let r = ui.add(egui::DragValue::new(v).speed(0.5));
+                    if r.drag_started() { snapshot = true; }
+                    if r.changed() { changed = true; }
+                    ui.end_row();
+                }
+                for (lbl, cur, id) in [("anchor H", &mut ah, "ah"), ("anchor V", &mut av, "av")] {
+                    ui.label(lbl);
+                    let before = cur.clone();
+                    egui::ComboBox::from_id_salt(id).selected_text(cur.as_str()).show_ui(ui, |ui| {
+                        for opt in ["scale", "start", "center", "end", "stretch"] {
+                            ui.selectable_value(cur, opt.to_string(), opt);
+                        }
+                    });
+                    if *cur != before { snapshot = true; changed = true; }
+                    ui.end_row();
+                }
+            });
+            if changed {
+                if snapshot { push_undo(&mut sh); }
+                let wm = &mut sh.spec["widgets"][i];
+                wm["name"] = json!(name);
+                wm["label"] = json!(label);
+                wm["x"] = json!(r2(x));
+                wm["y"] = json!(r2(y));
+                wm["w"] = json!(r2(ww));
+                wm["h"] = json!(r2(hh));
+                wm["anchorH"] = json!(ah);
+                wm["anchorV"] = json!(av);
+            }
+        });
+    }
+}
+
+fn swap_widgets(spec: &mut Value, a: usize, b: usize) {
+    if let Some(arr) = spec.get_mut("widgets").and_then(|w| w.as_array_mut()) {
+        if a < arr.len() && b < arr.len() {
+            arr.swap(a, b);
+        }
+    }
+}
+fn remap_sel(sel: &mut [usize], a: usize, b: usize) {
+    for s in sel.iter_mut() {
+        if *s == a {
+            *s = b;
+        } else if *s == b {
+            *s = a;
+        }
     }
 }
 
@@ -528,6 +711,9 @@ fn draw_grid(ui: &egui::Ui, canvas: Rect) {
     }
 }
 fn push_undo(sh: &mut Shared) {
+    if sh.undo.last() == Some(&sh.spec) {
+        return; // coalesce identical snapshots (e.g. focus without an edit)
+    }
     sh.undo.push(sh.spec.clone());
     if sh.undo.len() > 100 {
         sh.undo.remove(0);
