@@ -34,6 +34,11 @@ drives any plain COM port.
   by behavior: a toggle for digital IO, a 0-1023 slider + frequency/resolution badge
   for PWM, a per-pixel color picker for addressable RGB, live input readouts, all by
   name, with no per-board UI.
+- **Yantra control surfaces**: ship a `.yantra` (YAML) describing a device's panel —
+  buttons/sliders/readouts/tables laid out on a responsive canvas, each wired to what it
+  *sends* (UART/I²C/INVOKE/CFG/outputs) and *filled* from (the live console or other widgets).
+  A visual editor builds them; readouts/emitters give a reactive data flow; and a sandboxed
+  **Lua** layer scripts logic, orchestration, and presentation. Full reference: **[YANTRA.md](YANTRA.md)**.
 - **Configure device (runtime provisioning)**: on firmware that advertises the
   `provision` flag, re-pin the device's IO from the app: a per-pin role/name picker
   constrained to what each pin supports (strapping/dual-use pins warned, fixed pins
