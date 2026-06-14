@@ -650,7 +650,10 @@ export type YantraAction =
   | { send: string }
   | { i2c: { addr: number; write?: number[]; read?: number } }
   | { invoke: { id: number; args?: number[] } }
-  | { cfg: { key: number; bytes?: number[]; str?: string } };
+  | { cfg: { key: number; bytes?: number[]; str?: string } }
+  // drive a device OUTPUT with the action's value (0–255): rgb = grey level on the
+  // pixel, pwm = duty, set = on/off (value > 0). `index` = the output's table index.
+  | { out: { index: number; kind?: "rgb" | "pwm" | "set" } };
 
 /** A data source ("stream") a widget can be filled from. Loose string by design so
  *  new sources slot in. Wired now: "uart" (current connection console), "var:<name>"
@@ -665,6 +668,17 @@ export interface YantraBind {
   match?: string; // text source (uart/com): regex; capture group 1 → raw value `v`
   field?: string; // bus/object value: property path (dotted) → `v`
   expr?: string; // JS transform of v (string), n (= Number(v)), item, i → display value
+}
+
+/** Consume-output: watch a source value and, when the computed value changes, fire
+ *  an action (with the value substituted). The reverse of YantraBind. The `expr` can
+ *  read other widgets via `vars.<name>` (e.g. range sliders). */
+export interface YantraEmit {
+  source?: YantraSource; // value to watch (default "uart")
+  match?: string; // text source: regex capture
+  field?: string; // bus/object value: property path
+  expr?: string; // JS: v, n, vars → the value to send
+  send?: YantraAction; // fired on change ({value} = computed; `out` uses it as the level)
 }
 
 /** A column template for the table/repeater widget; the row `item` is in scope. */
@@ -687,9 +701,11 @@ export interface YantraWidget {
   send?: YantraAction; // button/slider action ({value} → the slider value)
   on?: YantraAction; off?: YantraAction; // toggle
   min?: number; max?: number; step?: number; // slider
+  value?: number; // slider/toggle initial value (defaults to min / off)
   options?: { label: string; send: YantraAction }[]; // select
   match?: string; // readout/table: regex over the console; capture group 1 is shown (legacy ⇒ bind{source:"uart"})
   bind?: YantraBind; // data-flow: fill this control from a source (readout/label/toggle/slider)
+  emit?: YantraEmit; // data-flow (reverse): drive a device output from a watched value
   all?: boolean; // table text source: matchAll → one row per match
   source?: YantraSource; // table: an array-valued source ("var:<name>" or a text source with `all`)
   columns?: YantraColumn[]; // table: per-cell row template
@@ -773,11 +789,33 @@ function fieldPath(obj: unknown, path?: string): unknown {
     .reduce<unknown>((o, k) => (o == null ? undefined : (o as Record<string, unknown>)[k]), obj);
 }
 
-/** Sandbox a JS expression with v (raw), n (= Number(v)), item (row), i (index). "—" on error. */
-function applyExpr(expr: string | undefined, v: unknown, item?: unknown, i?: number): unknown {
+/** The LAST match of `pattern` over `text` (newest reading in a streaming buffer,
+ *  not the oldest). Returns the RegExpMatchArray or null. */
+function lastMatch(text: string, pattern: string): RegExpExecArray | null {
+  const re = new RegExp(pattern, "g");
+  let m: RegExpExecArray | null;
+  let last: RegExpExecArray | null = null;
+  while ((m = re.exec(text)) !== null) {
+    last = m;
+    if (m.index === re.lastIndex) re.lastIndex++; // guard against zero-width matches
+  }
+  return last;
+}
+
+/** Sandbox a JS expression with v (raw), n (= Number(v)), item (row), i (index), and
+ *  vars (the value bus — reference other widgets as vars.<name>). "—" on error. */
+function applyExpr(
+  expr: string | undefined,
+  v: unknown,
+  item?: unknown,
+  i?: number,
+  vars?: Record<string, unknown>,
+): unknown {
   if (!expr) return v;
   try {
-    return new Function("v", "n", "item", "i", `return (${expr});`)(v, Number(v as never), item, i);
+    return new Function("v", "n", "item", "i", "vars", `return (${expr});`)(
+      v, Number(v as never), item, i, vars ?? {},
+    );
   } catch {
     return "—";
   }
@@ -800,7 +838,7 @@ export function evalBind(
     const text = bufs[sourceBufKey(src) ?? ""] ?? "";
     if (bind.match) {
       try {
-        v = text.match(new RegExp(bind.match))?.[1];
+        v = lastMatch(text, bind.match)?.[1]; // newest occurrence in the stream
       } catch {
         return "bad regex";
       }
@@ -808,7 +846,7 @@ export function evalBind(
       v = text;
     }
   }
-  return applyExpr(bind.expr, v);
+  return applyExpr(bind.expr, v, undefined, undefined, bus);
 }
 
 /** Resolve a table's array source into row items (RegExpMatchArray rows for text sources). */
@@ -910,6 +948,8 @@ export const saveYantra = (file: string, spec: YantraSpec) =>
 export const createYantra = (name: string) => invoke<string>("create_yantra", { name });
 /** Delete a control surface file. */
 export const deleteYantra = (file: string) => invoke<void>("delete_yantra", { file });
+/** Import an external .yantra/.yaml/.json file into the workspace; returns its saved filename. */
+export const importYantra = (path: string) => invoke<string>("import_yantra", { path });
 
 // ---- I2C device definitions (workspace .sutra/i2c/*.json) ----
 export interface I2cReg {

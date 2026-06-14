@@ -276,6 +276,31 @@ pub fn create_yantra(app: &AppHandle, name: &str) -> Result<String, String> {
     save_yantra(app, title, spec)
 }
 
+/// Import an external `.yantra`/`.yaml`/`.json` file into the workspace. The
+/// source is parsed (validating it) and re-serialized as YAML under
+/// `.sutra/yantra/`; the name comes from the source file stem and is
+/// de-duplicated so an import never clobbers an existing surface. Returns the
+/// saved filename.
+pub fn import_yantra(app: &AppHandle, path: &str) -> Result<String, String> {
+    let dir = dot_sutra(app).ok_or("no workspace selected")?.join("yantra");
+    let _ = std::fs::create_dir_all(&dir);
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    // YAML is a JSON superset, so this accepts .yantra/.yaml/.json alike.
+    let spec: serde_json::Value =
+        serde_yaml::from_str(&text).map_err(|_| "not a valid .yantra (YAML/JSON) file".to_string())?;
+    let base = safe_yantra_name(path).ok_or("invalid file name")?;
+    let stem = base.trim_end_matches(".yantra");
+    let mut name = format!("{stem}.yantra");
+    let mut n = 2;
+    while dir.join(&name).exists() {
+        name = format!("{stem}-{n}.yantra");
+        n += 1;
+    }
+    let yaml = serde_yaml::to_string(&spec).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(&name), yaml).map_err(|e| e.to_string())?;
+    Ok(name)
+}
+
 /// Delete a control surface file from the workspace.
 pub fn delete_yantra(app: &AppHandle, file: &str) -> Result<(), String> {
     let dir = dot_sutra(app).ok_or("no workspace selected")?.join("yantra");

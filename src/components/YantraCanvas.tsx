@@ -4,11 +4,11 @@
 // device INVOKE command, or a CFG set. Readouts watch the live console stream
 // and surface a regex capture. v1 = render + interact; scripts/plugins/visual-
 // editor come later.
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
-  MSG, dataWrite, i2cXfer, invokeCommand, onData, sendCmd,
+  MSG, dataWrite, i2cXfer, invokeCommand, onData, sendCmd, outputRgb, outputPwm, outputSet,
   axisStyle, bindOf, computeBus, evalArray, evalBind, evalCell, needsConsole, CURRENT_CONN,
   type AnchorMode, type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
@@ -34,6 +34,14 @@ async function runAction(a: YantraAction | undefined, value?: string): Promise<v
   if ("cfg" in a) {
     const bytes = a.cfg.bytes ?? Array.from(enc.encode(a.cfg.str ?? ""));
     await sendCmd(MSG.CFG_SET, [a.cfg.key, ...bytes]);
+    return;
+  }
+  if ("out" in a) {
+    const lvl = Math.max(0, Math.min(255, Math.round(Number(value ?? 0))));
+    const idx = a.out.index ?? 0;
+    if (a.out.kind === "pwm") await outputPwm(idx, lvl);
+    else if (a.out.kind === "set") await outputSet(idx, lvl > 0);
+    else await outputRgb(idx, { r: lvl, g: lvl, b: lvl }); // rgb (default): grey level
     return;
   }
 }
@@ -68,10 +76,38 @@ export function YantraCanvas({
     return () => un?.();
   }, [wantsConsole]);
 
-  // Reactive value bus: each named widget publishes its evaluated value (recomputed as buffers grow).
-  const bus = useMemo(() => computeBus(widgets, bufs), [widgets, bufs]);
-  const valueOf = (w: YantraWidget): unknown => evalBind(bindOf(w), bus, bufs);
-  const rowsOf = (w: YantraWidget): unknown[] => evalArray(w, bus, bufs);
+  // Live control state (slider positions, toggle states) published under each widget's
+  // name, so a consume-output `emit` expr can reference them as vars.<name>.
+  const [controls, setControls] = useState<Record<string, unknown>>({});
+  const publish = useCallback((name: string, v: unknown) => {
+    setControls((c) => (c[name] === v ? c : { ...c, [name]: v }));
+  }, []);
+
+  // Reactive value bus: console/var-derived values, overlaid with live control state.
+  const consoleBus = useMemo(() => computeBus(widgets, bufs), [widgets, bufs]);
+  const vars = useMemo(() => ({ ...consoleBus, ...controls }), [consoleBus, controls]);
+  const valueOf = (w: YantraWidget): unknown => evalBind(bindOf(w), vars, bufs);
+  const rowsOf = (w: YantraWidget): unknown[] => evalArray(w, vars, bufs);
+
+  // Consume-output: when a widget's `emit` value changes, fire its action with the
+  // computed value. Deduped (only on change) and skipped while disconnected.
+  const lastEmit = useRef<Record<string, string>>({});
+  useEffect(() => {
+    if (disabled) return;
+    widgets.forEach((w, i) => {
+      if (!w.emit) return;
+      const val = evalBind(
+        { source: w.emit!.source, match: w.emit!.match, field: w.emit!.field, expr: w.emit!.expr },
+        vars, bufs,
+      );
+      if (val === undefined || val === null || (typeof val === "number" && Number.isNaN(val))) return;
+      const key = w.name ?? `#${i}`;
+      const s = String(val);
+      if (lastEmit.current[key] === s) return;
+      lastEmit.current[key] = s;
+      runAction(w.emit!.send, s).catch(() => {});
+    });
+  }, [vars, bufs, disabled, widgets]);
 
   return (
     <div className="scroll-stable h-full overflow-auto">
@@ -81,7 +117,7 @@ export function YantraCanvas({
         <CanvasNodes
           container="root" widgets={widgets} frames={frames}
           activeTabOf={activeTabOf} setActiveTabs={setActiveTabs}
-          disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf}
+          disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish}
         />
       </div>
     </div>
@@ -102,7 +138,7 @@ function nodeStyle(n: YantraWidget | YantraFrame): CSSProperties {
 
 // Recursively render the children of one container (root | a frame id | a tab-pane id).
 function CanvasNodes({
-  container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, valueOf, rowsOf,
+  container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, valueOf, rowsOf, publish,
 }: {
   container: string; // "root" | frame id | pane id
   widgets: YantraWidget[];
@@ -113,6 +149,7 @@ function CanvasNodes({
   fire: (a: YantraAction | undefined, value?: string) => void;
   valueOf: (w: YantraWidget) => unknown;
   rowsOf: (w: YantraWidget) => unknown[];
+  publish: (name: string, v: unknown) => void;
 }) {
   const isRoot = container === "root";
   const childFrames = frames.filter((f) =>
@@ -128,7 +165,7 @@ function CanvasNodes({
 
   const sub = (c: string) => (
     <CanvasNodes container={c} widgets={widgets} frames={frames} activeTabOf={activeTabOf}
-      setActiveTabs={setActiveTabs} disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} />
+      setActiveTabs={setActiveTabs} disabled={disabled} fire={fire} valueOf={valueOf} rowsOf={rowsOf} publish={publish} />
   );
 
   return (
@@ -159,7 +196,7 @@ function CanvasNodes({
         }
         return (
           <div key={i} style={nodeStyle(w)}>
-            <Widget w={w} disabled={disabled} fire={fire} value={valueOf(w)} rows={rowsOf(w)} />
+            <Widget w={w} disabled={disabled} fire={fire} value={valueOf(w)} rows={rowsOf(w)} publish={publish} />
           </div>
         );
       })}
@@ -180,16 +217,25 @@ export function Widget({
   fire,
   value,
   rows,
+  publish,
 }: {
   w: YantraWidget;
   disabled?: boolean;
   fire: (a: YantraAction | undefined, value?: string) => void;
   value?: unknown; // bound scalar (undefined = unbound → use internal state)
   rows?: unknown[]; // table row items
+  publish?: (name: string, v: unknown) => void; // push live control state to the bus
 }) {
-  const [on, setOn] = useState(false);
-  const [val, setVal] = useState((w.min ?? 0).toString());
+  const [on, setOn] = useState(!!w.value);
+  const [val, setVal] = useState((w.value ?? w.min ?? 0).toString());
   const bound = value !== undefined;
+  // publish the initial control value once so emit exprs can reference it immediately
+  useEffect(() => {
+    if (!w.name || !publish) return;
+    if (w.type === "slider") publish(w.name, Number(w.value ?? w.min ?? 0));
+    else if (w.type === "toggle") publish(w.name, !!w.value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   switch (w.type) {
     case "button":
@@ -205,7 +251,12 @@ export function Widget({
       return (
         <Button className="h-full w-full" size="sm" variant={state ? "default" : "outline"}
           disabled={disabled} title={w.help}
-          onClick={() => { const next = !state; if (!bound) setOn(next); fire(next ? w.on : w.off); }}>
+          onClick={() => {
+            const next = !state;
+            if (!bound) setOn(next);
+            if (w.name && publish) publish(w.name, next);
+            fire(next ? w.on : w.off);
+          }}>
           {w.label}: {state ? "on" : "off"}
         </Button>
       );
@@ -221,7 +272,7 @@ export function Widget({
           </div>
           <input type="range" disabled={disabled}
             min={w.min ?? 0} max={w.max ?? 100} step={w.step ?? 1} value={shown}
-            onChange={(e) => setVal(e.target.value)}
+            onChange={(e) => { setVal(e.target.value); if (w.name && publish) publish(w.name, Number(e.target.value)); }}
             onPointerUp={() => fire(w.send, shown)}
             onKeyUp={() => fire(w.send, shown)} />
         </div>
