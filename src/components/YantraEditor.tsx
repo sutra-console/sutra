@@ -4,7 +4,7 @@
 // renderer); App switches between them with an "Edit" toggle.
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Plus, Save, Undo2, Redo2, RotateCcw, Trash2, Move,
+  Plus, Save, Undo2, Redo2, RotateCcw, Trash2, Move, Code,
   Layers, Eye, EyeOff, Lock, LockOpen, ChevronUp, ChevronDown, ChevronRight,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
@@ -22,6 +22,9 @@ import {
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import {
   resolveAxis, storeAxis, onData,
   bindOf, computeBus, evalArray, evalBind, needsConsole, CURRENT_CONN,
@@ -231,6 +234,7 @@ export function YantraEditor({
   const [ready, setReady] = useState(false);
   const [toolMenu, setToolMenu] = useState<"a" | "s" | null>(null); // open align/spacing submenu
   const [showLayers, setShowLayers] = useState(false); // layers panel visible
+  const [scriptOpen, setScriptOpen] = useState(false); // full-size surface-script editor
   const [activeTab, setActiveTab] = useState<Record<number, string>>({}); // editor preview: active pane per tabs widget
   const [past, setPast] = useState<YantraSpec[]>([]); // undo stack (checkpoints before each change)
   const [future, setFuture] = useState<YantraSpec[]>([]); // redo stack
@@ -946,6 +950,10 @@ export function YantraEditor({
             title="Layers" onClick={() => setShowLayers((v) => !v)}>
             <Layers className="size-3" /> Layers
           </Button>
+          <Button size="sm" variant={draft.script ? "default" : "outline"} className="h-7 gap-1 px-2 text-[11px]"
+            title="Surface Lua script — all functions for this file" onClick={() => setScriptOpen(true)}>
+            <Code className="size-3" /> Script
+          </Button>
           <span className="ml-1 text-[10px] text-muted-foreground">hold ⇧ to snap to grid</span>
           <div className="ml-auto flex items-center gap-1.5">
             {dirty && <span className="text-[11px] text-amber-600 dark:text-amber-400">unsaved</span>}
@@ -1204,6 +1212,26 @@ export function YantraEditor({
           />
         )}
       </div>
+
+      {/* Full-size surface-script editor: the whole file's Lua in one place */}
+      <Dialog open={scriptOpen} onOpenChange={setScriptOpen}>
+        <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col">
+          <DialogHeader>
+            <DialogTitle className="text-sm">Surface script — {draft.name || file} (Lua)</DialogTitle>
+          </DialogHeader>
+          <Textarea
+            className="min-h-[55vh] flex-1 resize-none font-mono text-xs leading-relaxed"
+            spellCheck={false}
+            placeholder={"-- Runs in the backend every tick (~100 ms). Define helpers + update(vars).\n-- Scope: vars (bus + t/dt) · set(name,v) · attr(name,k,v) · send(action) · print/log · state (persists)\n\nstate = state or {}\nfunction update(vars)\n  -- e.g. set('out', tonumber(vars.dist))\nend\n"}
+            value={draft.script ?? ""}
+            onChange={(e) => setDraft((d) => ({ ...d, script: e.target.value }))}
+          />
+          <p className="text-[10px] text-muted-foreground">
+            One script per surface — put all your functions here. Per-widget transforms live on each
+            widget (its <code>Script</code> field). Saved with the .yantra; runs only in the Controls view.
+          </p>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
