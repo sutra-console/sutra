@@ -408,14 +408,20 @@ impl YantraApp {
 
     // ---- edit: multi-select, drag, resize, snap, align, undo ----------------
     fn edit_ui(&mut self, ctx: &egui::Context) {
-        // keyboard: ctrl+z / ctrl+shift+z (or ctrl+y)
-        let (undo_key, redo_key) = ctx.input(|i| {
+        // keyboard: undo/redo, delete, deselect — suppressed while a text field is focused.
+        let typing = ctx.wants_keyboard_input();
+        let (undo_key, redo_key, del_key, esc_key) = ctx.input(|i| {
             let z = i.modifiers.command && i.key_pressed(egui::Key::Z);
-            (z && !i.modifiers.shift, (z && i.modifiers.shift) || (i.modifiers.command && i.key_pressed(egui::Key::Y)))
+            (
+                z && !i.modifiers.shift,
+                (z && i.modifiers.shift) || (i.modifiers.command && i.key_pressed(egui::Key::Y)),
+                !typing && (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)),
+                !typing && i.key_pressed(egui::Key::Escape),
+            )
         });
 
         let mut add: Option<String> = None;
-        let (mut do_delete, mut do_save, mut do_undo, mut do_redo) = (false, false, undo_key, redo_key);
+        let (mut do_delete, mut do_save, mut do_undo, mut do_redo) = (del_key, false, undo_key, redo_key);
         let mut align: Option<&str> = None;
         let mut do_group = false; // wrap the selection in a new frame (resolved in the canvas pass)
         egui::TopBottomPanel::top("ed_toolbar").show(ctx, |ui| {
@@ -462,6 +468,10 @@ impl YantraApp {
         // toolbar mutations
         {
             let mut sh = self.shared.borrow_mut();
+            if esc_key {
+                sh.selected.clear();
+                sh.selected_frame = None;
+            }
             if let Some(t) = add {
                 push_undo(&mut sh);
                 if t == "frame" {
@@ -796,21 +806,31 @@ impl YantraApp {
                                 if ui.add(egui::Button::new(RichText::new("L").color(if flocked { accent_c } else { muted_c })).small().frame(false)).on_hover_text("Lock/unlock (canvas)").clicked() {
                                     lock_f = Some(fi);
                                 }
-                                let src = ui.dnd_drag_source(egui::Id::new(("lyf", fi)), LayerDrag::Frame(fi), |ui| {
-                                    ui.selectable_label(is_sel, format!("[] {nm}"))
-                                });
-                                if src.inner.clicked() {
+                                // one widget, click_and_drag sense: a click (no movement) selects;
+                                // a press past egui's drag threshold starts a drag. Click is preserved.
+                                let lab = ui.selectable_label(is_sel, format!("[] {nm}"));
+                                let resp = ui.interact(lab.rect, lab.id, egui::Sense::click_and_drag());
+                                if resp.clicked() {
                                     sel_frame = Some(fi);
                                 }
-                                if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
+                                if resp.drag_started() {
+                                    egui::DragAndDrop::set_payload(ui.ctx(), LayerDrag::Frame(fi));
+                                }
+                                if resp.dragged() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                }
+                                if resp.dnd_hover_payload::<LayerDrag>().is_some() {
+                                    ui.painter().hline(resp.rect.x_range(), resp.rect.top(), Stroke::new(2.0, accent_c));
+                                }
+                                resp.context_menu(|ui| {
+                                    if ui.button("Delete frame").clicked() { del_frame = Some(fi); ui.close_menu(); }
+                                });
+                                if let Some(p) = resp.dnd_release_payload::<LayerDrag>() {
                                     match *p {
                                         LayerDrag::Frame(from) => reorder_f = Some((from, fi)),
                                         LayerDrag::Widget(from) => reparent_w = Some((from, fi)),
                                     }
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button("x").on_hover_text("Delete frame").clicked() { del_frame = Some(fi); }
-                                });
                             }
                             LayerDrag::Widget(i) => {
                                 let w = &sh.spec["widgets"][i];
@@ -826,26 +846,29 @@ impl YantraApp {
                                     lock_w = Some(i);
                                 }
                                 let txt = if name.is_empty() { format!("{ty} #{i}") } else { format!("{name}  ({ty})") };
-                                let src = ui.dnd_drag_source(egui::Id::new(("lyw", i)), LayerDrag::Widget(i), |ui| {
-                                    ui.selectable_label(is_sel, txt)
-                                });
-                                if src.inner.clicked() {
+                                let lab = ui.selectable_label(is_sel, txt);
+                                let resp = ui.interact(lab.rect, lab.id, egui::Sense::click_and_drag());
+                                if resp.clicked() {
                                     toggle_sel = Some(i);
                                 }
-                                src.response.context_menu(|ui| {
-                                    if ui.button("Group into Frame").clicked() {
-                                        group_click = true;
-                                        ui.close_menu();
-                                    }
+                                if resp.drag_started() {
+                                    egui::DragAndDrop::set_payload(ui.ctx(), LayerDrag::Widget(i));
+                                }
+                                if resp.dragged() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                }
+                                if resp.dnd_hover_payload::<LayerDrag>().is_some() {
+                                    ui.painter().hline(resp.rect.x_range(), resp.rect.top(), Stroke::new(2.0, accent_c));
+                                }
+                                resp.context_menu(|ui| {
+                                    if ui.button("Group into Frame").clicked() { group_click = true; ui.close_menu(); }
+                                    if ui.button("Delete").clicked() { del = Some(i); ui.close_menu(); }
                                 });
-                                if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
+                                if let Some(p) = resp.dnd_release_payload::<LayerDrag>() {
                                     if let LayerDrag::Widget(from) = *p {
                                         reorder_w = Some((from, i));
                                     }
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button("x").on_hover_text("Delete").clicked() { del = Some(i); }
-                                });
                             }
                         }
                     });
