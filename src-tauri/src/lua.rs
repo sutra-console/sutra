@@ -8,7 +8,7 @@
 //
 // Script API (see PREAMBLE):
 //   vars            the bus snapshot (name → value; plus t = ms, dt = ms since last tick)
-//   set(name, v)    set a widget's value (v table ⇒ merge attrs: value/color/fg/label/image/hidden/disabled)
+//   set(name, v)    set a widget's value (v table ⇒ merge attrs: value/fill/fg/label/image/hidden/disabled)
 //   attr(name,k,v)  set one presentation attribute
 //   send(action)    dispatch a YantraAction (string | {out=…}|{invoke=…}|{i2c=…}|{cfg=…})
 //   log(msg)        debug line
@@ -31,9 +31,9 @@ pub struct WidgetScript {
 /// What a tick produces for the frontend to apply.
 #[derive(serde::Serialize, Default)]
 pub struct EvalOut {
-    pub sets: Value,   // { name → { value?, color?, fg?, label?, image?, hidden?, disabled? } }
+    pub sets: Value, // { name → { value?, fill?, fg?, label?, image?, hidden?, disabled? } }
     pub frames: Value, // { id → { hidden? } } — container overrides (selector → show/hide panes)
-    pub sends: Value,  // [ action, … ]
+    pub sends: Value, // [ action, … ]
     pub logs: Vec<String>,
 }
 
@@ -91,8 +91,16 @@ impl Surface {
         {
             let g = lua.globals();
             for k in [
-                "io", "os", "package", "require", "dofile", "loadfile", "load", "loadstring",
-                "collectgarbage", "debug",
+                "io",
+                "os",
+                "package",
+                "require",
+                "dofile",
+                "loadfile",
+                "load",
+                "loadstring",
+                "collectgarbage",
+                "debug",
             ] {
                 g.set(k, LuaValue::Nil)?;
             }
@@ -108,21 +116,59 @@ impl Surface {
                 continue;
             }
             // wrap as a transform; `n` = tonumber(v) for convenience
-            let src = format!("return function(v, vars)\nlocal n = tonumber(v)\n{}\nend", w.script);
+            let src = format!(
+                "return function(v, vars)\nlocal n = tonumber(v)\n{}\nend",
+                w.script
+            );
             let f: Function = lua.load(src).eval()?;
             compiled.push((w.name.clone(), f));
         }
-        Ok(Surface { lua, update, widgets: compiled, hash })
+        Ok(Surface {
+            lua,
+            update,
+            widgets: compiled,
+            hash,
+        })
+    }
+
+    // Fresh per-call accumulators; user state (globals) persists across calls.
+    fn reset_accumulators(&self) -> mlua::Result<()> {
+        let lua = &self.lua;
+        let g = lua.globals();
+        g.set("__sets", lua.create_table()?)?;
+        g.set("__frames", lua.create_table()?)?;
+        g.set("__sends", lua.create_table()?)?;
+        g.set("__logs", lua.create_table()?)?;
+        Ok(())
+    }
+
+    // Drain the accumulators into an EvalOut, appending any caller-side errors.
+    fn collect(&self, mut errs: Vec<String>) -> mlua::Result<EvalOut> {
+        let lua = &self.lua;
+        let g = lua.globals();
+        let sets: Value = lua.from_value(g.get("__sets")?)?;
+        let frames: Value = lua.from_value(g.get("__frames")?)?;
+        // an empty Lua table serializes as {} (object); force the actions list to an array
+        let sends_v: Value = lua.from_value(g.get("__sends")?)?;
+        let sends = if sends_v.is_array() {
+            sends_v
+        } else {
+            Value::Array(Vec::new())
+        };
+        let mut logs: Vec<String> = lua.from_value(g.get("__logs")?).unwrap_or_default();
+        logs.append(&mut errs);
+        Ok(EvalOut {
+            sets,
+            frames,
+            sends,
+            logs,
+        })
     }
 
     fn run(&self, vars: Value) -> mlua::Result<EvalOut> {
         let lua = &self.lua;
         let g = lua.globals();
-        // fresh accumulators each tick; user state (globals) persists
-        g.set("__sets", lua.create_table()?)?;
-        g.set("__frames", lua.create_table()?)?;
-        g.set("__sends", lua.create_table()?)?;
-        g.set("__logs", lua.create_table()?)?;
+        self.reset_accumulators()?;
         let vars_lua = lua.to_value(&vars)?;
         g.set("vars", vars_lua.clone())?;
         let vars_t = match &vars_lua {
@@ -135,7 +181,9 @@ impl Surface {
 
         // widget transforms first (compute values), then the surface orchestrator
         for (name, f) in &self.widgets {
-            let v = vars_t.get::<LuaValue>(name.as_str()).unwrap_or(LuaValue::Nil);
+            let v = vars_t
+                .get::<LuaValue>(name.as_str())
+                .unwrap_or(LuaValue::Nil);
             match f.call::<LuaValue>((v, vars_lua.clone())) {
                 Ok(res) => {
                     if let Err(e) = set_fn.call::<()>((name.as_str(), res)) {
@@ -150,15 +198,29 @@ impl Surface {
                 errs.push(format!("update: {e}"));
             }
         }
+        self.collect(errs)
+    }
 
-        let sets: Value = lua.from_value(g.get("__sets")?)?;
-        let frames: Value = lua.from_value(g.get("__frames")?)?;
-        // an empty Lua table serializes as {} (object); force the actions list to an array
-        let sends_v: Value = lua.from_value(g.get("__sends")?)?;
-        let sends = if sends_v.is_array() { sends_v } else { Value::Array(Vec::new()) };
-        let mut logs: Vec<String> = lua.from_value(g.get("__logs")?).unwrap_or_default();
-        logs.extend(errs);
-        Ok(EvalOut { sets, frames, sends, logs })
+    // Call a named global handler — the event-wiring path (a widget's on:{press:fn}
+    // etc.). `vars` is published so the handler can read the current bus; `args` is
+    // the event payload table (widget name, value, x/y, …). Same set/frame/send/log
+    // collectors as a tick, so a handler shows/hides frames and drives outputs the
+    // same way update() does. A missing handler is logged, not fatal.
+    fn call(&self, fn_name: &str, vars: Value, args: Value) -> mlua::Result<EvalOut> {
+        let lua = &self.lua;
+        let g = lua.globals();
+        self.reset_accumulators()?;
+        g.set("vars", lua.to_value(&vars)?)?;
+        let mut errs: Vec<String> = Vec::new();
+        match g.get::<Option<Function>>(fn_name)? {
+            Some(f) => {
+                if let Err(e) = f.call::<()>(lua.to_value(&args)?) {
+                    errs.push(format!("{fn_name}: {e}"));
+                }
+            }
+            None => errs.push(format!("{fn_name}: not a function")),
+        }
+        self.collect(errs)
     }
 }
 
@@ -188,6 +250,32 @@ impl LuaEngine {
         }
         vms.get(key).unwrap().run(vars).map_err(|e| e.to_string())
     }
+
+    /// Call a named handler in surface `key` (event wiring). Uses the same
+    /// persistent VM as eval() — compiling it first if this is the first touch or
+    /// the source changed — so state is shared with the tick. Returns the
+    /// handler's { sets, frames, sends, logs } for the frontend to apply.
+    pub fn call(
+        &self,
+        key: &str,
+        surface_script: &str,
+        widgets: &[WidgetScript],
+        fn_name: &str,
+        vars: Value,
+        args: Value,
+    ) -> Result<EvalOut, String> {
+        let mut vms = self.vms.lock().unwrap();
+        let hash = hash_scripts(surface_script, widgets);
+        let stale = vms.get(key).map(|s| s.hash != hash).unwrap_or(true);
+        if stale {
+            let s = Surface::new(surface_script, widgets, hash).map_err(|e| e.to_string())?;
+            vms.insert(key.to_string(), s);
+        }
+        vms.get(key)
+            .unwrap()
+            .call(fn_name, vars, args)
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -202,7 +290,7 @@ mod tests {
             state = state or { n = 0 }
             function update(vars)
               state.n = state.n + 1
-              set('out', { value = state.n, color = vars.dist == '50' and '#0f0' or '#f00' })
+              set('out', { value = state.n, fill = vars.dist == '50' and '#0f0' or '#f00' })
               attr('lbl', 'label', 'hi')
               if state.n == 2 then send({ out = { index = 0, kind = 'rgb' } }) end
               log('tick ' .. state.n)
@@ -210,17 +298,55 @@ mod tests {
         "#;
         let widgets: Vec<WidgetScript> = vec![];
 
-        let a = eng.eval("k", script, &widgets, json!({ "dist": "50" })).unwrap();
+        let a = eng
+            .eval("k", script, &widgets, json!({ "dist": "50" }))
+            .unwrap();
         assert_eq!(a.sets["out"]["value"], json!(1)); // state persisted from 0→1
-        assert_eq!(a.sets["out"]["color"], json!("#0f0"));
+        assert_eq!(a.sets["out"]["fill"], json!("#0f0"));
         assert_eq!(a.sets["lbl"]["label"], json!("hi"));
         assert!(a.sends.as_array().unwrap().is_empty());
 
-        let b = eng.eval("k", script, &widgets, json!({ "dist": "999" })).unwrap();
+        let b = eng
+            .eval("k", script, &widgets, json!({ "dist": "999" }))
+            .unwrap();
         assert_eq!(b.sets["out"]["value"], json!(2)); // VM reused → state == 2
-        assert_eq!(b.sets["out"]["color"], json!("#f00"));
+        assert_eq!(b.sets["out"]["fill"], json!("#f00"));
         assert_eq!(b.sends.as_array().unwrap().len(), 1); // send fired on tick 2
         assert_eq!(b.sends[0]["out"]["index"], json!(0));
+    }
+
+    #[test]
+    fn call_named_handler_event_wiring() {
+        let eng = LuaEngine::default();
+        let script = r#"
+            state = state or { hits = 0 }
+            function on_press(a)
+              state.hits = state.hits + 1
+              set(a.name, { label = 'hit ' .. tostring(state.hits) })
+              frame(a.target, { hidden = a.value == 'hide' })
+              log('press from ' .. a.name)
+            end
+        "#;
+        let widgets: Vec<WidgetScript> = vec![];
+        let a = eng
+            .call("k", script, &widgets, "on_press", json!({ "t": 1 }),
+                  json!({ "name": "btn1", "target": "panelA", "value": "hide" }))
+            .unwrap();
+        assert_eq!(a.sets["btn1"]["label"], json!("hit 1"));
+        assert_eq!(a.frames["panelA"]["hidden"], json!(true));
+        assert!(a.logs.iter().any(|l| l.contains("press from btn1")));
+
+        // same VM → state persists across calls
+        let b = eng
+            .call("k", script, &widgets, "on_press", json!({}),
+                  json!({ "name": "btn1", "target": "panelA", "value": "show" }))
+            .unwrap();
+        assert_eq!(b.sets["btn1"]["label"], json!("hit 2"));
+        assert_eq!(b.frames["panelA"]["hidden"], json!(false));
+
+        // unknown handler → logged, no panic
+        let c = eng.call("k", script, &widgets, "nope", json!({}), json!({})).unwrap();
+        assert!(c.logs.iter().any(|l| l.contains("nope")));
     }
 
     #[test]
@@ -232,7 +358,9 @@ mod tests {
               frame('extra', { hidden = true })        -- explicit single override
             end
         "#;
-        let out = eng.eval("f", script, &[], json!({ "sel": "panelB" })).unwrap();
+        let out = eng
+            .eval("f", script, &[], json!({ "sel": "panelB" }))
+            .unwrap();
         assert_eq!(out.frames["panelA"]["hidden"], json!(true));
         assert_eq!(out.frames["panelB"]["hidden"], json!(false));
         assert_eq!(out.frames["extra"]["hidden"], json!(true));
@@ -242,8 +370,14 @@ mod tests {
     fn widget_transform_and_error_isolation() {
         let eng = LuaEngine::default();
         let widgets = vec![
-            WidgetScript { name: "ok".into(), script: "return (n or 0) * 2".into() },
-            WidgetScript { name: "bad".into(), script: "return nope()".into() }, // runtime error
+            WidgetScript {
+                name: "ok".into(),
+                script: "return (n or 0) * 2".into(),
+            },
+            WidgetScript {
+                name: "bad".into(),
+                script: "return nope()".into(),
+            }, // runtime error
         ];
         let out = eng.eval("w", "", &widgets, json!({ "ok": "21" })).unwrap();
         assert_eq!(out.sets["ok"]["value"], json!(42)); // transform ran (Lua 5.4 integer)
@@ -254,7 +388,9 @@ mod tests {
     fn sandbox_blocks_io() {
         let eng = LuaEngine::default();
         // os is nil'd → calling it errors, surfaced in logs, no panic
-        let out = eng.eval("s", "function update(v) os.exit(0) end", &[], json!({})).unwrap();
+        let out = eng
+            .eval("s", "function update(v) os.exit(0) end", &[], json!({}))
+            .unwrap();
         assert!(out.logs.iter().any(|l| l.contains("update")));
     }
 }

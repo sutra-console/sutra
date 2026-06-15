@@ -41,14 +41,17 @@ export function WasmYantraCanvas({
     if (ev.kind === "value") {
       rt.publish(ev.name, ev.value); // slider/toggle/color → the bus
       if (w.send) rt.fire(w.send, String(ev.value));
+      rt.fireWidgetEvent(w, "value", ev.value); // Lua handler (if w.handlers.value)
     } else if (ev.kind === "press") {
       rt.fire(w.send); // button
+      rt.fireWidgetEvent(w, "press"); // Lua handler (if w.handlers.press)
     } else if (ev.kind === "select") {
       // selector: publish the chosen value (scripts read it to show/hide frames)
       // and fire the chosen option's own action.
       rt.publish(ev.name, ev.value);
       const opt = typeof ev.index === "number" ? w.options?.[ev.index] : undefined;
       if (opt?.send) rt.fire(opt.send, String(ev.value));
+      rt.fireWidgetEvent(w, "select", ev.value); // Lua handler (if w.handlers.select)
     }
   };
 
@@ -87,7 +90,7 @@ export function WasmYantraCanvas({
       const ov = rt.ovOf(w) ?? {};
       widgets[w.name] = {
         value: ov.value ?? rt.valueOf(w),
-        color: ov.color, fg: ov.fg, label: ov.label, hidden: ov.hidden, disabled: ov.disabled,
+        fill: ov.fill, fg: ov.fg, label: ov.label, hidden: ov.hidden, disabled: ov.disabled,
       };
     }
     // frame overrides (script-driven hide/show → selector composes tabs)

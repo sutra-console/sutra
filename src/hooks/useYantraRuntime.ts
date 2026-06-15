@@ -7,8 +7,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   MSG, dataWrite, i2cXfer, invokeCommand, sendCmd, outputRgb, outputPwm, outputSet,
-  onData, yantraEval, bindOf, computeBus, evalArray, evalBind, needsConsole, CURRENT_CONN,
-  type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
+  onData, yantraEval, yantraCall, bindOf, computeBus, evalArray, evalBind, needsConsole, CURRENT_CONN,
+  type YantraAction, type YantraEval, type YantraFrame, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
 
 const enc = new TextEncoder();
@@ -58,6 +58,8 @@ export interface YantraRuntime {
   frameOverrides: Record<string, Record<string, unknown>>;
   publish: (name: string, v: unknown) => void;
   fire: (a: YantraAction | undefined, value?: string) => void;
+  callFn: (func: string, args: Record<string, unknown>) => void; // call a surface Lua handler
+  fireWidgetEvent: (w: YantraWidget, event: string, value?: unknown) => void; // w.handlers[event]
   hasScripts: boolean;
   scriptLog: string[];
   clearLog: () => void;
@@ -124,6 +126,23 @@ export function useYantraRuntime(spec: YantraSpec, disabled?: boolean): YantraRu
   const varsRef = useRef(vars); varsRef.current = vars;
   const specRef = useRef(spec); specRef.current = spec;
   const lastTick = useRef(0);
+
+  // Apply a yantraEval/yantraCall result. The tick (merge=false) is authoritative
+  // and replaces the override maps; an event handler (merge=true) layers on top so
+  // its set()/frame() show immediately (the next tick then recomputes from state).
+  const applyEval = useCallback((out: YantraEval, merge: boolean) => {
+    const ov: Record<string, Record<string, unknown>> = {};
+    for (const [name, attrs] of Object.entries(out.sets ?? {})) {
+      if (!attrs || typeof attrs !== "object") continue;
+      if ((attrs as { value?: unknown }).value !== undefined) publish(name, (attrs as { value?: unknown }).value);
+      ov[name] = attrs as Record<string, unknown>;
+    }
+    setOverrides((prev) => (merge ? { ...prev, ...ov } : ov));
+    setFrameOverrides((prev) => (merge ? { ...prev, ...(out.frames ?? {}) } : out.frames ?? {}));
+    for (const a of out.sends ?? []) runAction(a).catch(() => {});
+    if (out.logs?.length) setScriptLog((l) => [...l, ...out.logs].slice(-50));
+  }, [publish]);
+
   useEffect(() => {
     if (!hasScripts || disabled) return;
     const key = spec.name || "yantra";
@@ -136,29 +155,38 @@ export function useYantraRuntime(spec: YantraSpec, disabled?: boolean): YantraRu
       lastTick.current = now;
       try {
         const out = await yantraEval(key, s.script ?? "", ws, { ...varsRef.current, t: now, dt });
-        if (!alive) return;
-        const ov: Record<string, Record<string, unknown>> = {};
-        for (const [name, attrs] of Object.entries(out.sets ?? {})) {
-          if (!attrs || typeof attrs !== "object") continue;
-          if ((attrs as { value?: unknown }).value !== undefined) publish(name, (attrs as { value?: unknown }).value);
-          ov[name] = attrs as Record<string, unknown>;
-        }
-        setOverrides(ov);
-        setFrameOverrides(out.frames ?? {});
-        for (const a of out.sends ?? []) runAction(a).catch(() => {});
-        if (out.logs?.length) setScriptLog((l) => [...l, ...out.logs].slice(-50));
+        if (alive) applyEval(out, false);
       } catch (e) {
         setScriptLog((l) => [...l, `! ${e}`].slice(-50));
       }
     }, 100);
     return () => { alive = false; clearInterval(id); };
-  }, [hasScripts, disabled, spec.name]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [hasScripts, disabled, spec.name, applyEval]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Event wiring: call a surface handler by name with a payload, apply its result.
+  const callFn = useCallback(async (func: string, args: Record<string, unknown>) => {
+    const s = specRef.current;
+    const ws = (s.widgets ?? []).filter((w) => w.name && w.script).map((w) => ({ name: w.name!, script: w.script! }));
+    try {
+      const out = await yantraCall(s.name || "yantra", s.script ?? "", ws, func, { ...varsRef.current }, args);
+      applyEval(out, true);
+    } catch (e) {
+      setScriptLog((l) => [...l, `! ${e}`].slice(-50));
+    }
+  }, [applyEval]);
+
+  // Fire a widget's `handlers[event]` (if any) → callFn with a {name,event,value} payload.
+  const fireWidgetEvent = useCallback((w: YantraWidget, event: string, value?: unknown) => {
+    const fn = w.handlers?.[event];
+    if (fn) callFn(fn, { name: w.name ?? "", event, value: value ?? null });
+  }, [callFn]);
+
   const ovOf = (w: YantraWidget): Record<string, unknown> | undefined => (w.name ? overrides[w.name] : undefined);
   const frameOvOf = (id: string): Record<string, unknown> | undefined => frameOverrides[id];
 
   return {
     widgets, frames, vars, activeTabs, setActiveTabs, activeTabOf,
-    valueOf, rowsOf, ovOf, frameOvOf, frameOverrides, publish, fire, hasScripts, scriptLog,
+    valueOf, rowsOf, ovOf, frameOvOf, frameOverrides, publish, fire, callFn, fireWidgetEvent, hasScripts, scriptLog,
     clearLog: useCallback(() => setScriptLog([]), []),
   };
 }

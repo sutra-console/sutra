@@ -689,9 +689,22 @@ export interface YantraColumn {
   expr?: string; // JS expression with item, i (and v=item, n=Number(item)) in scope
 }
 
+export interface YantraRenderer {
+  fill?: string; // CSS color for this renderer pass
+  stroke?: string | boolean; // CSS color for the outline, or false for no stroke
+  strokeWidth?: number;
+  radius?: number; // corner radius in px
+  padding?: number | { x?: number; y?: number; horizontal?: number; vertical?: number };
+}
+
+export interface YantraChrome {
+  renderers?: YantraRenderer[];
+  fg?: string; // text/foreground color
+}
+
 /** A widget in a .yantra control surface. Loose by design — new types/fields
  *  (scripts, plugins) slot in without breaking the renderer. */
-export interface YantraWidget {
+export interface YantraWidget extends YantraChrome {
   type: string; // button | select | slider | toggle | readout | label | tabs | …
   name?: string; // stable id for scripting / addressing ("named output"); mlua routes by this
   label?: string;
@@ -707,9 +720,11 @@ export interface YantraWidget {
   match?: string; // readout/table: regex over the console; capture group 1 is shown (legacy ⇒ bind{source:"uart"})
   bind?: YantraBind; // data-flow: fill this control from a source (readout/label/toggle/slider)
   emit?: YantraEmit; // data-flow (reverse): drive a device output from a watched value
+  // event wiring: map an event to a surface-Lua handler called with a payload table
+  // {name, event, value, …}. e.g. { press: "slider_press", value: "on_slide" }. The
+  // handler's set()/frame()/send() apply like a tick. (Distinct from `on`/`send`.)
+  handlers?: Record<string, string>;
   script?: string; // Lua transform: (v, vars) → value/attrs published under `name` (wins over bind expr)
-  color?: string; // presentation: background colour (CSS); script-overridable via attr(name,"color",…)
-  fg?: string; // presentation: text colour (CSS)
   image?: string; // presentation: image src / data-URI (the "image" widget; script-overridable)
   all?: boolean; // table text source: matchAll → one row per match
   source?: YantraSource; // table: an array-valued source ("var:<name>" or a text source with `all`)
@@ -912,7 +927,7 @@ export function needsConsole(widgets: YantraWidget[]): boolean {
 
 /** A container node in the layer tree. Has its own bounds; children are positioned
  *  relative to it and clipped to it. Nestable via `parent` (or `tab` to live in a pane). */
-export interface YantraFrame {
+export interface YantraFrame extends YantraChrome {
   id: string;
   name?: string;
   parent?: string; // parent frame id (nesting); absent = top level
@@ -939,13 +954,14 @@ export interface YantraSpec {
   design?: { w: number; h: number }; // legacy (pre-C anchor reference)
   coordV?: number; // coordinate-model version: 2 = container-relative (Phase C). absent = pre-C grid
   script?: string; // surface-level Lua: defines `function update(vars) … end`, run each tick
+  stage?: YantraChrome; // root surface chrome via stacked renderer passes
   frames?: YantraFrame[]; // container tree (each has its own bounds; children relative)
   widgets?: YantraWidget[];
 }
 
 /** Result of one yantra Lua tick (mirrors the Rust lua::EvalOut). */
 export interface YantraEval {
-  sets: Record<string, Record<string, unknown>>; // name → { value?, color?, fg?, label?, image?, hidden?, disabled? }
+  sets: Record<string, Record<string, unknown>>; // name → { value?, fill?, fg?, label?, image?, hidden?, disabled? }
   frames: Record<string, Record<string, unknown>>; // frame id → { hidden? } (container overrides)
   sends: YantraAction[]; // actions to dispatch
   logs: string[]; // script log lines / errors
@@ -957,9 +973,21 @@ export const yantraEval = (
   widgets: { name: string; script: string }[],
   vars: Record<string, unknown>,
 ) => invoke<YantraEval>("yantra_eval", { key, script, widgets, vars });
+/** Event wiring: call a named surface handler (a widget's `on:{press:fn}` etc.),
+ *  passing the current bus + the event payload. Returns the same {sets,frames,
+ *  sends,logs} as a tick. Shares the per-surface VM with yantraEval. */
+export const yantraCall = (
+  key: string,
+  script: string,
+  widgets: { name: string; script: string }[],
+  func: string,
+  vars: Record<string, unknown>,
+  args: Record<string, unknown>,
+) => invoke<YantraEval>("yantra_call", { key, script, widgets, func, vars, args });
 export interface YantraDoc {
   file: string; // "gps.yantra"
   doc: YantraSpec;
+  error?: string | null;
 }
 /** Load the workspace's .yantra control surfaces (parsed YAML→JSON). */
 export const listYantras = () => invoke<YantraDoc[]>("list_yantras");

@@ -1,5 +1,7 @@
 mod ble;
+mod boards;
 pub mod interview; // live ZDP interview: sniffed frame → node discovery
+pub mod lua; // sandboxed Lua scripting for .yantra control surfaces
 pub mod macrovars; // {$name} macro-variable substitution (Zigbee inject + general)
 mod mcp;
 pub mod protocol;
@@ -12,7 +14,7 @@ pub mod zigbee; // Zigbee NWK/APS AES-CCM* security (network-model phase B)
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use serial::{ConnState, McpToolFlags, PortDesc, RespFrame, SerialParams, Shared, MacroRec};
+use serial::{ConnState, MacroRec, McpToolFlags, PortDesc, RespFrame, SerialParams, Shared};
 use tauri::{Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 use vault::{SecurityStatus, Vault};
@@ -21,6 +23,7 @@ use vault::{SecurityStatus, Vault};
 struct AppState {
     shared: Arc<Shared>,
     mcp: Mutex<Option<(CancellationToken, u16)>>,
+    lua: lua::LuaEngine, // per-surface yantra script VMs
 }
 
 #[derive(Serialize)]
@@ -50,6 +53,20 @@ fn autodetect() -> Result<DetectResult, String> {
 #[tauri::command]
 fn autodetect_mux() -> Result<String, String> {
     serial::autodetect_mux()
+}
+
+/// Probe Duta-candidate ports for their board name (skips the connected port) so
+/// the ports list can show e.g. "COM5 · Duta S3-Zero". Returns (port, name) pairs.
+#[tauri::command]
+fn probe_boards(state: tauri::State<AppState>) -> Vec<(String, String)> {
+    serial::probe_boards(&state.shared)
+}
+
+/// Local board-def JSON files (<app_data>/boards/) that extend/override the
+/// frontend's built-in board database.
+#[tauri::command]
+fn list_boards(app: tauri::AppHandle) -> Vec<serde_json::Value> {
+    boards::list_boards(&app)
 }
 
 #[tauri::command]
@@ -138,7 +155,11 @@ fn data_write(state: tauri::State<AppState>, bytes: Vec<u8>) -> Result<(), Strin
 
 /// Run macro text through the macro player (escapes + `+++DELAY/ENTER/CTRL...+++`).
 #[tauri::command]
-fn run_text(state: tauri::State<AppState>, text: String, name: Option<String>) -> Result<(), String> {
+fn run_text(
+    state: tauri::State<AppState>,
+    text: String,
+    name: Option<String>,
+) -> Result<(), String> {
     serial::play(&state.shared, name.as_deref().unwrap_or("macro"), &text)
 }
 
@@ -171,8 +192,23 @@ fn macros_get(state: tauri::State<AppState>) -> Vec<MacroRec> {
 }
 
 #[tauri::command]
-fn macro_upsert(state: tauri::State<AppState>, name: String, text: String, secret: bool, set: String) {
-    serial::macro_upsert(&state.shared, MacroRec { name, text, secret, set, tier: 0 });
+fn macro_upsert(
+    state: tauri::State<AppState>,
+    name: String,
+    text: String,
+    secret: bool,
+    set: String,
+) {
+    serial::macro_upsert(
+        &state.shared,
+        MacroRec {
+            name,
+            text,
+            secret,
+            set,
+            tier: 0,
+        },
+    );
 }
 
 #[derive(Serialize, serde::Deserialize)]
@@ -184,13 +220,21 @@ struct MacroSetFile {
 
 /// Export a set (or all macros) to a JSON file at `path`.
 #[tauri::command]
-fn export_set(state: tauri::State<AppState>, path: String, set: Option<String>) -> Result<(), String> {
+fn export_set(
+    state: tauri::State<AppState>,
+    path: String,
+    set: Option<String>,
+) -> Result<(), String> {
     let all = serial::macros_all(&state.shared);
     let macros: Vec<MacroRec> = match &set {
         Some(s) => all.into_iter().filter(|m| &m.set == s).collect(),
         None => all,
     };
-    let doc = MacroSetFile { set: set.unwrap_or_default(), version: 1, macros };
+    let doc = MacroSetFile {
+        set: set.unwrap_or_default(),
+        version: 1,
+        macros,
+    };
     let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
@@ -199,7 +243,8 @@ fn export_set(state: tauri::State<AppState>, path: String, set: Option<String>) 
 #[tauri::command]
 fn import_set(state: tauri::State<AppState>, path: String) -> Result<usize, String> {
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let doc: MacroSetFile = serde_json::from_str(&json).map_err(|e| format!("bad set file: {e}"))?;
+    let doc: MacroSetFile =
+        serde_json::from_str(&json).map_err(|e| format!("bad set file: {e}"))?;
     let recs: Vec<MacroRec> = doc
         .macros
         .into_iter()
@@ -227,7 +272,10 @@ fn get_workspace(app: tauri::AppHandle) -> Option<String> {
 /// Open a folder picker; on selection, adopt it as the workspace and re-point
 /// the macro store into its .sutra/ (loading existing macros or migrating).
 #[tauri::command]
-fn pick_workspace(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Option<String>, String> {
+fn pick_workspace(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<Option<String>, String> {
     let picked = workspace::pick(&app)?;
     if picked.is_some() {
         // Silent unlock with the cleartext app key (no-op if no vault / password set),
@@ -242,7 +290,11 @@ fn pick_workspace(app: tauri::AppHandle, state: tauri::State<AppState>) -> Resul
 
 /// Adopt a known folder path as the workspace (Open Recent) and re-point macros.
 #[tauri::command]
-fn set_workspace(app: tauri::AppHandle, state: tauri::State<AppState>, path: String) -> Result<String, String> {
+fn set_workspace(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    path: String,
+) -> Result<String, String> {
     let set = workspace::set_known(&app, &path)?;
     serial::relocate_macros(&state.shared, workspace::macros_path(&app));
     Ok(set)
@@ -265,13 +317,21 @@ fn export_networks(app: tauri::AppHandle, path: String) -> Result<(), String> {
 /// Save raw ble-sniff records as a pcap (into the workspace's captures/, or via
 /// a save dialog if no workspace). Returns the written path.
 #[tauri::command]
-fn save_ble_pcap(app: tauri::AppHandle, name: String, records: Vec<Vec<u8>>) -> Result<String, String> {
+fn save_ble_pcap(
+    app: tauri::AppHandle,
+    name: String,
+    records: Vec<Vec<u8>>,
+) -> Result<String, String> {
     workspace::save_ble_pcap(&app, &name, records)
 }
 
 /// Save raw ieee802154 records as an 802.15.4-TAP pcap (workspace or dialog).
 #[tauri::command]
-fn save_ieee154_pcap(app: tauri::AppHandle, name: String, records: Vec<Vec<u8>>) -> Result<String, String> {
+fn save_ieee154_pcap(
+    app: tauri::AppHandle,
+    name: String,
+    records: Vec<Vec<u8>>,
+) -> Result<String, String> {
     workspace::save_ieee154_pcap(&app, &name, records)
 }
 
@@ -342,7 +402,11 @@ fn list_yantras(app: tauri::AppHandle) -> Vec<workspace::YantraDoc> {
 
 /// Write a control surface spec back to its .yantra file (visual editor save).
 #[tauri::command]
-fn save_yantra(app: tauri::AppHandle, file: String, spec: serde_json::Value) -> Result<String, String> {
+fn save_yantra(
+    app: tauri::AppHandle,
+    file: String,
+    spec: serde_json::Value,
+) -> Result<String, String> {
     workspace::save_yantra(&app, &file, spec)
 }
 
@@ -356,6 +420,41 @@ fn create_yantra(app: tauri::AppHandle, name: String) -> Result<String, String> 
 #[tauri::command]
 fn delete_yantra(app: tauri::AppHandle, file: String) -> Result<(), String> {
     workspace::delete_yantra(&app, &file)
+}
+
+/// Import an external .yantra/.yaml/.json file into the workspace; returns the saved filename.
+#[tauri::command]
+fn import_yantra(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    workspace::import_yantra(&app, &path)
+}
+
+/// Run one reactive tick of a yantra surface's Lua scripts (per-surface persistent
+/// VM). `vars` is the frontend bus snapshot; returns { sets, sends, logs } to apply.
+#[tauri::command]
+fn yantra_eval(
+    state: tauri::State<AppState>,
+    key: String,
+    script: String,
+    widgets: Vec<lua::WidgetScript>,
+    vars: serde_json::Value,
+) -> Result<lua::EvalOut, String> {
+    state.lua.eval(&key, &script, &widgets, vars)
+}
+
+/// Event wiring: call a named handler (a widget's `on:{press:fn}` etc.) in the
+/// surface VM, passing the current bus (`vars`) + the event payload (`args`).
+/// Returns the handler's { sets, frames, sends, logs } for the frontend to apply.
+#[tauri::command]
+fn yantra_call(
+    state: tauri::State<AppState>,
+    key: String,
+    script: String,
+    widgets: Vec<lua::WidgetScript>,
+    func: String,
+    vars: serde_json::Value,
+    args: serde_json::Value,
+) -> Result<lua::EvalOut, String> {
+    state.lua.call(&key, &script, &widgets, &func, vars, args)
 }
 
 // ---- security: at-rest secret encryption ----
@@ -384,7 +483,10 @@ fn security_enable(
 
 /// Decrypt the vault back to plaintext files and turn encryption off (needs unlock).
 #[tauri::command]
-fn security_disable(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<SecurityStatus, String> {
+fn security_disable(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<SecurityStatus, String> {
     let dot = workspace::dot_sutra_existing(&app).ok_or("select a workspace first")?;
     vault::disable(&app, &dot)?;
     workspace::refresh_gitignore(&app);
@@ -424,7 +526,10 @@ fn security_set_password(
     new: Option<String>,
 ) -> Result<SecurityStatus, String> {
     vault::set_password(&app, old, new)?;
-    Ok(vault::status(&app, workspace::dot_sutra_existing(&app).as_deref()))
+    Ok(vault::status(
+        &app,
+        workspace::dot_sutra_existing(&app).as_deref(),
+    ))
 }
 
 /// Generate a fresh app key (re-keys an encrypted workspace; needs unlock + no password).
@@ -462,7 +567,10 @@ fn security_add_recipient(
 
 /// Remove a vault recipient and re-encrypt (needs unlock; refuses this app's own key).
 #[tauri::command]
-fn security_remove_recipient(app: tauri::AppHandle, pubkey: String) -> Result<SecurityStatus, String> {
+fn security_remove_recipient(
+    app: tauri::AppHandle,
+    pubkey: String,
+) -> Result<SecurityStatus, String> {
     let dot = workspace::dot_sutra_existing(&app).ok_or("select a workspace first")?;
     vault::remove_recipient(&app, &dot, &pubkey)?;
     Ok(vault::status(&app, Some(&dot)))
@@ -513,7 +621,10 @@ fn mcp_stop(state: tauri::State<AppState>) -> McpStatus {
     if let Some((ct, _)) = state.mcp.lock().unwrap().take() {
         ct.cancel();
     }
-    McpStatus { running: false, url: None }
+    McpStatus {
+        running: false,
+        url: None,
+    }
 }
 
 /// Set which MCP tool groups are exposed to the LLM (applies on next MCP session).
@@ -525,10 +636,14 @@ fn set_mcp_tools(state: tauri::State<AppState>, flags: McpToolFlags) {
 #[tauri::command]
 fn mcp_status(state: tauri::State<AppState>) -> McpStatus {
     match &*state.mcp.lock().unwrap() {
-        Some((_, port)) => {
-            McpStatus { running: true, url: Some(format!("http://127.0.0.1:{port}/mcp")) }
-        }
-        None => McpStatus { running: false, url: None },
+        Some((_, port)) => McpStatus {
+            running: true,
+            url: Some(format!("http://127.0.0.1:{port}/mcp")),
+        },
+        None => McpStatus {
+            running: false,
+            url: None,
+        },
     }
 }
 
@@ -554,6 +669,8 @@ pub fn run() {
             list_ports,
             autodetect,
             autodetect_mux,
+            probe_boards,
+            list_boards,
             connect,
             connect_muxed,
             ble_scan,
@@ -593,6 +710,9 @@ pub fn run() {
             save_yantra,
             create_yantra,
             delete_yantra,
+            import_yantra,
+            yantra_eval,
+            yantra_call,
             security_status,
             security_enable,
             security_disable,
