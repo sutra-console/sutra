@@ -689,15 +689,16 @@ impl YantraApp {
 
             ui.add_space(4.0);
             ui.strong("Layers");
+            ui.label(RichText::new("drag to reorder").size(9.0).weak());
             let mut toggle_sel: Option<usize> = None;
             let mut hide_toggle: Option<usize> = None;
             let mut del: Option<usize> = None;
-            let mut move_up: Option<usize> = None;
-            let mut move_down: Option<usize> = None;
             let mut sel_frame: Option<usize> = None;
             let mut hide_frame: Option<usize> = None;
             let mut del_frame: Option<usize> = None;
-            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+            let mut reorder_w: Option<(usize, usize)> = None; // (from, to) within widgets
+            let mut reorder_f: Option<(usize, usize)> = None; // (from, to) within frames
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                 // frames first
                 for fi in (0..fcount).rev() {
                     let f = &sh.spec["frames"][fi];
@@ -708,8 +709,16 @@ impl YantraApp {
                         if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false)).on_hover_text("Show/hide").clicked() {
                             hide_frame = Some(fi);
                         }
-                        if ui.selectable_label(is_sel, format!("[ ] {nm}")).clicked() {
+                        let src = ui.dnd_drag_source(egui::Id::new(("lyf", fi)), LayerDrag::Frame(fi), |ui| {
+                            ui.selectable_label(is_sel, format!("[ ] {nm}"))
+                        });
+                        if src.inner.clicked() {
                             sel_frame = Some(fi);
+                        }
+                        if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
+                            if let LayerDrag::Frame(from) = *p {
+                                reorder_f = Some((from, fi));
+                            }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("x").on_hover_text("Delete frame").clicked() { del_frame = Some(fi); }
@@ -730,13 +739,19 @@ impl YantraApp {
                             hide_toggle = Some(i);
                         }
                         let txt = if name.is_empty() { format!("{ty} #{i}") } else { format!("{name}  ({ty})") };
-                        if ui.selectable_label(is_sel, txt).clicked() {
+                        let src = ui.dnd_drag_source(egui::Id::new(("lyw", i)), LayerDrag::Widget(i), |ui| {
+                            ui.selectable_label(is_sel, txt)
+                        });
+                        if src.inner.clicked() {
                             toggle_sel = Some(i);
+                        }
+                        if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
+                            if let LayerDrag::Widget(from) = *p {
+                                reorder_w = Some((from, i));
+                            }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("x").on_hover_text("Delete").clicked() { del = Some(i); }
-                            if ui.small_button("v").on_hover_text("Send down").clicked() { move_down = Some(i); }
-                            if ui.small_button("^").on_hover_text("Bring up").clicked() { move_up = Some(i); }
                         });
                     });
                 }
@@ -776,11 +791,21 @@ impl YantraApp {
                 delete_widget(&mut sh.spec, i);
                 sh.selected.clear();
             }
-            if let Some(i) = move_up {
-                if i + 1 < count { push_undo(&mut sh); swap_widgets(&mut sh.spec, i, i + 1); remap_sel(&mut sh.selected, i, i + 1); }
+            if let Some((from, to)) = reorder_w {
+                if from != to {
+                    push_undo(&mut sh);
+                    let ni = move_in_array(&mut sh.spec, "widgets", from, to);
+                    sh.selected = vec![ni];
+                    sh.selected_frame = None;
+                }
             }
-            if let Some(i) = move_down {
-                if i > 0 { push_undo(&mut sh); swap_widgets(&mut sh.spec, i, i - 1); remap_sel(&mut sh.selected, i, i - 1); }
+            if let Some((from, to)) = reorder_f {
+                if from != to {
+                    push_undo(&mut sh);
+                    let ni = move_in_array(&mut sh.spec, "frames", from, to);
+                    sh.selected_frame = Some(ni);
+                    sh.selected.clear();
+                }
             }
 
             ui.separator();
@@ -943,23 +968,24 @@ fn edit_frame_props(ui: &mut egui::Ui, sh: &mut Shared, fi: usize, f: &Value) {
     }
 }
 
-fn swap_widgets(spec: &mut Value, a: usize, b: usize) {
-    if let Some(arr) = spec.get_mut("widgets").and_then(|w| w.as_array_mut()) {
-        if a < arr.len() && b < arr.len() {
-            arr.swap(a, b);
-        }
-    }
-}
-fn remap_sel(sel: &mut [usize], a: usize, b: usize) {
-    for s in sel.iter_mut() {
-        if *s == a {
-            *s = b;
-        } else if *s == b {
-            *s = a;
-        }
-    }
+/// Layer-list drag payload (which list + source index).
+#[derive(Clone, Copy)]
+enum LayerDrag {
+    Widget(usize),
+    Frame(usize),
 }
 
+/// Move an array element from→to (drop-before semantics), returning its new index.
+fn move_in_array(spec: &mut Value, key: &str, from: usize, to: usize) -> usize {
+    let Some(arr) = spec.get_mut(key).and_then(|v| v.as_array_mut()) else { return from };
+    if from >= arr.len() {
+        return from;
+    }
+    let item = arr.remove(from);
+    let insert_at = if to > from { to - 1 } else { to }.min(arr.len());
+    arr.insert(insert_at, item);
+    insert_at
+}
 /// Snapshot the resolved absolute px geometry of `idxs` at drag start, plus each
 /// widget's parent container rect (so store-back is parent-relative for nesting).
 fn capture_drag(resize: bool, start: Pos2, spec: &Value, idxs: &[usize], parent_of: &HashMap<usize, Rect>) -> Drag {
