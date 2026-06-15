@@ -547,6 +547,9 @@ impl YantraApp {
                 collect_edit_layout("root", canvas, &widgets, &frames, &tabs_snapshot, &mut placements, &mut frame_rects, &mut tabbars);
                 let parent_of: HashMap<usize, Rect> = placements.iter().map(|(i, _, p)| (*i, *p)).collect();
                 let frame_parent_of: HashMap<usize, Rect> = frame_rects.iter().map(|(i, _, p)| (*i, *p)).collect();
+                let frame_by_id: HashMap<String, usize> = (0..frames.len())
+                    .filter_map(|fi| frames[fi].get("id").and_then(|v| v.as_str()).map(|id| (id.to_string(), fi)))
+                    .collect();
 
                 // empty-canvas click clears selection; drag = marquee. Registered FIRST so
                 // the frame/widget interactions (added after) sit on top and win the pointer.
@@ -641,11 +644,23 @@ impl YantraApp {
                             ui.close_menu();
                         }
                     });
+                    // a selected widget interacts directly (precise edit after a layers
+                    // select); otherwise a click/drag grabs the top-most unlocked ancestor.
+                    let target = if is_sel { Hit::Widget(i) } else { click_target(i, &widgets, &frames, &frame_by_id) };
                     if resp.clicked() {
-                        click_sel = Some((i, shift));
+                        match target {
+                            Hit::Frame(fi) => click_frame = Some(fi),
+                            Hit::Widget(wi) => click_sel = Some((wi, shift)),
+                            Hit::Blocked => {}
+                        }
                     }
                     if resp.drag_started() {
-                        begin = Some((i, false, false, resp.interact_pointer_pos().unwrap_or(rect.min)));
+                        let pos = resp.interact_pointer_pos().unwrap_or(rect.min);
+                        match target {
+                            Hit::Frame(fi) => begin = Some((fi, false, true, pos)),
+                            Hit::Widget(wi) => begin = Some((wi, false, false, pos)),
+                            Hit::Blocked => {}
+                        }
                     }
                     if resp.dragged() {
                         pointer = resp.interact_pointer_pos();
@@ -1167,6 +1182,42 @@ fn edit_frame_props(ui: &mut egui::Ui, sh: &mut Shared, fi: usize, f: &Value) {
 enum LayerDrag {
     Widget(usize),
     Frame(usize),
+}
+
+/// What a canvas click on widget `i` should actually act on.
+enum Hit {
+    Widget(usize),
+    Frame(usize),
+    Blocked, // inside a fully-locked frame chain
+}
+
+/// Resolve a canvas click on a widget to its top-most *unlocked* ancestor frame
+/// (so clicking inside a frame grabs the group, not the inner control). A widget
+/// with no frame ancestry hits itself; a fully-locked chain is blocked.
+fn click_target(i: usize, widgets: &[Value], frames: &[Value], frame_by_id: &HashMap<String, usize>) -> Hit {
+    let mut chain: Vec<usize> = Vec::new();
+    let mut fid = widgets.get(i).and_then(|w| w.get("frame")).and_then(|v| v.as_str()).map(str::to_string);
+    let mut guard = 0;
+    while let Some(id) = fid {
+        guard += 1;
+        if guard > 64 {
+            break; // cycle guard
+        }
+        let Some(&fi) = frame_by_id.get(&id) else { break };
+        chain.push(fi);
+        fid = frames.get(fi).and_then(|f| f.get("parent")).and_then(|v| v.as_str()).map(str::to_string);
+    }
+    if chain.is_empty() {
+        return Hit::Widget(i);
+    }
+    // chain is innermost→outermost; pick the outermost unlocked frame
+    for &fi in chain.iter().rev() {
+        let locked = frames.get(fi).and_then(|f| f.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false);
+        if !locked {
+            return Hit::Frame(fi);
+        }
+    }
+    Hit::Blocked
 }
 
 /// Wrap the selected widgets in a new frame sized to their bounding box, reparenting
