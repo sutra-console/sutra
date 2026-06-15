@@ -28,6 +28,7 @@ struct Shared {
     drag: Option<Drag>,
     marquee: Option<Pos2>, // rubber-band select origin (canvas px)
     selected_frame: Option<usize>, // index into spec.frames (frames select one at a time)
+    pending_group: bool, // layers context-menu "Group into Frame" → applied in the canvas pass
 }
 
 /// An in-progress move/resize. Captured once at drag-start so we map the *absolute*
@@ -416,6 +417,7 @@ impl YantraApp {
         let mut add: Option<String> = None;
         let (mut do_delete, mut do_save, mut do_undo, mut do_redo) = (false, false, undo_key, redo_key);
         let mut align: Option<&str> = None;
+        let mut do_group = false; // wrap the selection in a new frame (resolved in the canvas pass)
         egui::TopBottomPanel::top("ed_toolbar").show(ctx, |ui| {
             // ASCII-only labels: egui's default font lacks box-drawing/emoji glyphs.
             ui.horizontal_wrapped(|ui| {
@@ -448,6 +450,9 @@ impl YantraApp {
                     }
                 }
                 ui.separator();
+                if ui.button("Group").on_hover_text("Wrap the selected widgets in a new frame").clicked() {
+                    do_group = true;
+                }
                 if ui.button("Save").clicked() {
                     do_save = true;
                 }
@@ -573,6 +578,12 @@ impl YantraApp {
                     draw_interact_widget(&mut child, rect, &ty, &name, &label, &val, dbg, dfg, &noop, w, self);
 
                     let resp = ui.interact(rect, id, Sense::click_and_drag());
+                    resp.context_menu(|ui| {
+                        if ui.button("Group into Frame").clicked() {
+                            do_group = true;
+                            ui.close_menu();
+                        }
+                    });
                     if resp.clicked() {
                         click_sel = Some((i, shift));
                     }
@@ -672,6 +683,19 @@ impl YantraApp {
                 if stop {
                     sh.drag = None;
                 }
+                // Group into Frame: wrap the selection (uses the just-walked abs rects).
+                // do_group = toolbar/canvas this pass; pending_group = layers context menu.
+                let do_group = do_group || sh.pending_group;
+                sh.pending_group = false;
+                if do_group && !sh.selected.is_empty() {
+                    let sel = sh.selected.clone();
+                    let abs: HashMap<usize, Rect> = placements.iter().map(|(i, r, _)| (*i, *r)).collect();
+                    push_undo(&mut sh);
+                    if let Some(fi) = group_into_frame(&mut sh.spec, &sel, &abs, canvas) {
+                        sh.selected.clear();
+                        sh.selected_frame = Some(fi);
+                    }
+                }
             });
     }
 
@@ -698,6 +722,8 @@ impl YantraApp {
             let mut del_frame: Option<usize> = None;
             let mut reorder_w: Option<(usize, usize)> = None; // (from, to) within widgets
             let mut reorder_f: Option<(usize, usize)> = None; // (from, to) within frames
+            let mut reparent_w: Option<(usize, usize)> = None; // (widget idx, frame idx) — drop widget on a frame row
+            let mut group_click = false; // layers "Group into Frame" → sh.pending_group
             egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                 // frames first
                 for fi in (0..fcount).rev() {
@@ -716,8 +742,9 @@ impl YantraApp {
                             sel_frame = Some(fi);
                         }
                         if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
-                            if let LayerDrag::Frame(from) = *p {
-                                reorder_f = Some((from, fi));
+                            match *p {
+                                LayerDrag::Frame(from) => reorder_f = Some((from, fi)),
+                                LayerDrag::Widget(from) => reparent_w = Some((from, fi)), // drop a widget INTO this frame
                             }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -745,6 +772,12 @@ impl YantraApp {
                         if src.inner.clicked() {
                             toggle_sel = Some(i);
                         }
+                        src.response.context_menu(|ui| {
+                            if ui.button("Group into Frame").clicked() {
+                                group_click = true;
+                                ui.close_menu();
+                            }
+                        });
                         if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
                             if let LayerDrag::Widget(from) = *p {
                                 reorder_w = Some((from, i));
@@ -794,8 +827,16 @@ impl YantraApp {
             if let Some((from, to)) = reorder_w {
                 if from != to {
                     push_undo(&mut sh);
-                    let ni = move_in_array(&mut sh.spec, "widgets", from, to);
-                    sh.selected = vec![ni];
+                    // drag the whole selection if the dragged row is part of a multi-select
+                    if sh.selected.len() > 1 && sh.selected.contains(&from) {
+                        let sel = sh.selected.clone();
+                        let n = sel.len();
+                        let start = move_many_in_array(&mut sh.spec, "widgets", sel, to);
+                        sh.selected = (start..start + n).collect();
+                    } else {
+                        let ni = move_in_array(&mut sh.spec, "widgets", from, to);
+                        sh.selected = vec![ni];
+                    }
                     sh.selected_frame = None;
                 }
             }
@@ -806,6 +847,25 @@ impl YantraApp {
                     sh.selected_frame = Some(ni);
                     sh.selected.clear();
                 }
+            }
+            if let Some((wi, fi)) = reparent_w {
+                // drop a widget (or the whole multi-selection) into frame fi
+                let fid = sh.spec["frames"][fi].get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if !fid.is_empty() {
+                    push_undo(&mut sh);
+                    let targets = if sh.selected.len() > 1 && sh.selected.contains(&wi) { sh.selected.clone() } else { vec![wi] };
+                    for t in targets {
+                        if let Some(w) = sh.spec.get_mut("widgets").and_then(|a| a.as_array_mut()).and_then(|a| a.get_mut(t)) {
+                            w["frame"] = json!(fid);
+                            if let Some(o) = w.as_object_mut() {
+                                o.remove("tab");
+                            }
+                        }
+                    }
+                }
+            }
+            if group_click {
+                sh.pending_group = true; // the canvas pass has the geometry to build the frame
             }
 
             ui.separator();
@@ -975,6 +1035,53 @@ enum LayerDrag {
     Frame(usize),
 }
 
+/// Wrap the selected widgets in a new frame sized to their bounding box, reparenting
+/// each into it (coords made relative to the frame). `abs` = each widget's absolute
+/// px rect; `canvas` = the root rect. Returns the new frame's index.
+fn group_into_frame(spec: &mut Value, sel: &[usize], abs: &HashMap<usize, Rect>, canvas: Rect) -> Option<usize> {
+    let rects: Vec<Rect> = sel.iter().filter_map(|i| abs.get(i).copied()).collect();
+    if rects.is_empty() {
+        return None;
+    }
+    let mut bbox = rects[0];
+    for r in &rects[1..] {
+        bbox = bbox.union(*r);
+    }
+    let bbox = bbox.expand(6.0);
+    if !spec.is_object() {
+        *spec = json!({});
+    }
+    let n = spec.get("frames").and_then(|f| f.as_array()).map(|a| a.len()).unwrap_or(0) + 1;
+    let id = format!("group{n}");
+    let (fx, fw) = store_axis("scale", bbox.min.x - canvas.min.x, bbox.width(), canvas.width());
+    let (fy, fh) = store_axis("scale", bbox.min.y - canvas.min.y, bbox.height(), canvas.height());
+    let frame = json!({
+        "id": id.clone(), "name": id.clone(),
+        "x": r2(fx), "y": r2(fy), "w": r2(fw), "h": r2(fh),
+        "anchorH": "scale", "anchorV": "scale", "clip": true
+    });
+    spec.as_object_mut().unwrap().entry("frames").or_insert(json!([])).as_array_mut().unwrap().push(frame);
+    let fidx = n - 1;
+    // reparent: each widget's coords become relative to the frame bbox
+    for &i in sel {
+        let Some(r) = abs.get(&i).copied() else { continue };
+        let Some(w) = spec.get_mut("widgets").and_then(|a| a.as_array_mut()).and_then(|a| a.get_mut(i)) else { continue };
+        let ah = anchor(w, "anchorH", "scale");
+        let av = anchor(w, "anchorV", "start");
+        let (x, ww) = store_axis(&ah, r.min.x - bbox.min.x, r.width(), bbox.width());
+        let (y, hh) = store_axis(&av, r.min.y - bbox.min.y, r.height(), bbox.height());
+        w["x"] = json!(r2(x));
+        w["w"] = json!(r2(ww));
+        w["y"] = json!(r2(y));
+        w["h"] = json!(r2(hh));
+        w["frame"] = json!(id);
+        if let Some(o) = w.as_object_mut() {
+            o.remove("tab");
+        }
+    }
+    Some(fidx)
+}
+
 /// Move an array element from→to (drop-before semantics), returning its new index.
 fn move_in_array(spec: &mut Value, key: &str, from: usize, to: usize) -> usize {
     let Some(arr) = spec.get_mut(key).and_then(|v| v.as_array_mut()) else { return from };
@@ -984,6 +1091,26 @@ fn move_in_array(spec: &mut Value, key: &str, from: usize, to: usize) -> usize {
     let item = arr.remove(from);
     let insert_at = if to > from { to - 1 } else { to }.min(arr.len());
     arr.insert(insert_at, item);
+    insert_at
+}
+
+/// Move several elements (preserving their order) to before `to`. Returns the new
+/// start index of the moved block.
+fn move_many_in_array(spec: &mut Value, key: &str, mut idxs: Vec<usize>, to: usize) -> usize {
+    let Some(arr) = spec.get_mut(key).and_then(|v| v.as_array_mut()) else { return to };
+    idxs.sort_unstable();
+    idxs.dedup();
+    idxs.retain(|&i| i < arr.len());
+    if idxs.is_empty() {
+        return to;
+    }
+    let mut removed: Vec<Value> = idxs.iter().rev().map(|&i| arr.remove(i)).collect();
+    removed.reverse(); // back to ascending original order
+    let before = idxs.iter().filter(|&&i| i < to).count();
+    let insert_at = to.saturating_sub(before).min(arr.len());
+    for (k, item) in removed.into_iter().enumerate() {
+        arr.insert(insert_at + k, item);
+    }
     insert_at
 }
 /// Snapshot the resolved absolute px geometry of `idxs` at drag start, plus each
