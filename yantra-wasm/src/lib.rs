@@ -713,16 +713,27 @@ impl YantraApp {
                 }
                 if bg_resp.drag_stopped() {
                     if let Some(r) = marquee_rect {
+                        // resolve each intersected widget to its top-most unlocked ancestor,
+                        // matching click behavior: framed widgets pick up their frame.
                         let mut sel: Vec<usize> = if shift { sh.selected.clone() } else { vec![] };
+                        let mut frame_hit: Option<usize> = None;
                         for (i, wr, _p) in &placements {
                             let locked = widgets.get(*i).and_then(|w| w.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false);
-                            if !locked && r.intersects(*wr) && !sel.contains(i) {
-                                sel.push(*i);
+                            if locked || !r.intersects(*wr) {
+                                continue;
+                            }
+                            match click_target(*i, &widgets, &frames, &frame_by_id) {
+                                Hit::Widget(wi) => { if !sel.contains(&wi) { sel.push(wi); } }
+                                Hit::Frame(fi) => frame_hit = Some(fi),
+                                Hit::Blocked => {}
                             }
                         }
-                        sh.selected = sel;
-                        if !sh.selected.is_empty() {
+                        if !sel.is_empty() {
+                            sh.selected = sel;
                             sh.selected_frame = None;
+                        } else if let Some(fi) = frame_hit {
+                            sh.selected.clear();
+                            sh.selected_frame = Some(fi);
                         }
                     }
                     sh.marquee = None;
@@ -735,12 +746,12 @@ impl YantraApp {
                     sh.selected_frame = None;
                     if sh_held {
                         if let Some(p) = sh.selected.iter().position(|x| *x == i) {
-                            sh.selected.remove(p);
+                            sh.selected.remove(p); // shift-click an already-selected → deselect
                         } else {
-                            sh.selected.push(i);
+                            sh.selected.push(i); // shift-click → add to selection
                         }
-                    } else if !sh.selected.contains(&i) {
-                        sh.selected = vec![i];
+                    } else {
+                        sh.selected = vec![i]; // plain click → just this one
                     }
                 } else if clicked_empty {
                     sh.selected.clear();
