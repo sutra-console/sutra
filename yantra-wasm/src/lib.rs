@@ -36,6 +36,7 @@ struct Shared {
 #[derive(Clone)]
 struct Drag {
     resize: bool, // false = move whole selection, true = resize the single item
+    frames: bool, // target spec.frames instead of spec.widgets
     start: Pos2,  // pointer pos at drag start
     items: Vec<DragItem>,
 }
@@ -541,37 +542,64 @@ impl YantraApp {
                 // walk the container tree (honoring active tabs) into placements
                 let tabs_snapshot = self.tabs.clone();
                 let mut placements: Vec<(usize, Rect, Rect)> = Vec::new();
-                let mut frame_rects: Vec<(usize, Rect)> = Vec::new();
+                let mut frame_rects: Vec<(usize, Rect, Rect)> = Vec::new();
                 let mut tabbars: Vec<EditTabBar> = Vec::new();
                 collect_edit_layout("root", canvas, &widgets, &frames, &tabs_snapshot, &mut placements, &mut frame_rects, &mut tabbars);
                 let parent_of: HashMap<usize, Rect> = placements.iter().map(|(i, _, p)| (*i, *p)).collect();
+                let frame_parent_of: HashMap<usize, Rect> = frame_rects.iter().map(|(i, _, p)| (*i, *p)).collect();
 
                 // empty-canvas click clears selection; drag = marquee. Registered FIRST so
                 // the frame/widget interactions (added after) sit on top and win the pointer.
                 let bg_resp = ui.interact(canvas, egui::Id::new("ed_bg"), Sense::click_and_drag());
                 let marquee0 = self.shared.borrow().marquee;
 
-                // frame outlines + click-to-select (above bg, below widgets). The selected
-                // frame is highlighted so a layers-panel selection shows on the canvas.
-                let mut click_frame: Option<usize> = None;
-                for (fi, fr) in &frame_rects {
-                    let sel = selected_frame == Some(*fi);
-                    let stroke = if sel { Stroke::new(2.0, accent) } else { Stroke::new(1.0, border.gamma_multiply(0.8)) };
-                    ui.painter().rect_stroke(*fr, Rounding::same(6.0), stroke);
-                    let locked = frames.get(*fi).and_then(|f| f.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false);
-                    if !locked {
-                        let fresp = ui.interact(*fr, egui::Id::new(("edf", *fi)), Sense::click());
-                        if fresp.clicked() {
-                            click_frame = Some(*fi);
-                        }
-                    }
-                }
-
                 let mut click_sel: Option<(usize, bool)> = None;
-                let mut begin: Option<(usize, bool, Pos2)> = None;
+                let mut click_frame: Option<usize> = None;
+                let mut begin: Option<(usize, bool, bool, Pos2)> = None; // (idx, resize, frames, start)
                 let mut pointer: Option<Pos2> = None;
                 let mut stop = false;
                 let mut tab_switch: Option<(String, String)> = None;
+
+                // frame outlines + click-to-select + drag-to-move + resize handle (above bg,
+                // below widgets so child widgets still win their own areas). Moving a frame
+                // moves its children, which render relative to it. The selected frame is
+                // highlighted so a layers-panel selection shows on the canvas.
+                for (fi, fr, _parent) in frame_rects.iter().copied() {
+                    let sel = selected_frame == Some(fi);
+                    let stroke = if sel { Stroke::new(2.0, accent) } else { Stroke::new(1.0, border.gamma_multiply(0.8)) };
+                    ui.painter().rect_stroke(fr, Rounding::same(6.0), stroke);
+                    if frames.get(fi).and_then(|f| f.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false) {
+                        continue;
+                    }
+                    let fid = egui::Id::new(("edf", fi));
+                    let fresp = ui.interact(fr, fid, Sense::click_and_drag());
+                    if fresp.clicked() {
+                        click_frame = Some(fi);
+                    }
+                    if fresp.drag_started() {
+                        begin = Some((fi, false, true, fresp.interact_pointer_pos().unwrap_or(fr.min)));
+                    }
+                    if fresp.dragged() {
+                        pointer = fresp.interact_pointer_pos();
+                    }
+                    if fresp.drag_stopped() {
+                        stop = true;
+                    }
+                    if sel {
+                        let h = Rect::from_min_size(fr.max - Vec2::splat(11.0), Vec2::splat(11.0));
+                        let hr = ui.interact(h, fid.with("rs"), Sense::drag());
+                        ui.painter().rect_filled(h, Rounding::same(2.0), accent);
+                        if hr.drag_started() {
+                            begin = Some((fi, true, true, hr.interact_pointer_pos().unwrap_or(fr.max)));
+                        }
+                        if hr.dragged() {
+                            pointer = hr.interact_pointer_pos();
+                        }
+                        if hr.drag_stopped() {
+                            stop = true;
+                        }
+                    }
+                }
 
                 // tabs widgets: chrome + clickable bar (children render as placements below)
                 for tb in &tabbars {
@@ -617,7 +645,7 @@ impl YantraApp {
                         click_sel = Some((i, shift));
                     }
                     if resp.drag_started() {
-                        begin = Some((i, false, resp.interact_pointer_pos().unwrap_or(rect.min)));
+                        begin = Some((i, false, false, resp.interact_pointer_pos().unwrap_or(rect.min)));
                     }
                     if resp.dragged() {
                         pointer = resp.interact_pointer_pos();
@@ -638,7 +666,7 @@ impl YantraApp {
                         let hr = ui.interact(h, id.with("rs"), Sense::drag());
                         ui.painter().rect_filled(h, Rounding::same(2.0), accent);
                         if hr.drag_started() {
-                            begin = Some((i, true, hr.interact_pointer_pos().unwrap_or(rect.max)));
+                            begin = Some((i, true, false, hr.interact_pointer_pos().unwrap_or(rect.max)));
                         }
                         if hr.dragged() {
                             pointer = hr.interact_pointer_pos();
@@ -703,15 +731,22 @@ impl YantraApp {
                     sh.selected.clear();
                     sh.selected_frame = None;
                 }
-                if let Some((i, resize, start)) = begin {
-                    if resize {
-                        // keep current selection (single)
-                    } else if !sh.selected.contains(&i) {
-                        sh.selected = if shift { let mut s = sh.selected.clone(); s.push(i); s } else { vec![i] };
+                if let Some((i, resize, frames_t, start)) = begin {
+                    if frames_t {
+                        sh.selected.clear();
+                        sh.selected_frame = Some(i);
+                        push_undo(&mut sh);
+                        sh.drag = Some(capture_drag(resize, true, start, &sh.spec, &[i], &frame_parent_of));
+                    } else {
+                        if resize {
+                            // keep current selection (single)
+                        } else if !sh.selected.contains(&i) {
+                            sh.selected = if shift { let mut s = sh.selected.clone(); s.push(i); s } else { vec![i] };
+                        }
+                        push_undo(&mut sh);
+                        let idxs: Vec<usize> = if resize { vec![i] } else { sh.selected.clone() };
+                        sh.drag = Some(capture_drag(resize, false, start, &sh.spec, &idxs, &parent_of));
                     }
-                    push_undo(&mut sh);
-                    let idxs: Vec<usize> = if resize { vec![i] } else { sh.selected.clone() };
-                    sh.drag = Some(capture_drag(resize, start, &sh.spec, &idxs, &parent_of));
                 }
                 if let (Some(pos), Some(drag)) = (pointer, sh.drag.clone()) {
                     let total = pos - drag.start;
@@ -1238,14 +1273,15 @@ fn move_many_in_array(spec: &mut Value, key: &str, mut idxs: Vec<usize>, to: usi
 }
 /// Snapshot the resolved absolute px geometry of `idxs` at drag start, plus each
 /// widget's parent container rect (so store-back is parent-relative for nesting).
-fn capture_drag(resize: bool, start: Pos2, spec: &Value, idxs: &[usize], parent_of: &HashMap<usize, Rect>) -> Drag {
+fn capture_drag(resize: bool, frames: bool, start: Pos2, spec: &Value, idxs: &[usize], parent_of: &HashMap<usize, Rect>) -> Drag {
+    let key = if frames { "frames" } else { "widgets" };
     let mut items = Vec::new();
-    if let Some(arr) = spec.get("widgets").and_then(|w| w.as_array()) {
+    if let Some(arr) = spec.get(key).and_then(|w| w.as_array()) {
         for &idx in idxs {
             let Some(pr) = parent_of.get(&idx) else { continue };
             if let Some(w) = arr.get(idx) {
                 let ah = anchor(w, "anchorH", "scale");
-                let av = anchor(w, "anchorV", "start");
+                let av = anchor(w, "anchorV", if frames { "scale" } else { "start" });
                 let dw = if ah == "scale" { 25.0 } else { 100.0 };
                 let dh = if av == "scale" { 25.0 } else { 48.0 };
                 let (sx, ww) = resolve_axis(&ah, num(w, "x", 0.0), num(w, "w", dw), pr.width());
@@ -1260,14 +1296,15 @@ fn capture_drag(resize: bool, start: Pos2, spec: &Value, idxs: &[usize], parent_
             }
         }
     }
-    Drag { resize, start, items }
+    Drag { resize, frames, start, items }
 }
 fn snap(v: f32, on: bool) -> f32 {
     if on { (v / 8.0).round() * 8.0 } else { v }
 }
 /// Apply the total pointer delta to the captured drag, writing stored (parent-relative) units back.
 fn apply_drag(spec: &mut Value, drag: &Drag, total: Vec2, snap_on: bool) {
-    let Some(arr) = spec.get_mut("widgets").and_then(|w| w.as_array_mut()) else { return };
+    let key = if drag.frames { "frames" } else { "widgets" };
+    let Some(arr) = spec.get_mut(key).and_then(|w| w.as_array_mut()) else { return };
     for it in &drag.items {
         let Some(w) = arr.get_mut(it.idx) else { continue };
         if drag.resize {
@@ -1312,7 +1349,7 @@ fn collect_edit_layout(
     frames: &[Value],
     tabs: &HashMap<String, String>,
     out_w: &mut Vec<(usize, Rect, Rect)>,
-    out_f: &mut Vec<(usize, Rect)>,
+    out_f: &mut Vec<(usize, Rect, Rect)>, // (frame idx, abs rect, parent rect)
     out_t: &mut Vec<EditTabBar>,
 ) {
     let is_root = container == "root";
@@ -1325,7 +1362,7 @@ fn collect_edit_layout(
             continue;
         }
         let fr = widget_rect(f, rect.min, rect.width(), rect.height());
-        out_f.push((fi, fr));
+        out_f.push((fi, fr, rect));
         collect_edit_layout(id, fr, widgets, frames, tabs, out_w, out_f, out_t);
     }
     for (i, w) in widgets.iter().enumerate() {
