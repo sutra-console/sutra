@@ -22,12 +22,11 @@ struct Shared {
     on_save: Option<js_sys::Function>,
     theme_dirty: bool,
     editing: bool,
-    selected: Vec<usize>,
+    selected: Vec<Sel>, // unified: widgets and frames, multi-select
     undo: Vec<Value>,
     redo: Vec<Value>,
     drag: Option<Drag>,
     marquee: Option<Pos2>, // rubber-band select origin (canvas px)
-    selected_frame: Option<usize>, // index into spec.frames (frames select one at a time)
     pending_group: bool, // layers context-menu "Group into Frame" → applied in the canvas pass
 }
 
@@ -36,13 +35,13 @@ struct Shared {
 #[derive(Clone)]
 struct Drag {
     resize: bool, // false = move whole selection, true = resize the single item
-    frames: bool, // target spec.frames instead of spec.widgets
     start: Pos2,  // pointer pos at drag start
     items: Vec<DragItem>,
 }
 #[derive(Clone)]
 struct DragItem {
     idx: usize,
+    frames: bool, // this item targets spec.frames (else spec.widgets)
     ah: String,
     av: String,
     sx: f32, // original resolved absolute px geometry
@@ -471,38 +470,34 @@ impl YantraApp {
             let mut sh = self.shared.borrow_mut();
             if esc_key {
                 sh.selected.clear();
-                sh.selected_frame = None;
             }
             if let Some(t) = add {
                 push_undo(&mut sh);
                 if t == "frame" {
                     add_frame(&mut sh.spec);
                     let n = sh.spec.get("frames").and_then(|f| f.as_array()).map(|a| a.len()).unwrap_or(0);
-                    sh.selected.clear();
-                    sh.selected_frame = if n > 0 { Some(n - 1) } else { None };
+                    sh.selected = if n > 0 { vec![Sel::Frame(n - 1)] } else { vec![] };
                 } else {
                     add_widget(&mut sh.spec, &t);
                     let n = sh.spec.get("widgets").and_then(|w| w.as_array()).map(|a| a.len()).unwrap_or(0);
-                    sh.selected_frame = None;
-                    sh.selected = if n > 0 { vec![n - 1] } else { vec![] };
+                    sh.selected = if n > 0 { vec![Sel::Widget(n - 1)] } else { vec![] };
                 }
             }
             if do_delete && !sh.selected.is_empty() {
                 push_undo(&mut sh);
-                let mut sel = sh.selected.clone();
-                sel.sort_unstable();
-                for i in sel.iter().rev() {
+                let sel = sh.selected.clone();
+                // remove widgets high→low, then frames high→low (orphaned children → root)
+                let mut wi = sel_widgets(&sel);
+                wi.sort_unstable();
+                for i in wi.iter().rev() {
                     delete_widget(&mut sh.spec, *i);
                 }
-                sh.selected.clear();
-            } else if do_delete {
-                if let Some(fi) = sh.selected_frame {
-                    push_undo(&mut sh);
-                    if let Some(a) = sh.spec.get_mut("frames").and_then(|f| f.as_array_mut()) {
-                        if fi < a.len() { a.remove(fi); }
-                    }
-                    sh.selected_frame = None;
+                let mut fi: Vec<usize> = sel.iter().filter_map(|s| if let Sel::Frame(f) = s { Some(*f) } else { None }).collect();
+                fi.sort_unstable();
+                for f in fi.iter().rev() {
+                    delete_frame(&mut sh.spec, *f);
                 }
+                sh.selected.clear();
             }
             if let Some(key) = align {
                 push_undo(&mut sh);
@@ -533,7 +528,6 @@ impl YantraApp {
                 let widgets = self.shared.borrow().spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
                 let frames = self.shared.borrow().spec.get("frames").and_then(|f| f.as_array()).cloned().unwrap_or_default();
                 let selected = self.shared.borrow().selected.clone();
-                let selected_frame = self.shared.borrow().selected_frame;
                 let wstate = self.shared.borrow().state.get("widgets").cloned().unwrap_or(Value::Null);
                 let shift = ui.input(|i| i.modifiers.shift);
                 let accent = ui.visuals().selection.stroke.color;
@@ -556,19 +550,19 @@ impl YantraApp {
                 let bg_resp = ui.interact(canvas, egui::Id::new("ed_bg"), Sense::click_and_drag());
                 let marquee0 = self.shared.borrow().marquee;
 
-                let mut click_sel: Option<(usize, bool)> = None;
-                let mut click_frame: Option<usize> = None;
-                let mut begin: Option<(usize, bool, bool, Pos2)> = None; // (idx, resize, frames, start)
+                let mut click_item: Option<(Sel, bool)> = None; // (item, shift)
+                let mut begin: Option<(Sel, bool, Pos2)> = None; // (item, resize, start)
                 let mut pointer: Option<Pos2> = None;
                 let mut stop = false;
                 let mut tab_switch: Option<(String, String)> = None;
+                let only = |s: Sel| selected.len() == 1 && selected[0] == s; // sole selection
 
                 // frame outlines + click-to-select + drag-to-move + resize handle (above bg,
                 // below widgets so child widgets still win their own areas). Moving a frame
-                // moves its children, which render relative to it. The selected frame is
+                // moves its children, which render relative to it. A selected frame is
                 // highlighted so a layers-panel selection shows on the canvas.
                 for (fi, fr, _parent) in frame_rects.iter().copied() {
-                    let sel = selected_frame == Some(fi);
+                    let sel = selected.contains(&Sel::Frame(fi));
                     let stroke = if sel { Stroke::new(2.0, accent) } else { Stroke::new(1.0, border.gamma_multiply(0.8)) };
                     ui.painter().rect_stroke(fr, Rounding::same(6.0), stroke);
                     if frames.get(fi).and_then(|f| f.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false) {
@@ -577,10 +571,10 @@ impl YantraApp {
                     let fid = egui::Id::new(("edf", fi));
                     let fresp = ui.interact(fr, fid, Sense::click_and_drag());
                     if fresp.clicked() {
-                        click_frame = Some(fi);
+                        click_item = Some((Sel::Frame(fi), shift));
                     }
                     if fresp.drag_started() {
-                        begin = Some((fi, false, true, fresp.interact_pointer_pos().unwrap_or(fr.min)));
+                        begin = Some((Sel::Frame(fi), false, fresp.interact_pointer_pos().unwrap_or(fr.min)));
                     }
                     if fresp.dragged() {
                         pointer = fresp.interact_pointer_pos();
@@ -588,12 +582,12 @@ impl YantraApp {
                     if fresp.drag_stopped() {
                         stop = true;
                     }
-                    if sel {
+                    if only(Sel::Frame(fi)) {
                         let h = Rect::from_min_size(fr.max - Vec2::splat(11.0), Vec2::splat(11.0));
                         let hr = ui.interact(h, fid.with("rs"), Sense::drag());
                         ui.painter().rect_filled(h, Rounding::same(2.0), accent);
                         if hr.drag_started() {
-                            begin = Some((fi, true, true, hr.interact_pointer_pos().unwrap_or(fr.max)));
+                            begin = Some((Sel::Frame(fi), true, hr.interact_pointer_pos().unwrap_or(fr.max)));
                         }
                         if hr.dragged() {
                             pointer = hr.interact_pointer_pos();
@@ -622,7 +616,7 @@ impl YantraApp {
                 // widget placements: WYSIWYG render + glass-pane select/drag/resize
                 for (i, rect, _parent) in placements.iter().copied() {
                     let w = &widgets[i];
-                    let is_sel = selected.contains(&i);
+                    let is_sel = selected.contains(&Sel::Widget(i));
                     let id = egui::Id::new(("ed", i));
                     let (ty, name, label, val, dbg, dfg) = display_of(w, &wstate);
                     let noop = |_v: Value| {};
@@ -646,19 +640,12 @@ impl YantraApp {
                     });
                     // a selected widget interacts directly (precise edit after a layers
                     // select); otherwise a click/drag grabs the top-most unlocked ancestor.
-                    let target = if is_sel { Hit::Widget(i) } else { click_target(i, &widgets, &frames, &frame_by_id) };
+                    let target = if is_sel { Sel::Widget(i) } else { click_target(i, &widgets, &frames, &frame_by_id) };
                     if resp.clicked() {
-                        match target {
-                            Hit::Frame(fi) => click_frame = Some(fi),
-                            Hit::Widget(wi) => click_sel = Some((wi, shift)),
-                        }
+                        click_item = Some((target, shift));
                     }
                     if resp.drag_started() {
-                        let pos = resp.interact_pointer_pos().unwrap_or(rect.min);
-                        match target {
-                            Hit::Frame(fi) => begin = Some((fi, false, true, pos)),
-                            Hit::Widget(wi) => begin = Some((wi, false, false, pos)),
-                        }
+                        begin = Some((target, false, resp.interact_pointer_pos().unwrap_or(rect.min)));
                     }
                     if resp.dragged() {
                         pointer = resp.interact_pointer_pos();
@@ -674,12 +661,12 @@ impl YantraApp {
                         Stroke::new(1.0, border.gamma_multiply(0.5))
                     };
                     ui.painter().rect_stroke(rect, Rounding::same(5.0), stroke);
-                    if is_sel && selected.len() == 1 {
+                    if only(Sel::Widget(i)) {
                         let h = Rect::from_min_size(rect.max - Vec2::splat(11.0), Vec2::splat(11.0));
                         let hr = ui.interact(h, id.with("rs"), Sense::drag());
                         ui.painter().rect_filled(h, Rounding::same(2.0), accent);
                         if hr.drag_started() {
-                            begin = Some((i, true, false, hr.interact_pointer_pos().unwrap_or(rect.max)));
+                            begin = Some((Sel::Widget(i), true, hr.interact_pointer_pos().unwrap_or(rect.max)));
                         }
                         if hr.dragged() {
                             pointer = hr.interact_pointer_pos();
@@ -692,7 +679,7 @@ impl YantraApp {
                 if let Some((k, v)) = tab_switch {
                     self.tabs.insert(k, v);
                 }
-                let clicked_empty = bg_resp.clicked() && click_sel.is_none() && begin.is_none();
+                let clicked_empty = bg_resp.clicked() && click_item.is_none() && begin.is_none();
 
                 // marquee rubber-band (drag started on empty canvas)
                 let mut marquee_rect: Option<Rect> = None;
@@ -713,63 +700,46 @@ impl YantraApp {
                     if let Some(r) = marquee_rect {
                         // resolve each intersected widget to its top-most unlocked ancestor,
                         // matching click behavior: framed widgets pick up their frame.
-                        let mut sel: Vec<usize> = if shift { sh.selected.clone() } else { vec![] };
-                        let mut frame_hit: Option<usize> = None;
+                        let mut sel: Vec<Sel> = if shift { sh.selected.clone() } else { vec![] };
                         for (i, wr, _p) in &placements {
                             let locked = widgets.get(*i).and_then(|w| w.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false);
                             if locked || !r.intersects(*wr) {
                                 continue;
                             }
-                            match click_target(*i, &widgets, &frames, &frame_by_id) {
-                                Hit::Widget(wi) => { if !sel.contains(&wi) { sel.push(wi); } }
-                                Hit::Frame(fi) => frame_hit = Some(fi),
+                            let t = click_target(*i, &widgets, &frames, &frame_by_id);
+                            if !sel.contains(&t) {
+                                sel.push(t);
                             }
                         }
-                        if !sel.is_empty() {
-                            sh.selected = sel;
-                            sh.selected_frame = None;
-                        } else if let Some(fi) = frame_hit {
-                            sh.selected.clear();
-                            sh.selected_frame = Some(fi);
-                        }
+                        sh.selected = sel;
                     }
                     sh.marquee = None;
                 }
-                if let Some(fi) = click_frame {
-                    sh.selected.clear();
-                    sh.selected_frame = Some(fi);
-                }
-                if let Some((i, sh_held)) = click_sel {
-                    sh.selected_frame = None;
+                if let Some((item, sh_held)) = click_item {
                     if sh_held {
-                        if let Some(p) = sh.selected.iter().position(|x| *x == i) {
-                            sh.selected.remove(p); // shift-click an already-selected → deselect
+                        if let Some(p) = sh.selected.iter().position(|x| *x == item) {
+                            sh.selected.remove(p); // shift-click selected → deselect
                         } else {
-                            sh.selected.push(i); // shift-click → add to selection
+                            sh.selected.push(item); // shift-click → add
                         }
                     } else {
-                        sh.selected = vec![i]; // plain click → just this one
+                        sh.selected = vec![item]; // plain click → just this one
                     }
                 } else if clicked_empty {
                     sh.selected.clear();
-                    sh.selected_frame = None;
                 }
-                if let Some((i, resize, frames_t, start)) = begin {
-                    if frames_t {
-                        sh.selected.clear();
-                        sh.selected_frame = Some(i);
-                        push_undo(&mut sh);
-                        sh.drag = Some(capture_drag(resize, true, start, &sh.spec, &[i], &frame_parent_of));
-                    } else {
-                        if resize {
-                            // keep current selection (single)
-                        } else if !sh.selected.contains(&i) {
-                            sh.selected = if shift { let mut s = sh.selected.clone(); s.push(i); s } else { vec![i] };
+                if let Some((item, resize, start)) = begin {
+                    // dragging an unselected item selects it first (shift extends)
+                    if !resize && !sh.selected.contains(&item) {
+                        if shift {
+                            sh.selected.push(item);
+                        } else {
+                            sh.selected = vec![item];
                         }
-                        push_undo(&mut sh);
-                        let idxs: Vec<usize> = if resize { vec![i] } else { sh.selected.clone() };
-                        sh.drag = Some(capture_drag(resize, false, start, &sh.spec, &idxs, &parent_of));
                     }
+                    push_undo(&mut sh);
+                    let items: Vec<Sel> = if resize { vec![item] } else { sh.selected.clone() };
+                    sh.drag = Some(capture_drag(resize, start, &sh.spec, &items, &parent_of, &frame_parent_of));
                 }
                 if let (Some(pos), Some(drag)) = (pointer, sh.drag.clone()) {
                     let total = pos - drag.start;
@@ -778,17 +748,18 @@ impl YantraApp {
                 if stop {
                     sh.drag = None;
                 }
-                // Group into Frame: wrap the selection (uses the just-walked abs rects).
+                // Group into Frame: wrap the selected widgets (uses the just-walked abs rects).
                 // do_group = toolbar/canvas this pass; pending_group = layers context menu.
                 let do_group = do_group || sh.pending_group;
                 sh.pending_group = false;
-                if do_group && !sh.selected.is_empty() {
-                    let sel = sh.selected.clone();
-                    let abs: HashMap<usize, Rect> = placements.iter().map(|(i, r, _)| (*i, *r)).collect();
-                    push_undo(&mut sh);
-                    if let Some(fi) = group_into_frame(&mut sh.spec, &sel, &abs, canvas) {
-                        sh.selected.clear();
-                        sh.selected_frame = Some(fi);
+                if do_group {
+                    let wsel = sel_widgets(&sh.selected);
+                    if !wsel.is_empty() {
+                        let abs: HashMap<usize, Rect> = placements.iter().map(|(i, r, _)| (*i, *r)).collect();
+                        push_undo(&mut sh);
+                        if let Some(fi) = group_into_frame(&mut sh.spec, &wsel, &abs, canvas) {
+                            sh.selected = vec![Sel::Frame(fi)];
+                        }
                     }
                 }
             });
@@ -811,10 +782,9 @@ impl YantraApp {
             ui.add_space(4.0);
             ui.strong("Layers");
             ui.label(RichText::new("drag to reorder · L = lock").size(9.0).weak());
-            let mut toggle_sel: Option<usize> = None;
+            let mut sel_click: Option<(Sel, bool)> = None; // (item, shift)
             let mut hide_toggle: Option<usize> = None;
             let mut del: Option<usize> = None;
-            let mut sel_frame: Option<usize> = None;
             let mut hide_frame: Option<usize> = None;
             let mut del_frame: Option<usize> = None;
             let mut collapse_frame: Option<usize> = None;
@@ -853,7 +823,7 @@ impl YantraApp {
                                 let nm = f.get("name").and_then(|n| n.as_str()).or_else(|| f.get("id").and_then(|n| n.as_str())).unwrap_or("").to_string();
                                 let hidden = f.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
                                 let collapsed = f.get("collapsed").and_then(|c| c.as_bool()).unwrap_or(false);
-                                let is_sel = sh.selected_frame == Some(fi);
+                                let is_sel = sh.selected.contains(&Sel::Frame(fi));
                                 if ui.add(egui::Button::new(if collapsed { ">" } else { "v" }).small().frame(false)).on_hover_text("Expand/collapse").clicked() {
                                     collapse_frame = Some(fi);
                                 }
@@ -869,7 +839,7 @@ impl YantraApp {
                                 let lab = ui.selectable_label(is_sel, format!("[] {nm}"));
                                 let resp = ui.interact(lab.rect, lab.id, egui::Sense::click_and_drag());
                                 if resp.clicked() {
-                                    sel_frame = Some(fi);
+                                    sel_click = Some((Sel::Frame(fi), shift));
                                 }
                                 if resp.drag_started() {
                                     egui::DragAndDrop::set_payload(ui.ctx(), LayerDrag::Frame(fi));
@@ -895,7 +865,7 @@ impl YantraApp {
                                 let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
                                 let ty = w.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
                                 let hidden = w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
-                                let is_sel = sh.selected.contains(&i);
+                                let is_sel = sh.selected.contains(&Sel::Widget(i));
                                 if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false)).on_hover_text("Show/hide").clicked() {
                                     hide_toggle = Some(i);
                                 }
@@ -907,7 +877,7 @@ impl YantraApp {
                                 let lab = ui.selectable_label(is_sel, txt);
                                 let resp = ui.interact(lab.rect, lab.id, egui::Sense::click_and_drag());
                                 if resp.clicked() {
-                                    toggle_sel = Some(i);
+                                    sel_click = Some((Sel::Widget(i), shift));
                                 }
                                 if resp.drag_started() {
                                     egui::DragAndDrop::set_payload(ui.ctx(), LayerDrag::Widget(i));
@@ -946,9 +916,13 @@ impl YantraApp {
                 let cur = sh.spec["frames"][fi].get("locked").and_then(|l| l.as_bool()).unwrap_or(false);
                 sh.spec["frames"][fi]["locked"] = json!(!cur);
             }
-            if let Some(fi) = sel_frame {
-                sh.selected.clear();
-                sh.selected_frame = Some(fi);
+            if let Some((item, sh_held)) = sel_click {
+                if sh_held {
+                    if let Some(p) = sh.selected.iter().position(|x| *x == item) { sh.selected.remove(p); }
+                    else { sh.selected.push(item); }
+                } else {
+                    sh.selected = vec![item];
+                }
             }
             if let Some(fi) = hide_frame {
                 push_undo(&mut sh);
@@ -957,19 +931,8 @@ impl YantraApp {
             }
             if let Some(fi) = del_frame {
                 push_undo(&mut sh);
-                if let Some(a) = sh.spec.get_mut("frames").and_then(|f| f.as_array_mut()) {
-                    if fi < a.len() { a.remove(fi); }
-                }
-                sh.selected_frame = None;
-            }
-            if let Some(i) = toggle_sel {
-                sh.selected_frame = None;
-                if shift {
-                    if let Some(p) = sh.selected.iter().position(|x| *x == i) { sh.selected.remove(p); }
-                    else { sh.selected.push(i); }
-                } else {
-                    sh.selected = vec![i];
-                }
+                delete_frame(&mut sh.spec, fi);
+                sh.selected.clear();
             }
             if let Some(i) = hide_toggle {
                 push_undo(&mut sh);
@@ -984,33 +947,32 @@ impl YantraApp {
             if let Some((from, to)) = reorder_w {
                 if from != to {
                     push_undo(&mut sh);
-                    // drag the whole selection if the dragged row is part of a multi-select
-                    if sh.selected.len() > 1 && sh.selected.contains(&from) {
-                        let sel = sh.selected.clone();
-                        let n = sel.len();
-                        let start = move_many_in_array(&mut sh.spec, "widgets", sel, to);
-                        sh.selected = (start..start + n).collect();
+                    // drag the whole widget selection if the dragged row is part of it
+                    let wsel = sel_widgets(&sh.selected);
+                    if wsel.len() > 1 && wsel.contains(&from) {
+                        let n = wsel.len();
+                        let start = move_many_in_array(&mut sh.spec, "widgets", wsel, to);
+                        sh.selected = (start..start + n).map(Sel::Widget).collect();
                     } else {
                         let ni = move_in_array(&mut sh.spec, "widgets", from, to);
-                        sh.selected = vec![ni];
+                        sh.selected = vec![Sel::Widget(ni)];
                     }
-                    sh.selected_frame = None;
                 }
             }
             if let Some((from, to)) = reorder_f {
                 if from != to {
                     push_undo(&mut sh);
                     let ni = move_in_array(&mut sh.spec, "frames", from, to);
-                    sh.selected_frame = Some(ni);
-                    sh.selected.clear();
+                    sh.selected = vec![Sel::Frame(ni)];
                 }
             }
             if let Some((wi, fi)) = reparent_w {
-                // drop a widget (or the whole multi-selection) into frame fi
+                // drop a widget (or the whole multi-widget selection) into frame fi
                 let fid = sh.spec["frames"][fi].get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 if !fid.is_empty() {
                     push_undo(&mut sh);
-                    let targets = if sh.selected.len() > 1 && sh.selected.contains(&wi) { sh.selected.clone() } else { vec![wi] };
+                    let wsel = sel_widgets(&sh.selected);
+                    let targets = if wsel.len() > 1 && wsel.contains(&wi) { wsel } else { vec![wi] };
                     for t in targets {
                         if let Some(w) = sh.spec.get_mut("widgets").and_then(|a| a.as_array_mut()).and_then(|a| a.get_mut(t)) {
                             w["frame"] = json!(fid);
@@ -1028,23 +990,24 @@ impl YantraApp {
             ui.separator();
             ui.strong("Properties");
 
-            // frame inspector
-            if let Some(fi) = sh.selected_frame {
-                if fi >= fcount {
-                    sh.selected_frame = None;
-                    return;
-                }
-                let f = sh.spec["frames"][fi].clone();
-                edit_frame_props(ui, &mut sh, fi, &f);
-                return;
-            }
-
             let sel = sh.selected.clone();
             if sel.len() != 1 {
                 ui.weak(if sel.is_empty() { "No selection" } else { "Multiple selected" });
                 return;
             }
-            let i = sel[0];
+            // single selection → frame or widget inspector
+            let i = match sel[0] {
+                Sel::Frame(fi) => {
+                    if fi >= fcount {
+                        sh.selected.clear();
+                        return;
+                    }
+                    let f = sh.spec["frames"][fi].clone();
+                    edit_frame_props(ui, &mut sh, fi, &f);
+                    return;
+                }
+                Sel::Widget(wi) => wi,
+            };
             if i >= count {
                 return;
             }
@@ -1192,10 +1155,14 @@ enum LayerDrag {
     Frame(usize),
 }
 
-/// What a canvas click on widget `i` should actually act on.
-enum Hit {
+/// A selected item — a widget or a frame (selection mixes both freely).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sel {
     Widget(usize),
     Frame(usize),
+}
+fn sel_widgets(sel: &[Sel]) -> Vec<usize> {
+    sel.iter().filter_map(|s| if let Sel::Widget(i) = s { Some(*i) } else { None }).collect()
 }
 
 /// Resolve a canvas click on a widget to the frame it should grab. An *unlocked*
@@ -1203,7 +1170,7 @@ enum Hit {
 /// selection so its children can be picked individually. Walk up the run of
 /// *consecutive unlocked* frames and return the outermost; a locked frame (or no
 /// frame) stops the walk and the widget itself is selected.
-fn click_target(i: usize, widgets: &[Value], frames: &[Value], frame_by_id: &HashMap<String, usize>) -> Hit {
+fn click_target(i: usize, widgets: &[Value], frames: &[Value], frame_by_id: &HashMap<String, usize>) -> Sel {
     let mut fid = widgets.get(i).and_then(|w| w.get("frame")).and_then(|v| v.as_str()).map(str::to_string);
     let mut outermost_unlocked: Option<usize> = None;
     let mut guard = 0;
@@ -1221,8 +1188,8 @@ fn click_target(i: usize, widgets: &[Value], frames: &[Value], frame_by_id: &Has
         fid = frames.get(fi).and_then(|f| f.get("parent")).and_then(|v| v.as_str()).map(str::to_string);
     }
     match outermost_unlocked {
-        Some(fi) => Hit::Frame(fi),
-        None => Hit::Widget(i),
+        Some(fi) => Sel::Frame(fi),
+        None => Sel::Widget(i),
     }
 }
 
@@ -1328,42 +1295,42 @@ fn move_many_in_array(spec: &mut Value, key: &str, mut idxs: Vec<usize>, to: usi
     }
     insert_at
 }
-/// Snapshot the resolved absolute px geometry of `idxs` at drag start, plus each
-/// widget's parent container rect (so store-back is parent-relative for nesting).
-fn capture_drag(resize: bool, frames: bool, start: Pos2, spec: &Value, idxs: &[usize], parent_of: &HashMap<usize, Rect>) -> Drag {
-    let key = if frames { "frames" } else { "widgets" };
+/// Snapshot the resolved absolute px geometry of the selected `items` at drag start,
+/// plus each one's parent container rect (so store-back is parent-relative). Items
+/// can mix widgets and frames; each remembers which array it came from.
+fn capture_drag(resize: bool, start: Pos2, spec: &Value, items_sel: &[Sel], wparent: &HashMap<usize, Rect>, fparent: &HashMap<usize, Rect>) -> Drag {
     let mut items = Vec::new();
-    if let Some(arr) = spec.get(key).and_then(|w| w.as_array()) {
-        for &idx in idxs {
-            let Some(pr) = parent_of.get(&idx) else { continue };
-            if let Some(w) = arr.get(idx) {
-                let ah = anchor(w, "anchorH", "scale");
-                let av = anchor(w, "anchorV", if frames { "scale" } else { "start" });
-                let dw = if ah == "scale" { 25.0 } else { 100.0 };
-                let dh = if av == "scale" { 25.0 } else { 48.0 };
-                let (sx, ww) = resolve_axis(&ah, num(w, "x", 0.0), num(w, "w", dw), pr.width());
-                let (sy, hh) = resolve_axis(&av, num(w, "y", 0.0), num(w, "h", dh), pr.height());
-                items.push(DragItem {
-                    idx, ah, av,
-                    sx: pr.min.x + sx, // absolute
-                    sy: pr.min.y + sy,
-                    w: ww, h: hh,
-                    px: pr.min.x, py: pr.min.y, pw: pr.width(), ph: pr.height(),
-                });
-            }
-        }
+    for s in items_sel {
+        let (frames, idx, parent_of, key) = match s {
+            Sel::Widget(i) => (false, *i, wparent, "widgets"),
+            Sel::Frame(fi) => (true, *fi, fparent, "frames"),
+        };
+        let Some(pr) = parent_of.get(&idx) else { continue };
+        let Some(w) = spec.get(key).and_then(|a| a.as_array()).and_then(|a| a.get(idx)) else { continue };
+        let ah = anchor(w, "anchorH", "scale");
+        let av = anchor(w, "anchorV", if frames { "scale" } else { "start" });
+        let dw = if ah == "scale" { 25.0 } else { 100.0 };
+        let dh = if av == "scale" { 25.0 } else { 48.0 };
+        let (sx, ww) = resolve_axis(&ah, num(w, "x", 0.0), num(w, "w", dw), pr.width());
+        let (sy, hh) = resolve_axis(&av, num(w, "y", 0.0), num(w, "h", dh), pr.height());
+        items.push(DragItem {
+            idx, frames, ah, av,
+            sx: pr.min.x + sx, // absolute
+            sy: pr.min.y + sy,
+            w: ww, h: hh,
+            px: pr.min.x, py: pr.min.y, pw: pr.width(), ph: pr.height(),
+        });
     }
-    Drag { resize, frames, start, items }
+    Drag { resize, start, items }
 }
 fn snap(v: f32, on: bool) -> f32 {
     if on { (v / 8.0).round() * 8.0 } else { v }
 }
 /// Apply the total pointer delta to the captured drag, writing stored (parent-relative) units back.
 fn apply_drag(spec: &mut Value, drag: &Drag, total: Vec2, snap_on: bool) {
-    let key = if drag.frames { "frames" } else { "widgets" };
-    let Some(arr) = spec.get_mut(key).and_then(|w| w.as_array_mut()) else { return };
     for it in &drag.items {
-        let Some(w) = arr.get_mut(it.idx) else { continue };
+        let key = if it.frames { "frames" } else { "widgets" };
+        let Some(w) = spec.get_mut(key).and_then(|a| a.as_array_mut()).and_then(|a| a.get_mut(it.idx)) else { continue };
         if drag.resize {
             let nw = snap((it.w + total.x).max(8.0), snap_on);
             let nh = snap((it.h + total.y).max(8.0), snap_on);
@@ -1541,9 +1508,35 @@ fn delete_widget(spec: &mut Value, i: usize) {
         }
     }
 }
+/// Delete a frame, reparenting its direct children (widgets + child frames) to root
+/// so they don't vanish (a dangling `frame`/`parent` id renders nowhere).
+fn delete_frame(spec: &mut Value, fi: usize) {
+    let id = spec.get("frames").and_then(|a| a.as_array()).and_then(|a| a.get(fi))
+        .and_then(|f| f.get("id")).and_then(|v| v.as_str()).map(str::to_string);
+    if let Some(a) = spec.get_mut("frames").and_then(|f| f.as_array_mut()) {
+        if fi < a.len() {
+            a.remove(fi);
+        }
+    }
+    let Some(id) = id else { return };
+    if let Some(ws) = spec.get_mut("widgets").and_then(|w| w.as_array_mut()) {
+        for w in ws.iter_mut() {
+            if w.get("frame").and_then(|v| v.as_str()) == Some(id.as_str()) {
+                if let Some(o) = w.as_object_mut() { o.remove("frame"); }
+            }
+        }
+    }
+    if let Some(fs) = spec.get_mut("frames").and_then(|f| f.as_array_mut()) {
+        for f in fs.iter_mut() {
+            if f.get("parent").and_then(|v| v.as_str()) == Some(id.as_str()) {
+                if let Some(o) = f.as_object_mut() { o.remove("parent"); }
+            }
+        }
+    }
+}
 /// Align the selection (in stored units, like the React editor's align).
 fn align_selected(sh: &mut Shared, key: &str) {
-    let sel = sh.selected.clone();
+    let sel = sel_widgets(&sh.selected);
     if sel.len() < 2 {
         return;
     }
