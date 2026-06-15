@@ -651,7 +651,6 @@ impl YantraApp {
                         match target {
                             Hit::Frame(fi) => click_frame = Some(fi),
                             Hit::Widget(wi) => click_sel = Some((wi, shift)),
-                            Hit::Blocked => {}
                         }
                     }
                     if resp.drag_started() {
@@ -659,7 +658,6 @@ impl YantraApp {
                         match target {
                             Hit::Frame(fi) => begin = Some((fi, false, true, pos)),
                             Hit::Widget(wi) => begin = Some((wi, false, false, pos)),
-                            Hit::Blocked => {}
                         }
                     }
                     if resp.dragged() {
@@ -725,7 +723,6 @@ impl YantraApp {
                             match click_target(*i, &widgets, &frames, &frame_by_id) {
                                 Hit::Widget(wi) => { if !sel.contains(&wi) { sel.push(wi); } }
                                 Hit::Frame(fi) => frame_hit = Some(fi),
-                                Hit::Blocked => {}
                             }
                         }
                         if !sel.is_empty() {
@@ -1199,15 +1196,16 @@ enum LayerDrag {
 enum Hit {
     Widget(usize),
     Frame(usize),
-    Blocked, // inside a fully-locked frame chain
 }
 
-/// Resolve a canvas click on a widget to its top-most *unlocked* ancestor frame
-/// (so clicking inside a frame grabs the group, not the inner control). A widget
-/// with no frame ancestry hits itself; a fully-locked chain is blocked.
+/// Resolve a canvas click on a widget to the frame it should grab. An *unlocked*
+/// frame is a solid group; a *locked* frame is an edit boundary — transparent to
+/// selection so its children can be picked individually. Walk up the run of
+/// *consecutive unlocked* frames and return the outermost; a locked frame (or no
+/// frame) stops the walk and the widget itself is selected.
 fn click_target(i: usize, widgets: &[Value], frames: &[Value], frame_by_id: &HashMap<String, usize>) -> Hit {
-    let mut chain: Vec<usize> = Vec::new();
     let mut fid = widgets.get(i).and_then(|w| w.get("frame")).and_then(|v| v.as_str()).map(str::to_string);
+    let mut outermost_unlocked: Option<usize> = None;
     let mut guard = 0;
     while let Some(id) = fid {
         guard += 1;
@@ -1215,20 +1213,17 @@ fn click_target(i: usize, widgets: &[Value], frames: &[Value], frame_by_id: &Has
             break; // cycle guard
         }
         let Some(&fi) = frame_by_id.get(&id) else { break };
-        chain.push(fi);
+        let locked = frames.get(fi).and_then(|f| f.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false);
+        if locked {
+            break; // boundary: select inside it (the widget / inner unlocked run)
+        }
+        outermost_unlocked = Some(fi);
         fid = frames.get(fi).and_then(|f| f.get("parent")).and_then(|v| v.as_str()).map(str::to_string);
     }
-    if chain.is_empty() {
-        return Hit::Widget(i);
+    match outermost_unlocked {
+        Some(fi) => Hit::Frame(fi),
+        None => Hit::Widget(i),
     }
-    // chain is innermost→outermost; pick the outermost unlocked frame
-    for &fi in chain.iter().rev() {
-        let locked = frames.get(fi).and_then(|f| f.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false);
-        if !locked {
-            return Hit::Frame(fi);
-        }
-    }
-    Hit::Blocked
 }
 
 /// Wrap the selected widgets in a new frame sized to their bounding box, reparenting
