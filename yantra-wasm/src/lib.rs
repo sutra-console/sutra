@@ -720,75 +720,102 @@ impl YantraApp {
             let mut sel_frame: Option<usize> = None;
             let mut hide_frame: Option<usize> = None;
             let mut del_frame: Option<usize> = None;
+            let mut collapse_frame: Option<usize> = None;
             let mut reorder_w: Option<(usize, usize)> = None; // (from, to) within widgets
             let mut reorder_f: Option<(usize, usize)> = None; // (from, to) within frames
             let mut reparent_w: Option<(usize, usize)> = None; // (widget idx, frame idx) — drop widget on a frame row
             let mut group_click = false; // layers "Group into Frame" → sh.pending_group
-            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                // frames first
-                for fi in (0..fcount).rev() {
+
+            // snapshot the tree structure, then flatten to (depth, item) display rows
+            let frames_meta: Vec<(usize, String, Option<String>, bool)> = (0..fcount)
+                .map(|fi| {
                     let f = &sh.spec["frames"][fi];
-                    let nm = f.get("name").and_then(|n| n.as_str()).or_else(|| f.get("id").and_then(|n| n.as_str())).unwrap_or("").to_string();
-                    let hidden = f.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
-                    let is_sel = sh.selected_frame == Some(fi);
+                    (
+                        fi,
+                        f.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        f.get("parent").and_then(|v| v.as_str()).map(str::to_string),
+                        f.get("collapsed").and_then(|c| c.as_bool()).unwrap_or(false),
+                    )
+                })
+                .collect();
+            let widget_frame: Vec<(usize, Option<String>)> = (0..count)
+                .map(|i| (i, sh.spec["widgets"][i].get("frame").and_then(|v| v.as_str()).map(str::to_string)))
+                .collect();
+            let mut rows: Vec<(usize, LayerDrag)> = Vec::new();
+            build_layer_rows(None, 0, &frames_meta, &widget_frame, &mut rows);
+
+            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                for (depth, item) in &rows {
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false)).on_hover_text("Show/hide").clicked() {
-                            hide_frame = Some(fi);
-                        }
-                        let src = ui.dnd_drag_source(egui::Id::new(("lyf", fi)), LayerDrag::Frame(fi), |ui| {
-                            ui.selectable_label(is_sel, format!("[ ] {nm}"))
-                        });
-                        if src.inner.clicked() {
-                            sel_frame = Some(fi);
-                        }
-                        if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
-                            match *p {
-                                LayerDrag::Frame(from) => reorder_f = Some((from, fi)),
-                                LayerDrag::Widget(from) => reparent_w = Some((from, fi)), // drop a widget INTO this frame
+                        ui.add_space(*depth as f32 * 12.0);
+                        match *item {
+                            LayerDrag::Frame(fi) => {
+                                let f = &sh.spec["frames"][fi];
+                                let nm = f.get("name").and_then(|n| n.as_str()).or_else(|| f.get("id").and_then(|n| n.as_str())).unwrap_or("").to_string();
+                                let hidden = f.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+                                let collapsed = f.get("collapsed").and_then(|c| c.as_bool()).unwrap_or(false);
+                                let is_sel = sh.selected_frame == Some(fi);
+                                if ui.add(egui::Button::new(if collapsed { ">" } else { "v" }).small().frame(false)).on_hover_text("Expand/collapse").clicked() {
+                                    collapse_frame = Some(fi);
+                                }
+                                if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false)).on_hover_text("Show/hide").clicked() {
+                                    hide_frame = Some(fi);
+                                }
+                                let src = ui.dnd_drag_source(egui::Id::new(("lyf", fi)), LayerDrag::Frame(fi), |ui| {
+                                    ui.selectable_label(is_sel, format!("[] {nm}"))
+                                });
+                                if src.inner.clicked() {
+                                    sel_frame = Some(fi);
+                                }
+                                if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
+                                    match *p {
+                                        LayerDrag::Frame(from) => reorder_f = Some((from, fi)),
+                                        LayerDrag::Widget(from) => reparent_w = Some((from, fi)),
+                                    }
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("x").on_hover_text("Delete frame").clicked() { del_frame = Some(fi); }
+                                });
+                            }
+                            LayerDrag::Widget(i) => {
+                                let w = &sh.spec["widgets"][i];
+                                let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                                let ty = w.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                let hidden = w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
+                                let is_sel = sh.selected.contains(&i);
+                                if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false)).on_hover_text("Show/hide").clicked() {
+                                    hide_toggle = Some(i);
+                                }
+                                let txt = if name.is_empty() { format!("{ty} #{i}") } else { format!("{name}  ({ty})") };
+                                let src = ui.dnd_drag_source(egui::Id::new(("lyw", i)), LayerDrag::Widget(i), |ui| {
+                                    ui.selectable_label(is_sel, txt)
+                                });
+                                if src.inner.clicked() {
+                                    toggle_sel = Some(i);
+                                }
+                                src.response.context_menu(|ui| {
+                                    if ui.button("Group into Frame").clicked() {
+                                        group_click = true;
+                                        ui.close_menu();
+                                    }
+                                });
+                                if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
+                                    if let LayerDrag::Widget(from) = *p {
+                                        reorder_w = Some((from, i));
+                                    }
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("x").on_hover_text("Delete").clicked() { del = Some(i); }
+                                });
                             }
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("x").on_hover_text("Delete frame").clicked() { del_frame = Some(fi); }
-                        });
-                    });
-                }
-                // top widget = last in array (painted last); list top-down
-                for i in (0..count).rev() {
-                    let w = &sh.spec["widgets"][i];
-                    let name = w.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                    let ty = w.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                    let hidden = w.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false);
-                    let is_sel = sh.selected.contains(&i);
-                    ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false))
-                            .on_hover_text("Show/hide").clicked()
-                        {
-                            hide_toggle = Some(i);
-                        }
-                        let txt = if name.is_empty() { format!("{ty} #{i}") } else { format!("{name}  ({ty})") };
-                        let src = ui.dnd_drag_source(egui::Id::new(("lyw", i)), LayerDrag::Widget(i), |ui| {
-                            ui.selectable_label(is_sel, txt)
-                        });
-                        if src.inner.clicked() {
-                            toggle_sel = Some(i);
-                        }
-                        src.response.context_menu(|ui| {
-                            if ui.button("Group into Frame").clicked() {
-                                group_click = true;
-                                ui.close_menu();
-                            }
-                        });
-                        if let Some(p) = src.response.dnd_release_payload::<LayerDrag>() {
-                            if let LayerDrag::Widget(from) = *p {
-                                reorder_w = Some((from, i));
-                            }
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("x").on_hover_text("Delete").clicked() { del = Some(i); }
-                        });
                     });
                 }
             });
+            if let Some(fi) = collapse_frame {
+                let cur = sh.spec["frames"][fi].get("collapsed").and_then(|c| c.as_bool()).unwrap_or(false);
+                sh.spec["frames"][fi]["collapsed"] = json!(!cur);
+            }
             if let Some(fi) = sel_frame {
                 sh.selected.clear();
                 sh.selected_frame = Some(fi);
@@ -1092,6 +1119,30 @@ fn move_in_array(spec: &mut Value, key: &str, from: usize, to: usize) -> usize {
     let insert_at = if to > from { to - 1 } else { to }.min(arr.len());
     arr.insert(insert_at, item);
     insert_at
+}
+
+/// Flatten the frame/widget tree into display rows (depth, item), honoring each
+/// frame's collapsed state. `container` = None for root (frame.parent / widget.frame absent).
+fn build_layer_rows(
+    container: Option<&str>,
+    depth: usize,
+    frames_meta: &[(usize, String, Option<String>, bool)], // (idx, id, parent, collapsed)
+    widget_frame: &[(usize, Option<String>)],              // (idx, frame membership)
+    rows: &mut Vec<(usize, LayerDrag)>,
+) {
+    for (fi, id, parent, collapsed) in frames_meta {
+        if parent.as_deref() == container {
+            rows.push((depth, LayerDrag::Frame(*fi)));
+            if !collapsed {
+                build_layer_rows(Some(id), depth + 1, frames_meta, widget_frame, rows);
+            }
+        }
+    }
+    for (i, frame) in widget_frame {
+        if frame.as_deref() == container {
+            rows.push((depth, LayerDrag::Widget(*i)));
+        }
+    }
 }
 
 /// Move several elements (preserving their order) to before `to`. Returns the new
