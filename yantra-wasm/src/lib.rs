@@ -522,6 +522,7 @@ impl YantraApp {
                 let widgets = self.shared.borrow().spec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
                 let frames = self.shared.borrow().spec.get("frames").and_then(|f| f.as_array()).cloned().unwrap_or_default();
                 let selected = self.shared.borrow().selected.clone();
+                let selected_frame = self.shared.borrow().selected_frame;
                 let wstate = self.shared.borrow().state.get("widgets").cloned().unwrap_or(Value::Null);
                 let shift = ui.input(|i| i.modifiers.shift);
                 let accent = ui.visuals().selection.stroke.color;
@@ -530,19 +531,30 @@ impl YantraApp {
                 // walk the container tree (honoring active tabs) into placements
                 let tabs_snapshot = self.tabs.clone();
                 let mut placements: Vec<(usize, Rect, Rect)> = Vec::new();
-                let mut frame_rects: Vec<Rect> = Vec::new();
+                let mut frame_rects: Vec<(usize, Rect)> = Vec::new();
                 let mut tabbars: Vec<EditTabBar> = Vec::new();
                 collect_edit_layout("root", canvas, &widgets, &frames, &tabs_snapshot, &mut placements, &mut frame_rects, &mut tabbars);
                 let parent_of: HashMap<usize, Rect> = placements.iter().map(|(i, _, p)| (*i, *p)).collect();
 
                 // empty-canvas click clears selection; drag = marquee. Registered FIRST so
-                // the widget glass-panes (added after) sit on top and win the pointer.
+                // the frame/widget interactions (added after) sit on top and win the pointer.
                 let bg_resp = ui.interact(canvas, egui::Id::new("ed_bg"), Sense::click_and_drag());
                 let marquee0 = self.shared.borrow().marquee;
 
-                // frame outlines
-                for fr in &frame_rects {
-                    ui.painter().rect_stroke(*fr, Rounding::same(6.0), Stroke::new(1.0, border.gamma_multiply(0.8)));
+                // frame outlines + click-to-select (above bg, below widgets). The selected
+                // frame is highlighted so a layers-panel selection shows on the canvas.
+                let mut click_frame: Option<usize> = None;
+                for (fi, fr) in &frame_rects {
+                    let sel = selected_frame == Some(*fi);
+                    let stroke = if sel { Stroke::new(2.0, accent) } else { Stroke::new(1.0, border.gamma_multiply(0.8)) };
+                    ui.painter().rect_stroke(*fr, Rounding::same(6.0), stroke);
+                    let locked = frames.get(*fi).and_then(|f| f.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false);
+                    if !locked {
+                        let fresp = ui.interact(*fr, egui::Id::new(("edf", *fi)), Sense::click());
+                        if fresp.clicked() {
+                            click_frame = Some(*fi);
+                        }
+                    }
                 }
 
                 let mut click_sel: Option<(usize, bool)> = None;
@@ -576,6 +588,13 @@ impl YantraApp {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     child.set_clip_rect(rect);
                     draw_interact_widget(&mut child, rect, &ty, &name, &label, &val, dbg, dfg, &noop, w, self);
+
+                    // locked: not selectable/draggable on the canvas (still in the layer tree).
+                    if w.get("locked").and_then(|l| l.as_bool()).unwrap_or(false) {
+                        let stroke = if is_sel { Stroke::new(2.0, accent) } else { Stroke::new(1.0, border.gamma_multiply(0.3)) };
+                        ui.painter().rect_stroke(rect, Rounding::same(5.0), stroke);
+                        continue;
+                    }
 
                     let resp = ui.interact(rect, id, Sense::click_and_drag());
                     resp.context_menu(|ui| {
@@ -643,13 +662,21 @@ impl YantraApp {
                     if let Some(r) = marquee_rect {
                         let mut sel: Vec<usize> = if shift { sh.selected.clone() } else { vec![] };
                         for (i, wr, _p) in &placements {
-                            if r.intersects(*wr) && !sel.contains(i) {
+                            let locked = widgets.get(*i).and_then(|w| w.get("locked")).and_then(|l| l.as_bool()).unwrap_or(false);
+                            if !locked && r.intersects(*wr) && !sel.contains(i) {
                                 sel.push(*i);
                             }
                         }
                         sh.selected = sel;
+                        if !sh.selected.is_empty() {
+                            sh.selected_frame = None;
+                        }
                     }
                     sh.marquee = None;
+                }
+                if let Some(fi) = click_frame {
+                    sh.selected.clear();
+                    sh.selected_frame = Some(fi);
                 }
                 if let Some((i, sh_held)) = click_sel {
                     sh.selected_frame = None;
@@ -711,9 +738,11 @@ impl YantraApp {
                 .map(|i| sh.spec["frames"][i].get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
                 .collect();
 
+            let accent_c = ui.visuals().selection.stroke.color;
+            let muted_c = ui.visuals().weak_text_color();
             ui.add_space(4.0);
             ui.strong("Layers");
-            ui.label(RichText::new("drag to reorder").size(9.0).weak());
+            ui.label(RichText::new("drag to reorder · L = lock").size(9.0).weak());
             let mut toggle_sel: Option<usize> = None;
             let mut hide_toggle: Option<usize> = None;
             let mut del: Option<usize> = None;
@@ -721,6 +750,8 @@ impl YantraApp {
             let mut hide_frame: Option<usize> = None;
             let mut del_frame: Option<usize> = None;
             let mut collapse_frame: Option<usize> = None;
+            let mut lock_w: Option<usize> = None;
+            let mut lock_f: Option<usize> = None;
             let mut reorder_w: Option<(usize, usize)> = None; // (from, to) within widgets
             let mut reorder_f: Option<(usize, usize)> = None; // (from, to) within frames
             let mut reparent_w: Option<(usize, usize)> = None; // (widget idx, frame idx) — drop widget on a frame row
@@ -761,6 +792,10 @@ impl YantraApp {
                                 if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false)).on_hover_text("Show/hide").clicked() {
                                     hide_frame = Some(fi);
                                 }
+                                let flocked = f.get("locked").and_then(|l| l.as_bool()).unwrap_or(false);
+                                if ui.add(egui::Button::new(RichText::new("L").color(if flocked { accent_c } else { muted_c })).small().frame(false)).on_hover_text("Lock/unlock (canvas)").clicked() {
+                                    lock_f = Some(fi);
+                                }
                                 let src = ui.dnd_drag_source(egui::Id::new(("lyf", fi)), LayerDrag::Frame(fi), |ui| {
                                     ui.selectable_label(is_sel, format!("[] {nm}"))
                                 });
@@ -785,6 +820,10 @@ impl YantraApp {
                                 let is_sel = sh.selected.contains(&i);
                                 if ui.add(egui::Button::new(if hidden { "-" } else { "o" }).small().frame(false)).on_hover_text("Show/hide").clicked() {
                                     hide_toggle = Some(i);
+                                }
+                                let wlocked = w.get("locked").and_then(|l| l.as_bool()).unwrap_or(false);
+                                if ui.add(egui::Button::new(RichText::new("L").color(if wlocked { accent_c } else { muted_c })).small().frame(false)).on_hover_text("Lock/unlock (canvas)").clicked() {
+                                    lock_w = Some(i);
                                 }
                                 let txt = if name.is_empty() { format!("{ty} #{i}") } else { format!("{name}  ({ty})") };
                                 let src = ui.dnd_drag_source(egui::Id::new(("lyw", i)), LayerDrag::Widget(i), |ui| {
@@ -815,6 +854,16 @@ impl YantraApp {
             if let Some(fi) = collapse_frame {
                 let cur = sh.spec["frames"][fi].get("collapsed").and_then(|c| c.as_bool()).unwrap_or(false);
                 sh.spec["frames"][fi]["collapsed"] = json!(!cur);
+            }
+            if let Some(i) = lock_w {
+                push_undo(&mut sh);
+                let cur = sh.spec["widgets"][i].get("locked").and_then(|l| l.as_bool()).unwrap_or(false);
+                sh.spec["widgets"][i]["locked"] = json!(!cur);
+            }
+            if let Some(fi) = lock_f {
+                push_undo(&mut sh);
+                let cur = sh.spec["frames"][fi].get("locked").and_then(|l| l.as_bool()).unwrap_or(false);
+                sh.spec["frames"][fi]["locked"] = json!(!cur);
             }
             if let Some(fi) = sel_frame {
                 sh.selected.clear();
@@ -1240,11 +1289,11 @@ fn collect_edit_layout(
     frames: &[Value],
     tabs: &HashMap<String, String>,
     out_w: &mut Vec<(usize, Rect, Rect)>,
-    out_f: &mut Vec<Rect>,
+    out_f: &mut Vec<(usize, Rect)>,
     out_t: &mut Vec<EditTabBar>,
 ) {
     let is_root = container == "root";
-    for f in frames {
+    for (fi, f) in frames.iter().enumerate() {
         let id = f.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let parent = f.get("parent").and_then(|v| v.as_str());
         let tab = f.get("tab").and_then(|v| v.as_str());
@@ -1253,7 +1302,7 @@ fn collect_edit_layout(
             continue;
         }
         let fr = widget_rect(f, rect.min, rect.width(), rect.height());
-        out_f.push(fr);
+        out_f.push((fi, fr));
         collect_edit_layout(id, fr, widgets, frames, tabs, out_w, out_f, out_t);
     }
     for (i, w) in widgets.iter().enumerate() {
