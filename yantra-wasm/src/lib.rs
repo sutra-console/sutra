@@ -1418,6 +1418,10 @@ fn collect_edit_layout(
         if !is_child {
             continue;
         }
+        // hidden frame: skip it and its whole subtree (like a hidden widget)
+        if f.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) {
+            continue;
+        }
         let fr = widget_rect(f, rect.min, rect.width(), rect.height());
         out_f.push((fi, fr, rect));
         collect_edit_layout(id, fr, widgets, frames, tabs, out_w, out_f, out_t);
