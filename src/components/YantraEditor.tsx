@@ -2,13 +2,14 @@
 // edit their properties (incl. the transport-agnostic action), add/remove widgets,
 // and save back to the .yantra file. Pairs with YantraCanvas (the read-only
 // renderer); App switches between them with an "Edit" toggle.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Plus, Save, Undo2, Redo2, RotateCcw, Trash2, Move, Code,
+  Plus, Save, Undo2, Redo2, RotateCcw, Trash2, Move, Code, Play,
   Layers, Eye, EyeOff, Lock, LockOpen, ChevronUp, ChevronDown, ChevronRight,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalSpaceBetween, AlignVerticalSpaceBetween,
+  StretchHorizontal, StretchVertical, Maximize2,
 } from "lucide-react";
 import Moveable from "react-moveable";
 import Selecto from "react-selecto";
@@ -26,10 +27,10 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  resolveAxis, storeAxis, onData,
+  resolveAxis, storeAxis, onData, yantraEval,
   bindOf, computeBus, evalArray, evalBind, needsConsole, CURRENT_CONN,
-  type AnchorMode, type YantraAction, type YantraBind, type YantraFrame,
-  type YantraSource, type YantraSpec, type YantraWidget,
+  type AnchorMode, type YantraAction, type YantraBind, type YantraChrome, type YantraFrame,
+  type YantraRenderer, type YantraSource, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
 import { Widget } from "./YantraCanvas";
 
@@ -62,6 +63,77 @@ const showVal = (v: unknown): string => (v === undefined || v === null || v === 
 // ---- small helpers ----------------------------------------------------------
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
+
+const cleanObject = <T extends Record<string, unknown>>(obj: T): Partial<T> => {
+  const out: Partial<T> = {};
+  for (const [key, value] of Object.entries(obj) as [keyof T, T[keyof T]][]) {
+    if (value !== undefined && value !== "") out[key] = value;
+  }
+  return out;
+};
+
+const hasRendererFields = (renderer?: YantraRenderer): boolean =>
+  !!renderer && Object.keys(cleanObject(renderer as Record<string, unknown>)).length > 0;
+const rendererStack = (node?: YantraChrome): YantraRenderer[] => {
+  const stacked = node?.renderers?.filter(hasRendererFields) ?? [];
+  return stacked;
+};
+const editableRendererStack = (node?: YantraChrome): YantraRenderer[] => {
+  const stack = rendererStack(node);
+  return stack.length ? stack : [{}];
+};
+const rendererFill = (renderer?: YantraRenderer): string => renderer?.fill ?? "";
+const rendererStroke = (renderer?: YantraRenderer): string => {
+  const stroke = renderer?.stroke;
+  return typeof stroke === "string" ? stroke : "";
+};
+const rendererStrokeWidth = (renderer?: YantraRenderer): number | "" => renderer?.strokeWidth ?? "";
+const rendererRadius = (renderer?: YantraRenderer): number | "" => renderer?.radius ?? "";
+const rendererPadding = (renderer?: YantraRenderer): number | "" => {
+  const padding = renderer?.padding;
+  if (typeof padding === "number") return padding;
+  return padding?.x ?? padding?.horizontal ?? padding?.y ?? padding?.vertical ?? "";
+};
+const renderersPatch = (renderers: YantraRenderer[]): Partial<YantraChrome> => ({
+  renderers: renderers.map((r) => cleanObject(r as Record<string, unknown>) as YantraRenderer).filter(hasRendererFields),
+});
+
+function chromeStyle(node?: YantraChrome, includePadding = false): CSSProperties {
+  if (!node) return {};
+  const stack = rendererStack(node);
+  const style: CSSProperties = {};
+  const fills = stack.map(rendererFill).filter(Boolean);
+  if (fills.length) style.backgroundColor = fills[fills.length - 1];
+  const strokes = stack
+    .map((renderer) => {
+      const stroke = rendererStroke(renderer);
+      const strokeWidth = rendererStrokeWidth(renderer);
+      if (renderer.stroke === false || strokeWidth === 0) return undefined;
+      if (!stroke && strokeWidth === "") return undefined;
+      return `0 0 0 ${strokeWidth || 1}px ${stroke || "currentColor"}`;
+    })
+    .filter(Boolean) as string[];
+  if (strokes.length) style.boxShadow = strokes.join(", ");
+  const lastRadius = [...stack].reverse().map(rendererRadius).find((radius) => radius !== "");
+  if (lastRadius !== undefined) style.borderRadius = lastRadius;
+  if (includePadding) {
+    const pad = rendererInset(node);
+    if (pad.x || pad.y) style.padding = `${pad.y}px ${pad.x}px`;
+  }
+  return style;
+}
+
+function rendererInset(node?: YantraChrome): { x: number; y: number } {
+  return rendererStack(node).reduce((acc, renderer) => {
+    const padding = renderer.padding;
+    if (typeof padding === "number") return { x: acc.x + padding, y: acc.y + padding };
+    if (!padding) return acc;
+    return {
+      x: acc.x + (padding.x ?? padding.horizontal ?? 0),
+      y: acc.y + (padding.y ?? padding.vertical ?? 0),
+    };
+  }, { x: 0, y: 0 });
+}
 
 // Migrate the legacy flat `group` tag to the frame model, synthesizing frame
 // entries for any referenced ids. Idempotent.
@@ -129,6 +201,12 @@ function defaultWidget(type: string, y: number): YantraWidget {
 // ---- action editor (string | {i2c} | {invoke} | {cfg}) ----------------------
 
 type ActionKind = "text" | "i2c" | "invoke" | "cfg";
+type LayerItem = { kind: "widget"; index: number } | { kind: "frame"; id: string };
+
+const layerItemKey = (item: LayerItem): string =>
+  item.kind === "widget" ? `w:${item.index}` : `f:${item.id}`;
+const sameLayerItem = (a: LayerItem, b: LayerItem): boolean => layerItemKey(a) === layerItemKey(b);
+
 const actionKind = (a: YantraAction | undefined): ActionKind => {
   if (a == null || typeof a === "string") return "text";
   if ("send" in a) return "text";
@@ -229,12 +307,18 @@ export function YantraEditor({
   const [draft, setDraft] = useState<YantraSpec>(() => migrateFrames(spec));
   const [selected, setSelected] = useState<number[]>([]); // selected widget indices
   const [selectedFrames, setSelectedFrames] = useState<string[]>([]); // frames selected in the tree
+  const [layerAnchor, setLayerAnchor] = useState<LayerItem | null>(null);
   const [containerW, setContainerW] = useState(0);
   const [containerH, setContainerH] = useState(0);
   const [ready, setReady] = useState(false);
-  const [toolMenu, setToolMenu] = useState<"a" | "s" | null>(null); // open align/spacing submenu
+  const [toolMenu, setToolMenu] = useState<"a" | "s" | "z" | null>(null); // open align/spacing/size submenu
   const [showLayers, setShowLayers] = useState(false); // layers panel visible
   const [scriptOpen, setScriptOpen] = useState(false); // full-size surface-script editor
+  const [testVars, setTestVars] = useState("{}"); // dry-run input: a vars snapshot (JSON)
+  const [testOut, setTestOut] = useState<
+    null | { logs: string[]; sets: string[]; sends: number; frames: string[]; err?: string }
+  >(null);
+  const testTick = useRef(0); // advances t across presses so state-based scripts (ema) evolve
   const [activeTab, setActiveTab] = useState<Record<number, string>>({}); // editor preview: active pane per tabs widget
   const [past, setPast] = useState<YantraSpec[]>([]); // undo stack (checkpoints before each change)
   const [future, setFuture] = useState<YantraSpec[]>([]); // redo stack
@@ -253,6 +337,7 @@ export function YantraEditor({
   const cw = containerW > 0 ? containerW / cols : 80;
   const dirty = JSON.stringify(draft) !== JSON.stringify(spec);
   const sel = selected.length ? selected[0] : null;
+  const selectedFrame = selectedFrames.length === 1 ? frames.find((f) => f.id === selectedFrames[0]) : undefined;
 
   // Live data-flow preview: same reactive bus as the renderer, fed by the device
   // console, so bound widgets show real values in WYSIWYG and the Data panel.
@@ -271,6 +356,39 @@ export function YantraEditor({
   const valueOf = (w: YantraWidget): unknown => evalBind(bindOf(w), bus, bufs);
   const rowsOf = (w: YantraWidget): unknown[] => evalArray(w, bus, bufs);
 
+  // Dry-run the surface + widget scripts once against a vars snapshot, off-device.
+  // Uses a separate VM key ("__test__…") so it never disturbs a live Controls VM,
+  // and advances `t` each press so state-based scripts (ema/approach) can evolve.
+  // A syntax error throws from the backend → shown as `err`; runtime errors and
+  // log()/print() lines come back in `logs`.
+  const runTest = async () => {
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = testVars.trim() ? JSON.parse(testVars) : {};
+    } catch {
+      setTestOut({ logs: [], sets: [], sends: 0, frames: [], err: "test vars: not valid JSON" });
+      return;
+    }
+    const ws = widgets
+      .filter((w) => w.name && w.script)
+      .map((w) => ({ name: w.name!, script: w.script! }));
+    const n = (testTick.current += 1);
+    try {
+      const out = await yantraEval(`__test__${draft.name || file}`, draft.script ?? "", ws, {
+        ...parsed, t: n * 100, dt: 100,
+      });
+      setTestOut({
+        logs: out.logs ?? [],
+        sets: Object.keys(out.sets ?? {}),
+        sends: (out.sends ?? []).length,
+        frames: Object.keys(out.frames ?? {}),
+      });
+    } catch (e) {
+      setTestOut({ logs: [], sets: [], sends: 0, frames: [], err: String(e) });
+    }
+  };
+  const loadBus = () => { setTestVars(JSON.stringify(bus)); testTick.current = 0; };
+
   // Phase C: coords are relative to the parent container's content box, in unitH/unitV
   // (pct of parent | px). The editor is FLAT — we resolve each node's ABSOLUTE px rect
   // by walking the parent chain, so Moveable/Selecto keep working on absolute wrappers.
@@ -285,17 +403,26 @@ export function YantraEditor({
     const v = resolveAxis(aV, n.y ?? 0, n.h ?? (aV === "scale" ? 25 : 48), pb.h);
     return { x: pb.x + h.start, w: h.size, y: pb.y + v.start, h: v.size };
   };
+  const insetRect = (r: Rect, node?: YantraChrome): Rect => {
+    const pad = rendererInset(node);
+    return {
+      x: r.x + pad.x,
+      y: r.y + pad.y,
+      w: Math.max(0, r.w - pad.x * 2),
+      h: Math.max(0, r.h - pad.y * 2),
+    };
+  };
   const contentBox = (key: string, seen = new Set<string>()): Rect => {
-    if (key === "root" || seen.has(key)) return { x: 0, y: 0, w: containerW, h: containerH };
+    if (key === "root" || seen.has(key)) return insetRect({ x: 0, y: 0, w: containerW, h: containerH }, draft.stage);
     seen.add(key);
     const f = frames.find((x) => x.id === key);
-    if (f) return relRect(f, contentBox(parentKeyOf(f), seen));
+    if (f) return insetRect(relRect(f, contentBox(parentKeyOf(f), seen)), f);
     const owner = widgets.find((w) => w.type === "tabs" && (w.tabs ?? []).some((t) => t.id === key));
     if (owner) {
-      const ob = relRect(owner, contentBox(parentKeyOf(owner), seen));
+      const ob = insetRect(relRect(owner, contentBox(parentKeyOf(owner), seen)), owner);
       return { x: ob.x, y: ob.y + TAB_BAR, w: ob.w, h: Math.max(0, ob.h - TAB_BAR) };
     }
-    return { x: 0, y: 0, w: containerW, h: containerH };
+    return insetRect({ x: 0, y: 0, w: containerW, h: containerH }, draft.stage);
   };
   const absRect = (n: Node & { tab?: string; frame?: string; parent?: string }): Rect =>
     relRect(n, contentBox(parentKeyOf(n)));
@@ -351,6 +478,7 @@ export function YantraEditor({
   // re-seed when the file prop changes (App also remounts via key, but be safe)
   useEffect(() => {
     setDraft(migrateFrames(spec)); setSelected([]); setSelectedFrames([]);
+    setLayerAnchor(null);
     committed.current = migrateFrames(spec); setPast([]); setFuture([]);
   }, [file]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -439,6 +567,35 @@ export function YantraEditor({
       setWidget(sel, { anchorV: mode, y: r2(st.a), h: r2(st.b) });
     }
   };
+  const setFrameDim = (id: string, field: "x" | "y" | "w" | "h", raw: string) => {
+    const f = frames.find((x) => x.id === id);
+    if (!f) return;
+    const axis: "H" | "V" = field === "x" || field === "w" ? "H" : "V";
+    const m = raw.trim().match(/^(-?\d*\.?\d+)\s*(%|px)?$/i);
+    if (!m) return;
+    const val = parseFloat(m[1]);
+    const suffix = m[2]?.toLowerCase();
+    const cur = axis === "H" ? f.anchorH ?? "scale" : f.anchorV ?? "scale";
+    if (suffix === "%" && cur !== "scale") setFrameAnchor(id, axis, "scale");
+    else if (suffix === "px" && cur === "scale") setFrameAnchor(id, axis, "start");
+    setFrame(id, { [field]: val });
+  };
+  const setFrameAnchor = (id: string, axis: "H" | "V", mode: AnchorMode) => {
+    const f = frames.find((x) => x.id === id);
+    if (!f) return;
+    const pb = contentBox(parentKeyOf(f));
+    if (axis === "H") {
+      const cur = f.anchorH ?? "scale";
+      const abs = resolveAxis(cur, f.x ?? 0, f.w ?? (cur === "scale" ? 25 : 100), pb.w);
+      const st = storeAxis(mode, abs.start, abs.size, pb.w);
+      setFrame(id, { anchorH: mode, x: r2(st.a), w: r2(st.b) });
+    } else {
+      const cur = f.anchorV ?? "scale";
+      const abs = resolveAxis(cur, f.y ?? 0, f.h ?? (cur === "scale" ? 25 : 48), pb.h);
+      const st = storeAxis(mode, abs.start, abs.size, pb.h);
+      setFrame(id, { anchorV: mode, y: r2(st.a), h: r2(st.b) });
+    }
+  };
 
   // Delete/Backspace removes the selection (unless a text field is focused)
   useEffect(() => {
@@ -476,6 +633,11 @@ export function YantraEditor({
       ws[i] = { ...ws[i], ...patch };
       return { ...d, widgets: ws };
     });
+  const setFrame = (id: string, patch: Partial<YantraFrame>) =>
+    setDraft((d) => ({
+      ...d,
+      frames: (d.frames ?? []).map((f) => (f.id === id ? { ...f, ...patch } : f)),
+    }));
   const removeMany = (indices: number[]) =>
     setDraft((d) => ({ ...d, widgets: (d.widgets ?? []).filter((_, j) => !indices.includes(j)) }));
   // Reorder z-index by swapping neighbors (dir +1 = toward front / on top). Render
@@ -521,6 +683,127 @@ export function YantraEditor({
   };
   // (Canvas selection picks the individual widget; the layer tree's frame rows
   //  select a whole subtree via selectFrame.)
+
+  const layerRows = useMemo<LayerItem[]>(() => {
+    const rows: LayerItem[] = [];
+
+    function pushFrame(f: YantraFrame) {
+      rows.push({ kind: "frame", id: f.id });
+      if (!f.collapsed) pushChildren(f.id);
+    }
+
+    function pushWidget(i: number) {
+      rows.push({ kind: "widget", index: i });
+      const w = widgets[i];
+      if (w?.type !== "tabs") return;
+      for (const pane of w.tabs ?? []) {
+        frames.filter((f) => f.tab === pane.id).forEach(pushFrame);
+        widgets
+          .map((cw, ci) => (cw.tab === pane.id ? ci : -1))
+          .filter((ci) => ci >= 0)
+          .reverse()
+          .forEach(pushWidget);
+      }
+    }
+
+    function pushChildren(parent: string | undefined) {
+      frames.filter((f) => f.parent === parent && !f.tab).forEach(pushFrame);
+      widgets
+        .map((w, i) => (w.frame === parent && !w.tab ? i : -1))
+        .filter((i) => i >= 0)
+        .reverse()
+        .forEach(pushWidget);
+    }
+
+    pushChildren(undefined);
+    return rows;
+  }, [frames, widgets]);
+
+  const layerSelectionFromItems = (items: LayerItem[]) => {
+    const frameIds: string[] = [];
+    const widgetIds = new Set<number>();
+    for (const item of items) {
+      if (item.kind === "frame") {
+        if (!frameIds.includes(item.id)) frameIds.push(item.id);
+        widgetsInFrames(subtreeFrames(item.id)).forEach((i) => widgetIds.add(i));
+      } else {
+        widgetIds.add(item.index);
+      }
+    }
+    return { frameIds, widgetIds: [...widgetIds] };
+  };
+
+  const currentLayerItems = (): LayerItem[] => {
+    const visible = new Set(layerRows.map(layerItemKey));
+    const items: LayerItem[] = [
+      ...selectedFrames.map((id) => ({ kind: "frame" as const, id })),
+      ...selected.map((index) => ({ kind: "widget" as const, index })),
+    ];
+    return items.filter((item, i) => visible.has(layerItemKey(item)) && items.findIndex((x) => sameLayerItem(x, item)) === i);
+  };
+
+  const firstSelectedLayerItem = (): LayerItem | null =>
+    layerRows.find((item) => (item.kind === "frame" ? selectedFrames.includes(item.id) : selected.includes(item.index))) ?? null;
+
+  const applyLayerItems = (items: LayerItem[]) => {
+    const next = layerSelectionFromItems(items);
+    setSelectedFrames(next.frameIds);
+    setSelected(next.widgetIds);
+  };
+
+  const isLayerItemSelected = (item: LayerItem): boolean =>
+    item.kind === "frame" ? selectedFrames.includes(item.id) : selected.includes(item.index);
+
+  const applyLayerClick = (item: LayerItem, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const shift = e.shiftKey;
+    const toggle = e.ctrlKey || e.metaKey;
+    const clickedIndex = layerRows.findIndex((row) => sameLayerItem(row, item));
+    if (clickedIndex < 0) return;
+
+    const visibleAnchor = layerAnchor && layerRows.some((row) => sameLayerItem(row, layerAnchor))
+      ? layerAnchor
+      : firstSelectedLayerItem() ?? item;
+
+    if (shift) {
+      const anchorIndex = layerRows.findIndex((row) => sameLayerItem(row, visibleAnchor));
+      const start = Math.min(anchorIndex, clickedIndex);
+      const end = Math.max(anchorIndex, clickedIndex);
+      const range = layerRows.slice(start, end + 1);
+      if (toggle) {
+        const removed = new Set(range.map(layerItemKey));
+        const removedWidgets = new Set<number>();
+        for (const row of range) {
+          if (row.kind === "frame") widgetsInFrames(subtreeFrames(row.id)).forEach((i) => removedWidgets.add(i));
+        }
+        applyLayerItems(currentLayerItems().filter((row) =>
+          !removed.has(layerItemKey(row)) && !(row.kind === "widget" && removedWidgets.has(row.index)),
+        ));
+      } else {
+        applyLayerItems(range);
+      }
+      setLayerAnchor(visibleAnchor);
+      return;
+    }
+
+    if (toggle) {
+      const key = layerItemKey(item);
+      const selectedItems = currentLayerItems();
+      if (selectedItems.some((row) => sameLayerItem(row, item))) {
+        const removedWidgets = item.kind === "frame" ? new Set(widgetsInFrames(subtreeFrames(item.id))) : new Set<number>();
+        applyLayerItems(selectedItems.filter((row) =>
+          layerItemKey(row) !== key && !(row.kind === "widget" && removedWidgets.has(row.index)),
+        ));
+      } else {
+        applyLayerItems([...selectedItems, item]);
+      }
+      setLayerAnchor(item);
+      return;
+    }
+
+    applyLayerItems([item]);
+    setLayerAnchor(item);
+  };
 
   // Group the current selection into a new frame (nests when items share a parent
   // frame, or when whole frames are selected via the tree).
@@ -585,9 +868,10 @@ export function YantraEditor({
   const ensureSelected = (i: number) => { if (!selected.includes(i)) { setSelectedFrames([]); setSelected([i]); } };
   // frame helpers (layer tree)
   const selectFrame = (id: string, additive: boolean) => {
-    setSelectedFrames((sf) => (additive ? (sf.includes(id) ? sf.filter((x) => x !== id) : [...sf, id]) : [id]));
-    const idxs = widgetsInFrames(subtreeFrames(id));
-    setSelected((sel) => (additive ? [...new Set([...sel, ...idxs])] : idxs));
+    const item: LayerItem = { kind: "frame", id };
+    const items = additive ? [...currentLayerItems(), item] : [item];
+    applyLayerItems(items);
+    setLayerAnchor(item);
   };
   const renameFrame = (id: string, name: string) =>
     setDraft((d) => ({ ...d, frames: (d.frames ?? []).map((f) => (f.id === id ? { ...f, name } : f)) }));
@@ -693,6 +977,23 @@ export function YantraEditor({
       return { ...d, widgets: ws };
     });
 
+  // resize the selection to a common dimension (the largest, so nothing clips).
+  // Operates on spec units (w/h), like align/distribute — unit-agnostic.
+  const matchSize = (dim: "w" | "h" | "both") =>
+    setDraft((d) => {
+      const ws = [...(d.widgets ?? [])];
+      const picks = selected.map((i) => ws[i]).filter(Boolean);
+      if (picks.length < 2) return d;
+      const tw = Math.max(...picks.map((w) => w.w ?? 1));
+      const th = Math.max(...picks.map((w) => w.h ?? 1));
+      for (const i of selected) {
+        const w = ws[i];
+        if (!w) continue;
+        ws[i] = { ...w, ...(dim !== "h" && { w: tw }), ...(dim !== "w" && { h: th }) };
+      }
+      return { ...d, widgets: ws };
+    });
+
   // shared align/distribute actions (used by both the floating toolbar and the panel)
   const alignActions = [
     { key: "l", label: "Align left", Icon: AlignStartVertical, run: () => alignSelected((_, b) => ({ x: Math.round(b.minX) })) },
@@ -705,6 +1006,11 @@ export function YantraEditor({
   const distActions = [
     { key: "dh", label: "Even spacing (horizontal)", Icon: AlignHorizontalSpaceBetween, run: () => distribute("h") },
     { key: "dv", label: "Even spacing (vertical)", Icon: AlignVerticalSpaceBetween, run: () => distribute("v") },
+  ];
+  const sizeActions = [
+    { key: "mw", label: "Match width (to widest)", Icon: StretchHorizontal, run: () => matchSize("w") },
+    { key: "mh", label: "Match height (to tallest)", Icon: StretchVertical, run: () => matchSize("h") },
+    { key: "ms", label: "Match size", Icon: Maximize2, run: () => matchSize("both") },
   ];
 
   // top-left corner (px, canvas coords) of the multi-selection's bounding box,
@@ -810,8 +1116,8 @@ export function YantraEditor({
         <ContextMenuTrigger asChild>
           <div draggable onDragStart={() => { dragRef.current = { kind: "w", key: String(i) }; }}
             style={{ paddingLeft: depth * 12 + 4 }}
-            className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selected.includes(i) && !selectedFrames.length ? "bg-primary/15" : "hover:bg-accent/50"}`}
-            onClick={(e) => { setSelectedFrames([]); setSelected((sel) => (e.shiftKey ? (sel.includes(i) ? sel.filter((s) => s !== i) : [...sel, i]) : [i])); }}>
+            className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${isLayerItemSelected({ kind: "widget", index: i }) ? "bg-primary/15" : "hover:bg-accent/50"}`}
+            onClick={(e) => applyLayerClick({ kind: "widget", index: i }, e)}>
             <button type="button" title={w.hidden ? "Show" : "Hide"} className="text-muted-foreground hover:text-foreground"
               onClick={(e) => { e.stopPropagation(); toggleHidden(i); }}>
               {w.hidden ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
@@ -848,8 +1154,8 @@ export function YantraEditor({
         <ContextMenuTrigger asChild>
           <div draggable onDragStart={() => { dragRef.current = { kind: "f", key: f.id }; }}
             style={{ paddingLeft: depth * 12 }} {...dropProps({ frame: f.id })}
-            className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selectedFrames.includes(f.id) ? "bg-primary/20" : "hover:bg-accent/50"}`}
-            onClick={(e) => selectFrame(f.id, e.shiftKey)}>
+            className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${isLayerItemSelected({ kind: "frame", id: f.id }) ? "bg-primary/20" : "hover:bg-accent/50"}`}
+            onClick={(e) => applyLayerClick({ kind: "frame", id: f.id }, e)}>
             <button type="button" className="text-muted-foreground" title={f.collapsed ? "Expand" : "Collapse"}
               onClick={(e) => { e.stopPropagation(); toggleCollapse(f.id); }}>
               {f.collapsed ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}
@@ -883,8 +1189,8 @@ export function YantraEditor({
       <div key={`w${i}`}>
         <div draggable onDragStart={() => { dragRef.current = { kind: "w", key: String(i) }; }}
           style={{ paddingLeft: depth * 12 }}
-          className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${selected.includes(i) && !selectedFrames.length ? "bg-primary/15" : "hover:bg-accent/50"}`}
-          onClick={() => { setSelectedFrames([]); setSelected([i]); }}>
+          className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${isLayerItemSelected({ kind: "widget", index: i }) ? "bg-primary/15" : "hover:bg-accent/50"}`}
+          onClick={(e) => applyLayerClick({ kind: "widget", index: i }, e)}>
           <Layers className="size-3 text-primary" />
           <span className="min-w-0 flex-1 truncate font-medium">{w.name || w.label || "tabs"}</span>
           <button type="button" title="Bring forward" disabled={i === widgets.length - 1}
@@ -981,6 +1287,7 @@ export function YantraEditor({
           ref={surfaceRef}
           className="relative min-h-full"
           style={{
+            ...chromeStyle(draft.stage),
             backgroundSize: `${cw}px ${ROW_H}px`,
             backgroundImage:
               "linear-gradient(to right, hsl(var(--border)/0.5) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)/0.5) 1px, transparent 1px)",
@@ -991,7 +1298,7 @@ export function YantraEditor({
             const r = absRect({ ...f });
             return (
               <div key={`f${f.id}`} className={`pointer-events-none absolute rounded border border-dashed ${selectedFrames.includes(f.id) ? "border-primary" : "border-muted-foreground/40"}`}
-                style={{ left: r.x, top: r.y, width: r.w, height: r.h }}>
+                style={{ left: r.x, top: r.y, width: r.w, height: r.h, ...chromeStyle(f) }}>
                 <span className="absolute left-0 top-0 rounded-br bg-background/70 px-1 text-[9px] text-muted-foreground">{f.name || "frame"}</span>
               </div>
             );
@@ -1006,7 +1313,7 @@ export function YantraEditor({
                   className={`yantra-widget absolute overflow-hidden rounded ${
                     selected.includes(i) ? "ring-2 ring-primary" : ""
                   } ${w.hidden ? "opacity-40" : ""} ${w.locked ? "pointer-events-none" : ""}`}
-                  style={geom(w)}
+                  style={{ ...geom(w), ...chromeStyle(w) }}
                 >
                   {w.type === "tabs" ? (
                     // real tab bar; clicking a tab swaps the editor's active pane
@@ -1046,8 +1353,8 @@ export function YantraEditor({
           ))}
 
           {/* mini toolbar pinned to (and following) the group's outline: A = align,
-              S = spacing sub-menus. Position is React-driven from the committed box;
-              syncLiveBox() nudges it directly during a gesture. */}
+              S = spacing, R = resize/match-size sub-menus. Position is React-driven from
+              the committed box; syncLiveBox() nudges it directly during a gesture. */}
           {groupBox && (
             <div
               ref={toolbarRef}
@@ -1077,6 +1384,17 @@ export function YantraEditor({
                   <a.Icon className="size-3.5" />
                 </button>
               ))}
+              <button type="button" title="Match size" onClick={() => setToolMenu((m) => (m === "z" ? null : "z"))}
+                className={`flex size-6 items-center justify-center rounded text-[11px] font-semibold hover:bg-accent ${toolMenu === "z" ? "bg-accent" : ""}`}>
+                R
+              </button>
+              {toolMenu === "z" && sizeActions.map((a) => (
+                <button key={a.key} type="button" title={a.label}
+                  className="flex size-6 items-center justify-center rounded hover:bg-accent"
+                  onClick={a.run}>
+                  <a.Icon className="size-3.5" />
+                </button>
+              ))}
             </div>
           )}
 
@@ -1088,7 +1406,13 @@ export function YantraEditor({
               resizable
               rotatable={false}
               snappable
+              snapGap
+              isDisplaySnapDigit
+              snapThreshold={6}
+              snapDirections={{ top: true, left: true, bottom: true, right: true, center: true, middle: true }}
+              elementSnapDirections={{ top: true, left: true, bottom: true, right: true, center: true, middle: true }}
               elementGuidelines={guidelines}
+              verticalGuidelines={containerW > 0 ? [containerW / 2] : []}
               bounds={{ left: 0, top: 0, position: "css" }}
               throttleDrag={0}
               throttleResize={0}
@@ -1136,7 +1460,22 @@ export function YantraEditor({
 
       {/* property panel */}
       <div className="w-64 shrink-0 overflow-auto rounded border bg-muted/10 p-3">
-        {selected.length > 1 ? (
+        {selectedFrames.length > 1 ? (
+          <div className="flex flex-col gap-3">
+            <div className="text-sm font-medium">{selectedFrames.length} frames selected</div>
+            <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => ungroupFrames(selectedFrames)}>
+              Ungroup
+            </Button>
+          </div>
+        ) : selectedFrame ? (
+          <FrameProps
+            frame={selectedFrame}
+            onChange={(p) => setFrame(selectedFrame.id, p)}
+            onAnchor={(axis, mode) => setFrameAnchor(selectedFrame.id, axis, mode)}
+            onDim={(field, raw) => setFrameDim(selectedFrame.id, field, raw)}
+            onUngroup={() => ungroupFrames([selectedFrame.id])}
+          />
+        ) : selected.length > 1 ? (
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
               <div className="text-sm font-medium">{selected.length} selected</div>
@@ -1171,8 +1510,17 @@ export function YantraEditor({
                 ))}
               </div>
             </div>
+            <div>
+              <div className="mb-1 text-[11px] text-muted-foreground">Size</div>
+              <div className="grid grid-cols-3 gap-1">
+                {sizeActions.map((a) => (
+                  <AlignBtn key={a.key} label={a.label} icon={a.Icon} onClick={a.run} />
+                ))}
+              </div>
+            </div>
             <p className="text-[10px] text-muted-foreground">
-              Even spacing needs 3+ widgets. Shift-click to add/remove from the selection.
+              Align/size to the selection bounds; match-size grows to the largest. Even spacing
+              needs 3+ widgets. Shift-click to add/remove from the selection.
             </p>
           </div>
         ) : sel == null || !widgets[sel] ? (
@@ -1190,13 +1538,19 @@ export function YantraEditor({
               <Input className="h-7 w-20 text-xs" type="number" min={1} max={24} value={cols}
                 onChange={(e) => setDraft((d) => ({ ...d, cols: Math.max(1, +e.target.value) }))} />
             </Field>
+            <RendererStackFields
+              node={draft.stage}
+              onChange={(p) => setDraft((d) => ({ ...d, stage: { ...(d.stage ?? {}), ...p } }))}
+            />
             <Field label="Script (Lua) — function update(vars)">
               <Textarea className="min-h-24 font-mono text-[11px]" placeholder="-- runs every tick&#10;function update(vars)&#10;  -- set(name,v) · attr(name,k,v) · send(action) · log(msg) · state persists&#10;end"
                 value={draft.script ?? ""} onChange={(e) => setDraft((d) => ({ ...d, script: e.target.value }))} />
             </Field>
             <p className="text-[10px] text-muted-foreground">
               Lua runs in the backend each tick (~100 ms). Scope: <code>vars</code> (bus + <code>t</code>/<code>dt</code>),
-              <code>set</code>, <code>attr</code>, <code>send</code>, <code>log</code>, persistent <code>state</code>.
+              <code>set</code>, <code>attr</code>, <code>send</code>, <code>log</code>, persistent <code>state</code>, plus helpers
+              <code>clamp/map/lerp/round/approach/ema/choose</code> + color <code>rgb/gray/mix/heat</code>.
+              Open <strong>Script</strong> (top bar) for the full editor + a Test runner.
             </p>
           </div>
         ) : (
@@ -1220,15 +1574,54 @@ export function YantraEditor({
             <DialogTitle className="text-sm">Surface script — {draft.name || file} (Lua)</DialogTitle>
           </DialogHeader>
           <Textarea
-            className="min-h-[55vh] flex-1 resize-none font-mono text-xs leading-relaxed"
+            className="min-h-[48vh] flex-1 resize-none font-mono text-xs leading-relaxed"
             spellCheck={false}
-            placeholder={"-- Runs in the backend every tick (~100 ms). Define helpers + update(vars).\n-- Scope: vars (bus + t/dt) · set(name,v) · attr(name,k,v) · send(action) · print/log · state (persists)\n\nstate = state or {}\nfunction update(vars)\n  -- e.g. set('out', tonumber(vars.dist))\nend\n"}
+            placeholder={"-- Runs in the backend every tick (~100 ms). Define helpers + update(vars).\n-- Scope: vars (bus + t/dt) · set(name,v) · attr(name,k,v) · frame · tabs · send(action) · print/log · state (persists)\n-- Helpers: clamp · map · lerp · round · approach · ema · choose · rgb · gray · mix · heat\n\nstate = state or {}\nfunction update(vars)\n  -- e.g. set('bar', map(vars.dist, 30, 1200, 100, 0))\nend\n"}
             value={draft.script ?? ""}
             onChange={(e) => setDraft((d) => ({ ...d, script: e.target.value }))}
           />
+          {/* Dry-run: run one tick off-device and show what it produced. */}
+          <div className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/30 p-2">
+            <div className="flex items-center gap-2">
+              <Button size="sm" className="h-7 gap-1 px-2 text-[11px]" onClick={runTest}
+                title="Run one tick against the test vars below — no device needed">
+                <Play className="size-3" /> Test
+              </Button>
+              <Input
+                className="h-7 flex-1 font-mono text-[11px]"
+                placeholder={'test vars (JSON), e.g. {"dist": 412}'}
+                value={testVars}
+                onChange={(e) => setTestVars(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); runTest(); } }}
+              />
+              {Object.keys(bus).length > 0 && (
+                <Button size="sm" variant="outline" className="h-7 px-2 text-[11px]" onClick={loadBus}
+                  title="Fill the test vars from the live device bus">
+                  Live bus
+                </Button>
+              )}
+            </div>
+            {testOut && (testOut.err ? (
+              <div className="font-mono text-[11px] text-red-500">{testOut.err}</div>
+            ) : (
+              <>
+                <div className="text-[10px] text-muted-foreground">
+                  tick {testTick.current} · sets:{" "}
+                  <span className="text-foreground">{testOut.sets.join(", ") || "—"}</span>
+                  {" · "}sends: {testOut.sends} · frames: {testOut.frames.join(", ") || "—"}
+                </div>
+                {testOut.logs.length > 0 && (
+                  <pre className="max-h-28 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-muted-foreground">
+                    {testOut.logs.join("\n")}
+                  </pre>
+                )}
+              </>
+            ))}
+          </div>
           <p className="text-[10px] text-muted-foreground">
-            One script per surface — put all your functions here. Per-widget transforms live on each
-            widget (its <code>Script</code> field). Saved with the .yantra; runs only in the Controls view.
+            One script per surface. Helpers in scope: <code>clamp/map/lerp/round/approach/ema/choose</code> +
+            color <code>rgb/gray/mix/heat</code>. Per-widget transforms live on each widget's <code>Script</code> field.
+            Saved with the .yantra; runs only in the Controls view.
           </p>
         </DialogContent>
       </Dialog>
@@ -1271,6 +1664,139 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-[11px] text-muted-foreground">{label}</span>
       {children}
     </label>
+  );
+}
+
+function RendererStackFields({
+  node,
+  onChange,
+}: {
+  node?: YantraChrome;
+  onChange: (patch: Partial<YantraChrome>) => void;
+}) {
+  const renderers = editableRendererStack(node);
+  const commit = (next: YantraRenderer[]) => onChange(renderersPatch(next));
+  const setRenderer = (index: number, patch: Partial<YantraRenderer>) => {
+    const next = [...renderers];
+    next[index] = cleanObject({ ...(next[index] ?? {}), ...patch }) as YantraRenderer;
+    commit(next);
+  };
+  const moveRenderer = (index: number, dir: -1 | 1) => {
+    const next = [...renderers];
+    const target = index + dir;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    commit(next);
+  };
+  const num = (raw: string) => (raw === "" ? undefined : Number(raw));
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded border bg-muted/20 p-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-medium text-muted-foreground">Renderers</span>
+        <Button size="sm" variant="ghost" className="h-6 gap-1 px-1 text-[11px]"
+          onClick={() => commit([...renderers, {}])}>
+          <Plus className="size-3" /> pass
+        </Button>
+      </div>
+      {renderers.map((renderer, i) => (
+        <div key={i} className="flex flex-col gap-1 rounded border bg-background/40 p-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-muted-foreground">Pass {i + 1}</span>
+            <div className="flex items-center gap-0.5">
+              <Button size="sm" variant="ghost" className="h-5 px-1" disabled={i === 0}
+                title="Move up" onClick={() => moveRenderer(i, -1)}>
+                <ChevronUp className="size-3" />
+              </Button>
+              <Button size="sm" variant="ghost" className="h-5 px-1" disabled={i === renderers.length - 1}
+                title="Move down" onClick={() => moveRenderer(i, 1)}>
+                <ChevronDown className="size-3" />
+              </Button>
+              <Button size="sm" variant="ghost" className="h-5 px-1 text-destructive"
+                title="Remove pass" onClick={() => commit(renderers.filter((_, j) => j !== i))}>
+                <Trash2 className="size-3" />
+              </Button>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-1">
+            <Field label="Fill">
+              <Input className="h-7 px-1 text-xs" value={rendererFill(renderer)} placeholder="#222 / red"
+                onChange={(e) => setRenderer(i, { fill: e.target.value || undefined })} />
+            </Field>
+            <Field label="Stroke">
+              <Input className="h-7 px-1 text-xs" value={rendererStroke(renderer)} placeholder="#888"
+                onChange={(e) => setRenderer(i, { stroke: e.target.value || undefined })} />
+            </Field>
+          </div>
+          <div className="grid grid-cols-3 gap-1">
+            <Field label="Stroke W">
+              <Input className="h-7 px-1 text-xs" type="number" min={0} value={rendererStrokeWidth(renderer)}
+                onChange={(e) => setRenderer(i, { strokeWidth: num(e.target.value) })} />
+            </Field>
+            <Field label="Radius">
+              <Input className="h-7 px-1 text-xs" type="number" min={0} value={rendererRadius(renderer)}
+                onChange={(e) => setRenderer(i, { radius: num(e.target.value) })} />
+            </Field>
+            <Field label="Padding">
+              <Input className="h-7 px-1 text-xs" type="number" min={0} value={rendererPadding(renderer)}
+                onChange={(e) => setRenderer(i, { padding: num(e.target.value) })} />
+            </Field>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FrameProps({
+  frame, onChange, onAnchor, onDim, onUngroup,
+}: {
+  frame: YantraFrame;
+  onChange: (patch: Partial<YantraFrame>) => void;
+  onAnchor: (axis: "H" | "V", mode: AnchorMode) => void;
+  onDim: (field: "x" | "y" | "w" | "h", raw: string) => void;
+  onUngroup: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium">Frame</div>
+        <Button size="sm" variant="ghost" className="h-6 px-1 text-destructive" onClick={onUngroup}>
+          <Trash2 className="size-3.5" />
+        </Button>
+      </div>
+      <Field label="Name">
+        <Input className="h-7 text-xs" value={frame.name ?? ""} onChange={(e) => onChange({ name: e.target.value })} />
+      </Field>
+      <div className="grid grid-cols-4 gap-1">
+        {(["x", "y", "w", "h"] as const).map((k) => (
+          <Field key={k} label={k.toUpperCase()}>
+            <DimInput value={frame[k] ?? 0} mode={(k === "x" || k === "w" ? frame.anchorH : frame.anchorV) ?? "scale"}
+              onCommit={(raw) => onDim(k, raw)} />
+          </Field>
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-1">
+        <Field label="Anchor X">
+          <Select value={frame.anchorH ?? "scale"} onValueChange={(v) => onAnchor("H", v as AnchorMode)}>
+            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>{ANCHORS.map((a) => <SelectItem key={a} value={a}>{a}</SelectItem>)}</SelectContent>
+          </Select>
+        </Field>
+        <Field label="Anchor Y">
+          <Select value={frame.anchorV ?? "scale"} onValueChange={(v) => onAnchor("V", v as AnchorMode)}>
+            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>{ANCHORS.map((a) => <SelectItem key={a} value={a}>{a}</SelectItem>)}</SelectContent>
+          </Select>
+        </Field>
+      </div>
+      <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <input type="checkbox" checked={frame.clip !== false}
+          onChange={(e) => onChange({ clip: e.target.checked })} />
+        clip children
+      </label>
+      <RendererStackFields node={frame} onChange={onChange} />
+    </div>
   );
 }
 
@@ -1529,17 +2055,12 @@ function WidgetProps({
         </div>
       )}
 
-      {/* Presentation (static; scripts can override via attr(name,"color"|"fg"|"image",…)) */}
-      <div className="grid grid-cols-2 gap-1">
-        <Field label="Color (bg)">
-          <Input className="h-7 px-1 text-xs" value={w.color ?? ""} placeholder="#222 / red"
-            onChange={(e) => onChange({ color: e.target.value || undefined })} />
-        </Field>
-        <Field label="Text">
-          <Input className="h-7 px-1 text-xs" value={w.fg ?? ""} placeholder="#0f0"
-            onChange={(e) => onChange({ fg: e.target.value || undefined })} />
-        </Field>
-      </div>
+      {/* Presentation (static; scripts can override via attr(name,"fill"|"fg"|"image",…)) */}
+      <RendererStackFields node={w} onChange={onChange} />
+      <Field label="Text">
+        <Input className="h-7 px-1 text-xs" value={w.fg ?? ""} placeholder="#0f0"
+          onChange={(e) => onChange({ fg: e.target.value || undefined })} />
+      </Field>
       {w.type === "image" && (
         <Field label="Image (src / data-URI)">
           <Input className="h-7 font-mono text-[11px]" value={w.image ?? ""} placeholder="https://… or data:image/…"
@@ -1549,7 +2070,7 @@ function WidgetProps({
 
       {/* Per-widget Lua transform: (v, vars) -> value/attrs, published under `name` */}
       <Field label="Script (Lua) — (v, vars) → value">
-        <Textarea className="min-h-16 font-mono text-[11px]" placeholder="-- return a value, or a table {value=…, color=…}&#10;return n and n*0.1 or v"
+        <Textarea className="min-h-16 font-mono text-[11px]" placeholder={"-- return a value, or a table {value=…, fill=…}\n-- n = tonumber(v); helpers: clamp/map/heat/ema…\nreturn { value = map(n, 30, 1200, 100, 0), fill = heat(n/1200) }"}
           value={w.script ?? ""} onChange={(e) => onChange({ script: e.target.value || undefined })} />
       </Field>
 

@@ -15,6 +15,11 @@
 //   state           persists across ticks (`state = state or {}`)
 // A surface script conventionally defines `function update(vars) … end`; a widget
 // script is a transform `(v, vars) -> value` whose result is published under its name.
+//
+// Helper stdlib (in every script — see PREAMBLE): math `clamp/map/lerp/round/
+// approach/ema/choose` and color `rgb/gray/mix/heat` (all return "#rrggbb"). These
+// cover the moves control surfaces actually make — scale a sensor to a bar, smooth
+// a noisy reading, pick a zone label, paint a green→red gradient.
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -62,6 +67,71 @@ end
 function send(a) __sends[#__sends + 1] = a end
 function log(m) __logs[#__logs + 1] = tostring(m) end
 print = log
+
+-- ── helper stdlib (available to every surface + widget script) ───────────────
+-- math
+function clamp(x, lo, hi)
+  x = tonumber(x); if x == nil then return lo end
+  if x < lo then return lo elseif x > hi then return hi else return x end
+end
+function lerp(a, b, t) return a + (b - a) * t end
+-- map x from [in0,in1] onto [out0,out1], clamped to the output range.
+function map(x, in0, in1, out0, out1)
+  x = tonumber(x); if x == nil or in1 == in0 then return out0 end
+  local v = out0 + (out1 - out0) * ((x - in0) / (in1 - in0))
+  local lo, hi = out0, out1
+  if lo > hi then lo, hi = hi, lo end
+  if v < lo then return lo elseif v > hi then return hi else return v end
+end
+-- round x to `dp` decimal places (default 0).
+function round(x, dp)
+  x = tonumber(x); if x == nil then return 0 end
+  local m = 10 ^ (dp or 0)
+  return math.floor(x * m + 0.5) / m
+end
+-- move `cur` toward `target` by at most `step` (rate-limit / one-tick smoothing).
+function approach(cur, target, step)
+  cur = tonumber(cur) or 0; target = tonumber(target) or 0; step = math.abs(tonumber(step) or 0)
+  if cur < target then return math.min(cur + step, target)
+  elseif cur > target then return math.max(cur - step, target)
+  else return target end
+end
+-- exponential moving average; first call (prev nil) seeds with x. Pair with `state`.
+function ema(prev, x, alpha)
+  x = tonumber(x); if x == nil then return prev end
+  prev = tonumber(prev); if prev == nil then return x end
+  return prev + (tonumber(alpha) or 0.2) * (x - prev)
+end
+-- pick the i-th item (1-based, clamped to the list) — e.g. a zone label.
+function choose(i, list)
+  i = math.floor(tonumber(i) or 1)
+  if i < 1 then i = 1 elseif i > #list then i = #list end
+  return list[i]
+end
+
+-- color (all return a '#rrggbb' string)
+local function _b(v) v = math.floor((tonumber(v) or 0) + 0.5); if v < 0 then v = 0 elseif v > 255 then v = 255 end return v end
+function rgb(r, g, b) return string.format('#%02x%02x%02x', _b(r), _b(g), _b(b)) end
+function gray(v) local n = _b(v); return string.format('#%02x%02x%02x', n, n, n) end
+local function _parse(c)
+  if type(c) ~= 'string' then return 0, 0, 0 end
+  c = string.gsub(c, '#', '')
+  return tonumber(string.sub(c, 1, 2), 16) or 0,
+         tonumber(string.sub(c, 3, 4), 16) or 0,
+         tonumber(string.sub(c, 5, 6), 16) or 0
+end
+-- blend two hex colors; t=0 → c1, t=1 → c2.
+function mix(c1, c2, t)
+  t = clamp(t, 0, 1)
+  local r1, g1, b1 = _parse(c1); local r2, g2, b2 = _parse(c2)
+  return rgb(lerp(r1, r2, t), lerp(g1, g2, t), lerp(b1, b2, t))
+end
+-- heat gradient green→yellow→red for t in [0,1] (0 = calm green, 1 = hot red).
+function heat(t)
+  t = clamp(t, 0, 1)
+  if t < 0.5 then return mix('#22c55e', '#eab308', t * 2)
+  else return mix('#eab308', '#ef4444', (t - 0.5) * 2) end
+end
 "#;
 
 /// A live per-surface VM: the Lua state + the compiled update/widget functions
@@ -392,5 +462,92 @@ mod tests {
             .eval("s", "function update(v) os.exit(0) end", &[], json!({}))
             .unwrap();
         assert!(out.logs.iter().any(|l| l.contains("update")));
+    }
+
+    #[test]
+    fn stdlib_math_helpers() {
+        let eng = LuaEngine::default();
+        let script = r#"
+            function update(vars)
+              set('clamp_hi', clamp(150, 0, 100))     -- 100 (above range)
+              set('clamp_lo', clamp(-5, 0, 100))       -- 0   (below range)
+              set('clamp_str', clamp('80', 0, 100))    -- 80  (string coerced)
+              set('map', map(50, 0, 100, 0, 10))       -- 5.0 (linear)
+              set('map_clamp', map(200, 0, 100, 0, 100))  -- 100 (clamped to out range)
+              set('map_inv', map(0, 30, 1200, 100, 0))    -- 100 (inverted range ok)
+              set('lerp', lerp(0, 10, 0.5))            -- 5.0
+              set('round2', round(3.14159, 2))         -- 3.14
+              set('round0', round(2.4))                -- 2.0
+              set('approach_up', approach(0, 10, 3))   -- 3
+              set('approach_cap', approach(9, 10, 3))  -- 10 (no overshoot)
+              set('approach_dn', approach(2, 0, 3))    -- 0  (no undershoot)
+              set('ema_seed', ema(nil, 5, 0.5))        -- 5  (first call seeds)
+              set('ema_step', ema(0, 10, 0.5))         -- 5.0
+              set('choose', choose(2, {'a','b','c'}))  -- 'b'
+              set('choose_hi', choose(9, {'a','b'}))   -- 'b' (clamped)
+              set('choose_lo', choose(0, {'a','b'}))   -- 'a' (clamped)
+            end
+        "#;
+        let o = eng.eval("m", script, &[], json!({})).unwrap();
+        assert_eq!(o.sets["clamp_hi"]["value"], json!(100));
+        assert_eq!(o.sets["clamp_lo"]["value"], json!(0));
+        assert_eq!(o.sets["clamp_str"]["value"], json!(80));
+        assert_eq!(o.sets["map"]["value"], json!(5.0));
+        assert_eq!(o.sets["map_clamp"]["value"], json!(100));
+        assert_eq!(o.sets["map_inv"]["value"], json!(100));
+        assert_eq!(o.sets["lerp"]["value"], json!(5.0));
+        assert_eq!(o.sets["round2"]["value"], json!(3.14));
+        assert_eq!(o.sets["round0"]["value"], json!(2.0));
+        assert_eq!(o.sets["approach_up"]["value"], json!(3));
+        assert_eq!(o.sets["approach_cap"]["value"], json!(10));
+        assert_eq!(o.sets["approach_dn"]["value"], json!(0));
+        assert_eq!(o.sets["ema_seed"]["value"], json!(5));
+        assert_eq!(o.sets["ema_step"]["value"], json!(5.0));
+        assert_eq!(o.sets["choose"]["value"], json!("b"));
+        assert_eq!(o.sets["choose_hi"]["value"], json!("b"));
+        assert_eq!(o.sets["choose_lo"]["value"], json!("a"));
+        assert!(o.logs.is_empty(), "no errors expected: {:?}", o.logs);
+    }
+
+    #[test]
+    fn stdlib_color_helpers() {
+        let eng = LuaEngine::default();
+        let script = r#"
+            function update(vars)
+              set('rgb', rgb(255, 0, 128))             -- #ff0080
+              set('rgb_clamp', rgb(300, -5, 10))       -- #ff000a (channels clamped)
+              set('gray', gray(16))                    -- #101010
+              set('mix_mid', mix('#000000', '#ffffff', 0.5))  -- #808080
+              set('mix_c1', mix('#ff0000', '#00ff00', 0))     -- #ff0000
+              set('mix_c2', mix('#ff0000', '#00ff00', 1))     -- #00ff00
+              set('heat_lo', heat(0))                  -- #22c55e (green)
+              set('heat_mid', heat(0.5))               -- #eab308 (amber)
+              set('heat_hi', heat(1))                  -- #ef4444 (red)
+            end
+        "#;
+        let o = eng.eval("c", script, &[], json!({})).unwrap();
+        assert_eq!(o.sets["rgb"]["value"], json!("#ff0080"));
+        assert_eq!(o.sets["rgb_clamp"]["value"], json!("#ff000a"));
+        assert_eq!(o.sets["gray"]["value"], json!("#101010"));
+        assert_eq!(o.sets["mix_mid"]["value"], json!("#808080"));
+        assert_eq!(o.sets["mix_c1"]["value"], json!("#ff0000"));
+        assert_eq!(o.sets["mix_c2"]["value"], json!("#00ff00"));
+        assert_eq!(o.sets["heat_lo"]["value"], json!("#22c55e"));
+        assert_eq!(o.sets["heat_mid"]["value"], json!("#eab308"));
+        assert_eq!(o.sets["heat_hi"]["value"], json!("#ef4444"));
+        assert!(o.logs.is_empty(), "no errors expected: {:?}", o.logs);
+    }
+
+    #[test]
+    fn stdlib_helpers_in_widget_transform() {
+        // helpers are visible inside the per-widget transform chunk too
+        let eng = LuaEngine::default();
+        let widgets = vec![WidgetScript {
+            name: "bar".into(),
+            script: "return { value = clamp(map(n, 30, 1200, 100, 0), 0, 100), fill = heat((n or 0)/1200) }".into(),
+        }];
+        let o = eng.eval("w", "", &widgets, json!({ "bar": "30" })).unwrap();
+        assert_eq!(o.sets["bar"]["value"], json!(100.0)); // closest → full bar (linear path → float)
+        assert_eq!(o.sets["bar"]["fill"], json!("#2cc45a")); // heat(30/1200) → near-green
     }
 }
