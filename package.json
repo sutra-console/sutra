@@ -4,8 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "wasm": "wasm-pack build yantra-wasm --target web --release",
+    "wasm:dev": "wasm-pack build yantra-wasm --target web --dev",
+    "dev": "bun run wasm:dev && vite",
+    "build": "bun run wasm && tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
   },
