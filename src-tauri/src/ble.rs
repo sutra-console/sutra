@@ -74,7 +74,9 @@ async fn is_duta(p: &Peripheral) -> Option<String> {
 pub async fn scan(secs: u64) -> Result<Vec<BleDevice>, String> {
     let adapter = adapter().await?;
     adapter
-        .start_scan(ScanFilter { services: vec![CMD_SVC] })
+        .start_scan(ScanFilter {
+            services: vec![CMD_SVC],
+        })
         .await
         .map_err(|e| e.to_string())?;
     tokio::time::sleep(Duration::from_secs(secs)).await;
@@ -83,7 +85,11 @@ pub async fn scan(secs: u64) -> Result<Vec<BleDevice>, String> {
         if let Some(props) = p.properties().await.ok().flatten() {
             let name = props.local_name.clone().unwrap_or_default();
             if props.services.contains(&CMD_SVC) || name.starts_with("Duta") {
-                out.push(BleDevice { id: p.id().to_string(), name, rssi: props.rssi });
+                out.push(BleDevice {
+                    id: p.id().to_string(),
+                    name,
+                    rssi: props.rssi,
+                });
             }
         }
     }
@@ -126,9 +132,19 @@ async fn pump_notifications(
 async fn resubscribe(p: &Peripheral) -> Result<(Characteristic, Characteristic), String> {
     p.discover_services().await.map_err(|e| e.to_string())?;
     let chars = p.characteristics();
-    let find = |u: Uuid| chars.iter().find(|c| c.uuid == u).cloned().ok_or_else(|| format!("missing {u}"));
-    p.subscribe(&find(DATA_TX)?).await.map_err(|e| e.to_string())?;
-    p.subscribe(&find(CMD_TX)?).await.map_err(|e| e.to_string())?;
+    let find = |u: Uuid| {
+        chars
+            .iter()
+            .find(|c| c.uuid == u)
+            .cloned()
+            .ok_or_else(|| format!("missing {u}"))
+    };
+    p.subscribe(&find(DATA_TX)?)
+        .await
+        .map_err(|e| e.to_string())?;
+    p.subscribe(&find(CMD_TX)?)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok((find(DATA_RX)?, find(CMD_RX)?))
 }
 
@@ -139,7 +155,9 @@ pub async fn connect(shared: Arc<Shared>, app: AppHandle, id: String) -> Result<
 
     let adapter = adapter().await?;
     adapter
-        .start_scan(ScanFilter { services: vec![CMD_SVC] })
+        .start_scan(ScanFilter {
+            services: vec![CMD_SVC],
+        })
         .await
         .map_err(|e| e.to_string())?;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -152,12 +170,22 @@ pub async fn connect(shared: Arc<Shared>, app: AppHandle, id: String) -> Result<
         .ok_or("device not found (re-scan and retry)")?;
     let _ = adapter.stop_scan().await;
 
-    peripheral.connect().await.map_err(|e| format!("connect: {e}"))?;
-    peripheral.discover_services().await.map_err(|e| format!("discover: {e}"))?;
+    peripheral
+        .connect()
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    peripheral
+        .discover_services()
+        .await
+        .map_err(|e| format!("discover: {e}"))?;
 
     let chars = peripheral.characteristics();
     let find = |u: Uuid| -> Result<Characteristic, String> {
-        chars.iter().find(|c| c.uuid == u).cloned().ok_or_else(|| format!("missing characteristic {u}"))
+        chars
+            .iter()
+            .find(|c| c.uuid == u)
+            .cloned()
+            .ok_or_else(|| format!("missing characteristic {u}"))
     };
     let data_rx = find(DATA_RX)?;
     let data_tx = find(DATA_TX)?;
@@ -169,8 +197,14 @@ pub async fn connect(shared: Arc<Shared>, app: AppHandle, id: String) -> Result<
     // bond from Settings) — surface that if it fails rather than a raw GATT error.
     const PAIR_HINT: &str = "the Duta requires BLE pairing — accept the Windows pairing \
         prompt (or pair it in Settings ▸ Bluetooth), then reconnect";
-    peripheral.subscribe(&data_tx).await.map_err(|e| format!("{PAIR_HINT} (DATA: {e})"))?;
-    peripheral.subscribe(&cmd_tx).await.map_err(|e| format!("{PAIR_HINT} (CMD: {e})"))?;
+    peripheral
+        .subscribe(&data_tx)
+        .await
+        .map_err(|e| format!("{PAIR_HINT} (DATA: {e})"))?;
+    peripheral
+        .subscribe(&cmd_tx)
+        .await
+        .map_err(|e| format!("{PAIR_HINT} (CMD: {e})"))?;
 
     // Route notifications: DATA-TX -> console, CMD-TX -> response matcher (mux_rx).
     // The task loops so an *unexpected* drop auto-reconnects (the bond means no
@@ -192,7 +226,8 @@ pub async fn connect(shared: Arc<Shared>, app: AppHandle, id: String) -> Result<
             let mut back = false;
             for _ in 0..6 {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                let ours = { s2.ble_slot().as_ref().map(|l| l.peripheral.id()) } == Some(notif.id());
+                let ours =
+                    { s2.ble_slot().as_ref().map(|l| l.peripheral.id()) } == Some(notif.id());
                 if !ours {
                     return; // user disconnected during the retry window
                 }
@@ -217,9 +252,16 @@ pub async fn connect(shared: Arc<Shared>, app: AppHandle, id: String) -> Result<
         }
     });
 
-    let name = is_duta(&peripheral).await.unwrap_or_else(|| "Duta BLE".into());
+    let name = is_duta(&peripheral)
+        .await
+        .unwrap_or_else(|| "Duta BLE".into());
     *shared.mux_rx_slot() = Some(rx);
-    *shared.ble_slot() = Some(BleLink { peripheral, data_rx, cmd_rx, name: name.clone() });
+    *shared.ble_slot() = Some(BleLink {
+        peripheral,
+        data_rx,
+        cmd_rx,
+        name: name.clone(),
+    });
     let _ = app.emit("sutra://link", true);
     Ok(name)
 }
@@ -230,7 +272,9 @@ pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFram
     let _lock = shared.cmd_lock_guard();
     let seq = shared.next_seq();
     // Dual-CDC CMD framing (no mux channel tag): 0x00 COBS(frame) 0x00.
-    let wire = Frame::new(typ, seq, body).to_wire().map_err(|e| format!("encode: {e:?}"))?;
+    let wire = Frame::new(typ, seq, body)
+        .to_wire()
+        .map_err(|e| format!("encode: {e:?}"))?;
 
     let (peripheral, cmd_rx) = {
         let g = shared.ble_slot();

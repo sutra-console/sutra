@@ -577,16 +577,22 @@ fn zcl_value(ty: u8, data: &[u8]) -> Option<(usize, String)> {
         Some(v)
     };
     match ty {
-        0x00 => Some((0, String::new())),                                  // no data
-        0x10 => Some((1, (*data.first()? != 0).to_string())),             // bool
-        0x08 | 0x18 | 0x20 | 0x30 => Some((1, u(1)?.to_string())),        // data8/map8/uint8/enum8
-        0x28 => Some((1, (*data.first()? as i8).to_string())),            // int8
-        0x21 | 0x31 => Some((2, u(2)?.to_string())),                      // uint16/enum16
+        0x00 => Some((0, String::new())),                     // no data
+        0x10 => Some((1, (*data.first()? != 0).to_string())), // bool
+        0x08 | 0x18 | 0x20 | 0x30 => Some((1, u(1)?.to_string())), // data8/map8/uint8/enum8
+        0x28 => Some((1, (*data.first()? as i8).to_string())), // int8
+        0x21 | 0x31 => Some((2, u(2)?.to_string())),          // uint16/enum16
         0x29 => Some((2, (i16::from_le_bytes([data[0], data[1]])).to_string())), // int16
-        0x22 => Some((3, u(3)?.to_string())),                            // uint24
-        0x23 => Some((4, u(4)?.to_string())),                            // uint32
-        0x2b => Some((4, (i32::from_le_bytes(data.get(..4)?.try_into().ok()?)).to_string())), // int32
-        0x39 => Some((4, f32::from_le_bytes(data.get(..4)?.try_into().ok()?).to_string())),   // float
+        0x22 => Some((3, u(3)?.to_string())),                 // uint24
+        0x23 => Some((4, u(4)?.to_string())),                 // uint32
+        0x2b => Some((
+            4,
+            (i32::from_le_bytes(data.get(..4)?.try_into().ok()?)).to_string(),
+        )), // int32
+        0x39 => Some((
+            4,
+            f32::from_le_bytes(data.get(..4)?.try_into().ok()?).to_string(),
+        )), // float
         0x41 | 0x42 => {
             let n = *data.first()? as usize; // length-prefixed octet/char string
             let s = data.get(1..1 + n)?;
@@ -849,7 +855,10 @@ mod tests {
         assert_eq!(&aps[2..4], &[0x06, 0x00], "cluster = On/Off");
         assert_eq!(&aps[4..6], &[0x04, 0x01], "profile = HA 0x0104");
         // ZCL header at aps[8..]: frame control · seq · command
-        assert_eq!(aps[8], 0x11, "ZCL fc: cluster-specific + disable default response");
+        assert_eq!(
+            aps[8], 0x11,
+            "ZCL fc: cluster-specific + disable default response"
+        );
         assert_eq!(aps[9], 0x40, "ZCL txn seq");
         assert_eq!(aps[10], 0x01, "ZCL command = On");
         assert_eq!(aps.len(), 11, "no payload for a bare On");
@@ -860,14 +869,24 @@ mod tests {
         // Report Attributes: attr 0x0000 uint8=42, attr 0x0021 uint8=200 (battery %).
         let rec = [0x00, 0x00, 0x20, 42, 0x21, 0x00, 0x20, 200];
         let a = parse_zcl_attr_reports(&rec, false);
-        assert_eq!(a, vec![(0x0000, "42".to_string()), (0x0021, "200".to_string())]);
+        assert_eq!(
+            a,
+            vec![(0x0000, "42".to_string()), (0x0021, "200".to_string())]
+        );
         // Read Attributes Response: attr 0x0000 status OK bool=true; attr 0x0001 status FAIL.
         let rsp = [0x00, 0x00, 0x00, 0x10, 0x01, 0x01, 0x00, 0x86];
         let b = parse_zcl_attr_reports(&rsp, true);
-        assert_eq!(b, vec![(0x0000, "true".to_string())], "failed read (status 0x86) skipped");
+        assert_eq!(
+            b,
+            vec![(0x0000, "true".to_string())],
+            "failed read (status 0x86) skipped"
+        );
         // int16 temperature 0x0402/attr 0x0000 = 2350 (23.50 °C ×100)
         let t = [0x00, 0x00, 0x29, 0x2e, 0x09];
-        assert_eq!(parse_zcl_attr_reports(&t, false), vec![(0x0000, "2350".to_string())]);
+        assert_eq!(
+            parse_zcl_attr_reports(&t, false),
+            vec![(0x0000, "2350".to_string())]
+        );
     }
 
     #[test]
@@ -899,7 +918,11 @@ mod tests {
             0xa8, 0x94,
         ];
         let pt = decrypt_nwk(&key, &nwk, SEC_LEVEL_ENC_MIC32).unwrap();
-        assert_eq!(&pt[..2], &[0x08, 0x6a], "Link Status, header len auto-parsed");
+        assert_eq!(
+            &pt[..2],
+            &[0x08, 0x6a],
+            "Link Status, header len auto-parsed"
+        );
     }
 
     #[test]
@@ -941,7 +964,9 @@ mod tests {
     #[test]
     fn node_desc_rsp_manufacturer() {
         // txn·status·addr · descriptor(flags 3 bytes · manufacturer 0x1037 · …)
-        let zdp = vec![0x40, 0x00, 0xcd, 0xab, 0x00, 0x40, 0x8e, 0x37, 0x10, 0x52, 0x80];
+        let zdp = vec![
+            0x40, 0x00, 0xcd, 0xab, 0x00, 0x40, 0x8e, 0x37, 0x10, 0x52, 0x80,
+        ];
         let n = parse_node_desc_rsp(&zdp).unwrap();
         assert_eq!(n.manufacturer, 0x1037, "manufacturer code");
     }

@@ -280,10 +280,24 @@ impl SutraTools {
         }
         if !f.outputs {
             for n in [
-                "get_outputs", "set_output", "device_info", "pulse_output", "set_pwm",
-                "set_pwm_config", "set_rgb", "list_inputs", "read_input", "describe_device",
-                "describe_pins", "get_io_config", "set_io_config", "set_data_kind",
-                "i2c_scan", "i2c_transfer", "list_invocables", "invoke",
+                "get_outputs",
+                "set_output",
+                "device_info",
+                "pulse_output",
+                "set_pwm",
+                "set_pwm_config",
+                "set_rgb",
+                "list_inputs",
+                "read_input",
+                "describe_device",
+                "describe_pins",
+                "get_io_config",
+                "set_io_config",
+                "set_data_kind",
+                "i2c_scan",
+                "i2c_transfer",
+                "list_invocables",
+                "invoke",
             ] {
                 router.remove_route(n);
             }
@@ -298,14 +312,26 @@ impl SutraTools {
         }
         if !f.connection {
             for n in [
-                "list_serial_ports", "connect_duta", "connect_port", "disconnect_port",
-                "set_serial", "connection_status", "set_baud", "serial_signal", "reboot_device",
-                "wifi_status", "configure_wifi", "discover_network_dutas",
+                "list_serial_ports",
+                "connect_duta",
+                "connect_port",
+                "disconnect_port",
+                "set_serial",
+                "connection_status",
+                "set_baud",
+                "serial_signal",
+                "reboot_device",
+                "wifi_status",
+                "configure_wifi",
+                "discover_network_dutas",
             ] {
                 router.remove_route(n);
             }
         }
-        Self { shared, tool_router: router }
+        Self {
+            shared,
+            tool_router: router,
+        }
     }
 
     #[tool(
@@ -361,7 +387,9 @@ impl SutraTools {
         }
     }
 
-    #[tool(description = "Set an output on/off by index. describe_device lists each output's index, name, and type.")]
+    #[tool(
+        description = "Set an output on/off by index. describe_device lists each output's index, name, and type."
+    )]
     async fn set_output(
         &self,
         Parameters(SetOutputArgs { index, on }): Parameters<SetOutputArgs>,
@@ -382,7 +410,13 @@ impl SutraTools {
         }
         metas
             .iter()
-            .map(|m| if m.secret { format!("{} [secret]", m.name) } else { m.name.clone() })
+            .map(|m| {
+                if m.secret {
+                    format!("{} [secret]", m.name)
+                } else {
+                    m.name.clone()
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -410,7 +444,13 @@ impl SutraTools {
         Parameters(CreateMacroArgs { name, text, secret }): Parameters<CreateMacroArgs>,
     ) -> String {
         let shared = self.shared.clone();
-        let rec = serial::MacroRec { name: name.clone(), text, secret: secret.unwrap_or(false), set: String::new(), tier: 0 };
+        let rec = serial::MacroRec {
+            name: name.clone(),
+            text,
+            secret: secret.unwrap_or(false),
+            set: String::new(),
+            tier: 0,
+        };
         let _ = tokio::task::spawn_blocking(move || serial::macro_upsert(&shared, rec)).await;
         format!("saved macro '{name}'")
     }
@@ -454,7 +494,12 @@ impl SutraTools {
     )]
     async fn connect_port(
         &self,
-        Parameters(ConnectPortArgs { port, baud, parity, stop_bits }): Parameters<ConnectPortArgs>,
+        Parameters(ConnectPortArgs {
+            port,
+            baud,
+            parity,
+            stop_bits,
+        }): Parameters<ConnectPortArgs>,
     ) -> String {
         let shared = self.shared.clone();
         let p2 = port.clone();
@@ -493,7 +538,11 @@ impl SutraTools {
     )]
     async fn set_serial(
         &self,
-        Parameters(SetSerialArgs { baud, parity, stop_bits }): Parameters<SetSerialArgs>,
+        Parameters(SetSerialArgs {
+            baud,
+            parity,
+            stop_bits,
+        }): Parameters<SetSerialArgs>,
     ) -> String {
         let shared = self.shared.clone();
         match tokio::task::spawn_blocking(move || {
@@ -546,7 +595,10 @@ impl SutraTools {
         };
         match self.cmd(msg::CFG_SET, vec![0x14, k]).await {
             Ok(r) if r.status == Some(0) => format!("DATA kind is now {kind}"),
-            Ok(r) => format!("device returned status 0x{:02x} (no i2c support?)", r.status.unwrap_or(0)),
+            Ok(r) => format!(
+                "device returned status 0x{:02x} (no i2c support?)",
+                r.status.unwrap_or(0)
+            ),
             Err(e) => format!("error: {e}"),
         }
     }
@@ -559,12 +611,23 @@ impl SutraTools {
             Ok(r) if r.status == Some(0) => {
                 let bitmap = r.body.get(1..17).unwrap_or(&[]);
                 let found: Vec<String> = (0u8..128)
-                    .filter(|a| bitmap.get((a >> 3) as usize).is_some_and(|b| b & (1 << (a & 7)) != 0))
+                    .filter(|a| {
+                        bitmap
+                            .get((a >> 3) as usize)
+                            .is_some_and(|b| b & (1 << (a & 7)) != 0)
+                    })
                     .map(|a| format!("0x{a:02X}"))
                     .collect();
-                if found.is_empty() { "(no devices ACKed)".into() } else { found.join(", ") }
+                if found.is_empty() {
+                    "(no devices ACKed)".into()
+                } else {
+                    found.join(", ")
+                }
             }
-            Ok(r) => format!("status 0x{:02x} — is the DATA kind 'i2c'?", r.status.unwrap_or(0)),
+            Ok(r) => format!(
+                "status 0x{:02x} — is the DATA kind 'i2c'?",
+                r.status.unwrap_or(0)
+            ),
             Err(e) => format!("error: {e}"),
         }
     }
@@ -574,7 +637,11 @@ impl SutraTools {
     )]
     async fn i2c_transfer(
         &self,
-        Parameters(I2cTransferArgs { addr, write_hex, read_len }): Parameters<I2cTransferArgs>,
+        Parameters(I2cTransferArgs {
+            addr,
+            write_hex,
+            read_len,
+        }): Parameters<I2cTransferArgs>,
     ) -> String {
         let mut w: Vec<u8> = Vec::new();
         for tok in write_hex.split_whitespace() {
@@ -595,7 +662,13 @@ impl SutraTools {
                 if read.is_empty() {
                     "ok (write acknowledged)".into()
                 } else {
-                    format!("read: {}", read.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "))
+                    format!(
+                        "read: {}",
+                        read.iter()
+                            .map(|b| format!("{b:02X}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
                 }
             }
             Ok(r) if r.status == Some(0x05) => format!("NAK — no device at 0x{addr:02X}"),
@@ -635,8 +708,18 @@ impl SutraTools {
             let dev_name = String::from_utf8_lossy(b.get(7 + nargs..).unwrap_or(&[])).into_owned();
             let hit = cat.commands.iter().find(|c| c.id == id);
             let label = hit
-                .and_then(|c| c.label.clone().or_else(|| (!c.name.is_empty()).then(|| c.name.clone())))
-                .unwrap_or_else(|| if dev_name.is_empty() { format!("0x{id:x}") } else { dev_name.clone() });
+                .and_then(|c| {
+                    c.label
+                        .clone()
+                        .or_else(|| (!c.name.is_empty()).then(|| c.name.clone()))
+                })
+                .unwrap_or_else(|| {
+                    if dev_name.is_empty() {
+                        format!("0x{id:x}")
+                    } else {
+                        dev_name.clone()
+                    }
+                });
             // prefer catalogued arg names when the signature matches
             let sig = match hit.filter(|c| c.args.len() == nargs) {
                 Some(c) => c
@@ -652,8 +735,16 @@ impl SutraTools {
                     .collect::<Vec<_>>()
                     .join(", "),
             };
-            let reply = if flags & inv::REPLY != 0 { " -> reply" } else { "" };
-            let vendor = if id >= inv::VENDOR_BASE { " [vendor]" } else { "" };
+            let reply = if flags & inv::REPLY != 0 {
+                " -> reply"
+            } else {
+                ""
+            };
+            let vendor = if id >= inv::VENDOR_BASE {
+                " [vendor]"
+            } else {
+                ""
+            };
             lines.push(format!("  0x{id:04x} {label}({sig}){reply}{vendor}"));
         }
         lines.join("\n")
@@ -664,13 +755,20 @@ impl SutraTools {
     )]
     async fn invoke(
         &self,
-        Parameters(InvokeArgs { command, args, payload_hex }): Parameters<InvokeArgs>,
+        Parameters(InvokeArgs {
+            command,
+            args,
+            payload_hex,
+        }): Parameters<InvokeArgs>,
     ) -> String {
         // resolve the command -> id (catalog name, "0x.." hex, or decimal)
         let cat = invocable_catalog();
         let id: u16 = if let Some(h) = cat.commands.iter().find(|c| c.name == command) {
             h.id
-        } else if let Some(hex) = command.strip_prefix("0x").or_else(|| command.strip_prefix("0X")) {
+        } else if let Some(hex) = command
+            .strip_prefix("0x")
+            .or_else(|| command.strip_prefix("0X"))
+        {
             match u16::from_str_radix(hex, 16) {
                 Ok(v) => v,
                 Err(_) => return format!("bad command id '{command}'"),
@@ -678,7 +776,11 @@ impl SutraTools {
         } else {
             match command.parse::<u16>() {
                 Ok(v) => v,
-                Err(_) => return format!("unknown command '{command}' (use a name or id; see list_invocables)"),
+                Err(_) => {
+                    return format!(
+                        "unknown command '{command}' (use a name or id; see list_invocables)"
+                    )
+                }
             }
         };
         // build the payload: raw hex overrides; else pack the numeric args by signature
@@ -709,15 +811,23 @@ impl SutraTools {
                 } else {
                     format!(
                         "ok -> reply: {}",
-                        reply.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+                        reply
+                            .iter()
+                            .map(|b| format!("{b:02X}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
                     )
                 }
             }
             Ok(r) if r.status == Some(0x05) => {
                 format!("not-found: device has no command 0x{id:04x} (see list_invocables)")
             }
-            Ok(r) if r.status == Some(0x07) => "unsupported: device exposes no INVOKE commands".into(),
-            Ok(r) if r.status == Some(0x03) => "bad args: payload doesn't match the command signature".into(),
+            Ok(r) if r.status == Some(0x07) => {
+                "unsupported: device exposes no INVOKE commands".into()
+            }
+            Ok(r) if r.status == Some(0x03) => {
+                "bad args: payload doesn't match the command signature".into()
+            }
             Ok(r) => format!("status 0x{:02x}", r.status.unwrap_or(0)),
             Err(e) => format!("error: {e}"),
         }
@@ -756,7 +866,9 @@ impl SutraTools {
                     _ => "unknown",
                 };
                 if state == 2 {
-                    format!("wifi: connected, ip={detail} — WebSocket bridge at ws://{detail}:9555/")
+                    format!(
+                        "wifi: connected, ip={detail} — WebSocket bridge at ws://{detail}:9555/"
+                    )
                 } else if detail.is_empty() {
                     format!("wifi: {name}")
                 } else {
@@ -836,12 +948,22 @@ impl SutraTools {
     )]
     async fn set_pwm_config(
         &self,
-        Parameters(SetPwmConfigArgs { index, frequency, resolution }): Parameters<SetPwmConfigArgs>,
+        Parameters(SetPwmConfigArgs {
+            index,
+            frequency,
+            resolution,
+        }): Parameters<SetPwmConfigArgs>,
     ) -> String {
         let body = if frequency.is_some() || resolution.is_some() {
             let f = frequency.unwrap_or(0);
-            vec![index, (f & 0xFF) as u8, ((f >> 8) & 0xFF) as u8, ((f >> 16) & 0xFF) as u8,
-                 ((f >> 24) & 0xFF) as u8, resolution.unwrap_or(0)]
+            vec![
+                index,
+                (f & 0xFF) as u8,
+                ((f >> 8) & 0xFF) as u8,
+                ((f >> 16) & 0xFF) as u8,
+                ((f >> 24) & 0xFF) as u8,
+                resolution.unwrap_or(0),
+            ]
         } else {
             vec![index]
         };
@@ -853,7 +975,10 @@ impl SutraTools {
                         | ((b.get(3).copied().unwrap_or(0) as u32) << 8)
                         | ((b.get(4).copied().unwrap_or(0) as u32) << 16)
                         | ((b.get(5).copied().unwrap_or(0) as u32) << 24);
-                    format!("output {index}: {freq} Hz, {}-bit", b.get(6).copied().unwrap_or(0))
+                    format!(
+                        "output {index}: {freq} Hz, {}-bit",
+                        b.get(6).copied().unwrap_or(0)
+                    )
                 }
                 Some(s) => format!("device returned status 0x{s:02x}"),
                 None => "ok".into(),
@@ -867,7 +992,14 @@ impl SutraTools {
     )]
     async fn set_rgb(
         &self,
-        Parameters(SetRgbArgs { index, hex, r, g, b, pixel }): Parameters<SetRgbArgs>,
+        Parameters(SetRgbArgs {
+            index,
+            hex,
+            r,
+            g,
+            b,
+            pixel,
+        }): Parameters<SetRgbArgs>,
     ) -> String {
         let rgb = if let Some(h) = hex {
             match parse_hex_color(&h) {
@@ -920,8 +1052,10 @@ impl SutraTools {
                 Err(_) => "?".into(),
             };
             let val = match self.cmd(msg::INPUT_GET, vec![i]).await {
-                Ok(r) => (r.body.get(2).copied().unwrap_or(0) as u16)
-                    | ((r.body.get(3).copied().unwrap_or(0) as u16) << 8),
+                Ok(r) => {
+                    (r.body.get(2).copied().unwrap_or(0) as u16)
+                        | ((r.body.get(3).copied().unwrap_or(0) as u16) << 8)
+                }
                 Err(_) => 0,
             };
             out.push(format!("{i}: {name} = {val}"));
@@ -953,7 +1087,11 @@ impl SutraTools {
             Err(e) => return format!("error: {e}"),
         };
         let b = &info.body;
-        let fw = format!("{}.{}", b.get(2).copied().unwrap_or(0), b.get(1).copied().unwrap_or(0));
+        let fw = format!(
+            "{}.{}",
+            b.get(2).copied().unwrap_or(0),
+            b.get(1).copied().unwrap_or(0)
+        );
         let caps = b.get(3).copied().unwrap_or(0);
         let n_out = b.get(4).copied().unwrap_or(0);
         let n_in = b.get(7).copied().unwrap_or(0);
@@ -964,9 +1102,14 @@ impl SutraTools {
         };
         let mut capv = Vec::new();
         for (bit, label) in [
-            (cap::STORE, "store"), (cap::OLED, "oled"), (cap::SPI, "spi"),
-            (cap::PARITY, "parity"), (cap::MUX, "mux"), (cap::SERIAL, "serial"),
-            (cap::REBOOT, "reboot"), (cap::PWM, "pwm"),
+            (cap::STORE, "store"),
+            (cap::OLED, "oled"),
+            (cap::SPI, "spi"),
+            (cap::PARITY, "parity"),
+            (cap::MUX, "mux"),
+            (cap::SERIAL, "serial"),
+            (cap::REBOOT, "reboot"),
+            (cap::PWM, "pwm"),
         ] {
             if caps & bit != 0 {
                 capv.push(label);
@@ -978,8 +1121,18 @@ impl SutraTools {
         };
         let mut lines = vec![
             format!("name: {name}"),
-            format!("firmware: v{fw}  proto: {}  macro_tier: {tier}", b.get(6).copied().unwrap_or(0)),
-            format!("caps: {}", if capv.is_empty() { "(none)".into() } else { capv.join(", ") }),
+            format!(
+                "firmware: v{fw}  proto: {}  macro_tier: {tier}",
+                b.get(6).copied().unwrap_or(0)
+            ),
+            format!(
+                "caps: {}",
+                if capv.is_empty() {
+                    "(none)".into()
+                } else {
+                    capv.join(", ")
+                }
+            ),
             format!("outputs ({n_out}):"),
         ];
         for i in 0..n_out {
@@ -990,7 +1143,12 @@ impl SutraTools {
                 ),
                 Err(_) => (0, "?".into()),
             };
-            let kind = match typ { 0 => "io", 1 => "pwm", 2 => "rgb", _ => "?" };
+            let kind = match typ {
+                0 => "io",
+                1 => "pwm",
+                2 => "rgb",
+                _ => "?",
+            };
             let on = if bitmap & (1 << i) != 0 { "on" } else { "off" };
             lines.push(format!("  {i}: {nm} [{kind}] = {on}"));
         }
@@ -1101,7 +1259,11 @@ impl SutraTools {
                     "rgb" => 2,
                     other => return format!("error: bad role '{other}' (want io/pwm/rgb)"),
                 };
-                let flags = if row.active_low.unwrap_or(false) { 1u8 } else { 0 };
+                let flags = if row.active_low.unwrap_or(false) {
+                    1u8
+                } else {
+                    0
+                };
                 let nm = row.name.as_bytes();
                 body.push(typ);
                 body.push((row.pin & 0xFF) as u8);
@@ -1135,7 +1297,12 @@ impl SutraTools {
     )]
     async fn set_baud(
         &self,
-        Parameters(SetBaudArgs { baud, data_bits, parity: par, stop_bits }): Parameters<SetBaudArgs>,
+        Parameters(SetBaudArgs {
+            baud,
+            data_bits,
+            parity: par,
+            stop_bits,
+        }): Parameters<SetBaudArgs>,
     ) -> String {
         let parc = match par.as_deref() {
             Some("odd") => parity::ODD,
@@ -1147,9 +1314,13 @@ impl SutraTools {
         let body = vec![
             0u8,        // idx
             proto::FWD, // flags: keep RX forwarded
-            (baud & 0xFF) as u8, ((baud >> 8) & 0xFF) as u8,
-            ((baud >> 16) & 0xFF) as u8, ((baud >> 24) & 0xFF) as u8,
-            data_bits.unwrap_or(8), parc, stop_bits.unwrap_or(1),
+            (baud & 0xFF) as u8,
+            ((baud >> 8) & 0xFF) as u8,
+            ((baud >> 16) & 0xFF) as u8,
+            ((baud >> 24) & 0xFF) as u8,
+            data_bits.unwrap_or(8),
+            parc,
+            stop_bits.unwrap_or(1),
         ];
         match self.cmd(msg::PROTO_SET, body).await {
             Ok(r) => status_text(&r, &format!("DATA UART set to {baud} baud")),
@@ -1162,17 +1333,25 @@ impl SutraTools {
     )]
     async fn serial_signal(
         &self,
-        Parameters(SerialSignalArgs { dtr, rts, r#break: brk }): Parameters<SerialSignalArgs>,
+        Parameters(SerialSignalArgs {
+            dtr,
+            rts,
+            r#break: brk,
+        }): Parameters<SerialSignalArgs>,
     ) -> String {
         let mut mask = 0u8;
         let mut value = 0u8;
         if let Some(d) = dtr {
             mask |= sig::DTR;
-            if d { value |= sig::DTR; }
+            if d {
+                value |= sig::DTR;
+            }
         }
         if let Some(r) = rts {
             mask |= sig::RTS;
-            if r { value |= sig::RTS; }
+            if r {
+                value |= sig::RTS;
+            }
         }
         if brk.unwrap_or(false) {
             mask |= sig::BREAK;
@@ -1191,7 +1370,11 @@ impl SutraTools {
         &self,
         Parameters(RebootArgs { bootloader }): Parameters<RebootArgs>,
     ) -> String {
-        let mode = if bootloader.unwrap_or(false) { reboot::BOOTLOADER } else { reboot::APP };
+        let mode = if bootloader.unwrap_or(false) {
+            reboot::BOOTLOADER
+        } else {
+            reboot::APP
+        };
         match self.cmd(msg::REBOOT, vec![mode]).await {
             Ok(r) => status_text(&r, "rebooting"),
             Err(e) => format!("error: {e}"),
@@ -1265,7 +1448,10 @@ impl SutraTools {
             let nargs = b.get(5).copied().unwrap_or(0) as usize;
             let codes = b.get(6..6 + nargs).unwrap_or(&[]).to_vec();
             if args.len() != nargs {
-                return Err(format!("command 0x{id:04x} takes {nargs} arg(s), got {}", args.len()));
+                return Err(format!(
+                    "command 0x{id:04x} takes {nargs} arg(s), got {}",
+                    args.len()
+                ));
             }
             let mut p = Vec::new();
             for (j, &t) in codes.iter().enumerate() {
@@ -1284,7 +1470,9 @@ impl SutraTools {
             }
             return Ok(p);
         }
-        Err(format!("device has no command 0x{id:04x} (see list_invocables)"))
+        Err(format!(
+            "device has no command 0x{id:04x} (see list_invocables)"
+        ))
     }
 }
 
@@ -1316,7 +1504,9 @@ pub fn start(shared: Arc<Shared>, port: u16) -> Result<CancellationToken, String
     // not in a detached task. Hand the socket to tokio for serving.
     let std_listener =
         std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
-    std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|e| e.to_string())?;
 
     let ct = CancellationToken::new();
     let serve_ct = ct.clone();
@@ -1351,7 +1541,10 @@ mod tests {
     #[test]
     fn invocable_catalog_parses() {
         let cat = invocable_catalog();
-        assert!(!cat.commands.is_empty(), "catalog parsed empty (serde shape mismatch?)");
+        assert!(
+            !cat.commands.is_empty(),
+            "catalog parsed empty (serde shape mismatch?)"
+        );
         let pos = cat
             .commands
             .iter()

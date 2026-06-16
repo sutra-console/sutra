@@ -30,14 +30,16 @@ const LINKTYPE_USER0: u32 = 147;
 // `btle` dissector reads this directly â€” full BLE decode, no Lua needed.
 const LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR: u32 = 256;
 const DATA_KIND_BLE_SNIFF: u8 = 4; // SKRIT_DATA_BLE_SNIFF
-// IEEE 802.15.4 TAP: a TLV pseudo-header + the MAC frame. Wireshark's native
-// 802.15.4 stack decodes Zigbee/Thread/6LoWPAN/Matter from it â€” no Lua.
+                                   // IEEE 802.15.4 TAP: a TLV pseudo-header + the MAC frame. Wireshark's native
+                                   // 802.15.4 stack decodes Zigbee/Thread/6LoWPAN/Matter from it â€” no Lua.
 const LINKTYPE_IEEE802_15_4_TAP: u32 = 283;
 const DATA_KIND_IEEE802154: u8 = 7; // SKRIT_DATA_IEEE802154
 const EXTCAP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 /// The pcap link type + DLT label for a DATA kind. ble-sniff gets the native
@@ -54,7 +56,11 @@ fn dlt_for_kind(kind: u8) -> (u32, &'static str, &'static str) {
             "IEEE802_15_4_TAP",
             "IEEE 802.15.4 TAP (native Zigbee/Thread dissector)",
         ),
-        _ => (LINKTYPE_USER0, "USER0", "skrit DATA stream (raw console bytes)"),
+        _ => (
+            LINKTYPE_USER0,
+            "USER0",
+            "skrit DATA stream (raw console bytes)",
+        ),
     }
 }
 
@@ -189,8 +195,9 @@ fn main() {
         let iface = arg_value(&args, "--extcap-interface").unwrap_or_default();
         let fifo = arg_value(&args, "--fifo").unwrap_or_default();
         let password = arg_value(&args, "--password").unwrap_or_else(|| "duta".into());
-        let max_time: u64 =
-            arg_value(&args, "--max-time").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let max_time: u64 = arg_value(&args, "--max-time")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
         if iface.is_empty() || fifo.is_empty() {
             eprintln!("--capture needs --extcap-interface and --fifo");
             std::process::exit(1);
@@ -223,7 +230,11 @@ fn list_interfaces() {
     }
     // Then the network: every Duta advertising _skrit._tcp.
     for d in ws::discover(2500).unwrap_or_default() {
-        let label = if d.name.is_empty() { d.host.trim_end_matches('.').to_string() } else { d.name.clone() };
+        let label = if d.name.is_empty() {
+            d.host.trim_end_matches('.').to_string()
+        } else {
+            d.name.clone()
+        };
         println!(
             "interface {{value={url}}}{{display=Duta: {label} â€” {ip} (WiFi, skrit DATA)}}",
             url = d.url,
@@ -326,7 +337,9 @@ fn usb_data_kind(
     reader: &mut MuxReader,
     buf: &mut [u8],
 ) -> Option<u8> {
-    let wire = Frame::new(msg::DATA_DESC, 0xD1, vec![]).to_mux_wire().ok()?;
+    let wire = Frame::new(msg::DATA_DESC, 0xD1, vec![])
+        .to_mux_wire()
+        .ok()?;
     p.write_all(&wire).ok()?;
     let _ = p.flush();
     let deadline = Instant::now() + Duration::from_millis(600);
@@ -353,9 +366,13 @@ fn usb_data_kind(
 /// --extcap-dlts; capture() does its own kind probe inline while streaming.
 fn probe_kind_ws(url: &str, password: &str) -> Option<u8> {
     let (mut sock, _resp) = tungstenite::connect(url).ok()?;
-    let auth = Frame::new(msg::AUTH, 1, password.as_bytes().to_vec()).to_mux_wire().ok()?;
+    let auth = Frame::new(msg::AUTH, 1, password.as_bytes().to_vec())
+        .to_mux_wire()
+        .ok()?;
     sock.send(tungstenite::Message::Binary(auth)).ok()?;
-    let desc = Frame::new(msg::DATA_DESC, 0xD1, vec![]).to_mux_wire().ok()?;
+    let desc = Frame::new(msg::DATA_DESC, 0xD1, vec![])
+        .to_mux_wire()
+        .ok()?;
     let mut reader = MuxReader::new();
     let mut sent_desc = false;
     let deadline = Instant::now() + Duration::from_millis(2500);
@@ -394,7 +411,8 @@ fn capture_usb(port: &str, out: &mut std::fs::File, max_time: u64) -> Result<(),
     // the same reader continues into the stream loop (no frame loss).
     let kind = usb_data_kind(&mut p, &mut reader, &mut buf).unwrap_or(0);
     let (linktype, _, _) = dlt_for_kind(kind);
-    out.write_all(&pcap_global_header(linktype)).map_err(|e| format!("fifo: {e}"))?;
+    out.write_all(&pcap_global_header(linktype))
+        .map_err(|e| format!("fifo: {e}"))?;
     out.flush().ok();
     let started = Instant::now();
     loop {
@@ -475,7 +493,8 @@ fn capture(iface: &str, fifo: &str, password: &str, max_time: u64) -> Result<(),
     let auth = Frame::new(msg::AUTH, 1, password.as_bytes().to_vec())
         .to_mux_wire()
         .map_err(|e| format!("auth frame: {e:?}"))?;
-    sock.send(tungstenite::Message::Binary(auth)).map_err(|e| format!("auth send: {e}"))?;
+    sock.send(tungstenite::Message::Binary(auth))
+        .map_err(|e| format!("auth send: {e}"))?;
     let desc = Frame::new(msg::DATA_DESC, 0xD1, vec![])
         .to_mux_wire()
         .map_err(|e| format!("desc frame: {e:?}"))?;
@@ -559,20 +578,26 @@ mod tests {
     fn ieee802154_tap_pcap() {
         // MAC data frame: FCF 0x8841 (data, PAN-compressed, short dst+src),
         // seq 1, dst PAN abcd, dst ffff (bcast), src 0000, payload, + 2 FCS bytes.
-        let psdu: &[u8] =
-            &[0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34];
+        let psdu: &[u8] = &[
+            0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34,
+        ];
         let mut rec = vec![0u8, 0, 0, 0, 15, 0xD0u8, 0xFF, 0x01, psdu.len() as u8];
         rec.extend_from_slice(psdu);
 
         let tap = ieee802154_tap_packet(&rec).expect("reframe");
         assert_eq!(tap[0], 0, "version");
-        assert_eq!(u16::from_le_bytes([tap[2], tap[3]]), 36, "tap header length");
+        assert_eq!(
+            u16::from_le_bytes([tap[2], tap[3]]),
+            36,
+            "tap header length"
+        );
         // MAC frame follows the header, minus the 2-byte FCS we drop.
         assert_eq!(&tap[36..], &psdu[..psdu.len() - 2], "MAC frame (no FCS)");
 
         let path = std::env::temp_dir().join("duta_154_tap.pcap");
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(&pcap_global_header(LINKTYPE_IEEE802_15_4_TAP)).unwrap();
+        f.write_all(&pcap_global_header(LINKTYPE_IEEE802_15_4_TAP))
+            .unwrap();
         write_record(&mut f, &tap).unwrap();
         eprintln!("wrote {}", path.display());
     }

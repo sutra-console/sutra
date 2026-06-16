@@ -50,7 +50,7 @@ pub mod msg {
     pub const I2C_XFER: u8 = 0x61;
     pub const INVOKE_DESC: u8 = 0x70; // enumerate the device's user-defined command menu
     pub const INVOKE: u8 = 0x71; // call a command by id with a packed payload
-    // Async device->host events (0x50..0x5F): RESP bit clear, SEQ=0.
+                                 // Async device->host events (0x50..0x5F): RESP bit clear, SEQ=0.
     pub const EVENT_LOG: u8 = 0x50;
     pub const EVENT_INPUT: u8 = 0x51;
     pub const EVENT_LO: u8 = 0x50;
@@ -150,8 +150,13 @@ pub mod inv {
     /// Human name for an arg-type code.
     pub fn arg_name(code: u8) -> &'static str {
         match code {
-            U8 => "u8", U16 => "u16", U32 => "u32",
-            I16 => "i16", I32 => "i32", BYTES => "bytes", STR => "str",
+            U8 => "u8",
+            U16 => "u16",
+            U32 => "u32",
+            I16 => "i16",
+            I32 => "i32",
+            BYTES => "bytes",
+            STR => "str",
             _ => "?",
         }
     }
@@ -178,7 +183,11 @@ pub fn crc8(data: &[u8]) -> u8 {
     for &b in data {
         crc ^= b;
         for _ in 0..8 {
-            crc = if crc & 0x80 != 0 { (crc << 1) ^ 0x07 } else { crc << 1 };
+            crc = if crc & 0x80 != 0 {
+                (crc << 1) ^ 0x07
+            } else {
+                crc << 1
+            };
         }
     }
     crc
@@ -319,7 +328,11 @@ impl Frame {
         if body.len() != len {
             return Err(FrameError::LenMismatch);
         }
-        Ok(Frame { typ, seq, body: body.to_vec() })
+        Ok(Frame {
+            typ,
+            seq,
+            body: body.to_vec(),
+        })
     }
 
     /// Parse a complete on-wire frame (COBS bytes, delimiter already stripped).

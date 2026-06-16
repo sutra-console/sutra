@@ -103,21 +103,30 @@ pub fn parse_zdp_response(key: &[u8; 16], mac: &[u8], level: u8) -> Option<ZdpDi
 /// manufacturer accumulate; re-running an interview refreshes in place.
 pub fn merge_into_node(net: &mut Network, d: &ZdpDiscovery) {
     if !net.nodes.iter().any(|n| n.addr == d.addr) {
-        net.nodes.push(NetNode { addr: d.addr.clone(), ..Default::default() });
+        net.nodes.push(NetNode {
+            addr: d.addr.clone(),
+            ..Default::default()
+        });
     }
     let node = net.nodes.iter_mut().find(|n| n.addr == d.addr).unwrap();
     match d.kind.as_str() {
         "active_ep" => {
             for &ep in &d.endpoints {
                 if !node.endpoints.iter().any(|e| e.id == ep) {
-                    node.endpoints.push(NetEndpoint { id: ep, clusters: vec![] });
+                    node.endpoints.push(NetEndpoint {
+                        id: ep,
+                        clusters: vec![],
+                    });
                 }
             }
         }
         "simple_desc" => {
             if let Some(ep) = d.endpoint {
                 if !node.endpoints.iter().any(|e| e.id == ep) {
-                    node.endpoints.push(NetEndpoint { id: ep, clusters: vec![] });
+                    node.endpoints.push(NetEndpoint {
+                        id: ep,
+                        clusters: vec![],
+                    });
                 }
                 let e = node.endpoints.iter_mut().find(|e| e.id == ep).unwrap();
                 let mut cl = d.in_clusters.clone();
@@ -139,13 +148,23 @@ pub fn merge_into_node(net: &mut Network, d: &ZdpDiscovery) {
 /// accumulate; duplicates are ignored.
 pub fn observe_into_node(net: &mut Network, addr: &str, endpoint: u8, cluster: u16) {
     if !net.nodes.iter().any(|n| n.addr == addr) {
-        net.nodes.push(NetNode { addr: addr.to_string(), ..Default::default() });
+        net.nodes.push(NetNode {
+            addr: addr.to_string(),
+            ..Default::default()
+        });
     }
     let node = net.nodes.iter_mut().find(|n| n.addr == addr).unwrap();
     if !node.endpoints.iter().any(|e| e.id == endpoint) {
-        node.endpoints.push(NetEndpoint { id: endpoint, clusters: vec![] });
+        node.endpoints.push(NetEndpoint {
+            id: endpoint,
+            clusters: vec![],
+        });
     }
-    let e = node.endpoints.iter_mut().find(|e| e.id == endpoint).unwrap();
+    let e = node
+        .endpoints
+        .iter_mut()
+        .find(|e| e.id == endpoint)
+        .unwrap();
     let c = fmt_id(cluster);
     if !e.clusters.contains(&c) {
         e.clusters.push(c);
@@ -243,8 +262,15 @@ pub fn ingest_frames(app: &AppHandle, frames: &[Vec<u8>]) -> IngestResult {
             continue;
         }
         // Otherwise: passive observation from any application APS data frame.
-        let Some(obs) = observe_frame(&key, mac, level) else { continue };
-        observe_into_node(&mut nets.networks[idx], &fmt_addr(obs.addr), obs.endpoint, obs.cluster);
+        let Some(obs) = observe_frame(&key, mac, level) else {
+            continue;
+        };
+        observe_into_node(
+            &mut nets.networks[idx],
+            &fmt_addr(obs.addr),
+            obs.endpoint,
+            obs.cluster,
+        );
         res.changed += 1;
         for (attr, value) in obs.attrs {
             res.attrs.push(AttrObs {
@@ -291,7 +317,16 @@ mod tests {
         let zdp = vec![0x40, 0x00, 0xcd, 0xab, 0x02, 0x01, 0x0a]; // txn·status·addr·count·eps
         let mut aps = aps_zdp_header(ZDP_ACTIVE_EP_RSP, 0x30);
         aps.extend_from_slice(&zdp);
-        let nwk = secure_nwk(&KEY, &nwk_header(0x7fff, 0xabcd, 30, 0x20), &aps, &EUI, 5, 0, SEC_LEVEL_ENC_MIC32).unwrap();
+        let nwk = secure_nwk(
+            &KEY,
+            &nwk_header(0x7fff, 0xabcd, 30, 0x20),
+            &aps,
+            &EUI,
+            5,
+            0,
+            SEC_LEVEL_ENC_MIC32,
+        )
+        .unwrap();
         let mut frame = mac_header(0x11, 0x0c84, 0x7fff, 0xabcd); // node → us
         frame.extend_from_slice(&nwk);
         frame
@@ -321,7 +356,16 @@ mod tests {
         let zcl = vec![0x18, 0x4a, 0x0a, 0x00, 0x00, 0x10, 0x01]; // ZCL Report Attributes
         let mut aps = vec![0x00, 0x01, 0x06, 0x00, 0x04, 0x01, 0x01, 0x55]; // fc·dstEp·cluster·profile·srcEp·ctr
         aps.extend_from_slice(&zcl);
-        let nwk = secure_nwk(&KEY, &nwk_header(0x0000, 0xabcd, 30, 0x20), &aps, &EUI, 7, 0, SEC_LEVEL_ENC_MIC32).unwrap();
+        let nwk = secure_nwk(
+            &KEY,
+            &nwk_header(0x0000, 0xabcd, 30, 0x20),
+            &aps,
+            &EUI,
+            7,
+            0,
+            SEC_LEVEL_ENC_MIC32,
+        )
+        .unwrap();
         let mut frame = mac_header(0x11, 0x0c84, 0x0000, 0xabcd);
         frame.extend_from_slice(&nwk);
 
@@ -329,7 +373,11 @@ mod tests {
         // only the SOURCE (the reporting node) — not the coordinator destination
         assert_eq!((obs.addr, obs.endpoint, obs.cluster), (0xabcd, 1, 0x0006));
         // the ZCL Report Attributes payload (attr 0x0000 bool=true) was parsed
-        assert_eq!(obs.attrs, vec![(0x0000, "true".to_string())], "attribute harvested");
+        assert_eq!(
+            obs.attrs,
+            vec![(0x0000, "true".to_string())],
+            "attribute harvested"
+        );
 
         let mut net = Network::default();
         observe_into_node(&mut net, &fmt_addr(obs.addr), obs.endpoint, obs.cluster);
@@ -345,29 +393,41 @@ mod tests {
     #[test]
     fn merge_accumulates() {
         let mut net = Network::default();
-        merge_into_node(&mut net, &ZdpDiscovery {
-            addr: "0xabcd".into(),
-            kind: "active_ep".into(),
-            endpoints: vec![1, 10],
-            ..Default::default()
-        });
-        merge_into_node(&mut net, &ZdpDiscovery {
-            addr: "0xabcd".into(),
-            kind: "simple_desc".into(),
-            endpoint: Some(1),
-            in_clusters: vec!["0x0006".into(), "0x0008".into()],
-            ..Default::default()
-        });
-        merge_into_node(&mut net, &ZdpDiscovery {
-            addr: "0xabcd".into(),
-            kind: "node_desc".into(),
-            manufacturer: Some("0x1037".into()),
-            ..Default::default()
-        });
+        merge_into_node(
+            &mut net,
+            &ZdpDiscovery {
+                addr: "0xabcd".into(),
+                kind: "active_ep".into(),
+                endpoints: vec![1, 10],
+                ..Default::default()
+            },
+        );
+        merge_into_node(
+            &mut net,
+            &ZdpDiscovery {
+                addr: "0xabcd".into(),
+                kind: "simple_desc".into(),
+                endpoint: Some(1),
+                in_clusters: vec!["0x0006".into(), "0x0008".into()],
+                ..Default::default()
+            },
+        );
+        merge_into_node(
+            &mut net,
+            &ZdpDiscovery {
+                addr: "0xabcd".into(),
+                kind: "node_desc".into(),
+                manufacturer: Some("0x1037".into()),
+                ..Default::default()
+            },
+        );
         assert_eq!(net.nodes.len(), 1, "one node, merged in place");
         let n = &net.nodes[0];
         assert_eq!(n.endpoints.len(), 2);
-        assert_eq!(n.endpoints.iter().find(|e| e.id == 1).unwrap().clusters, vec!["0x0006", "0x0008"]);
+        assert_eq!(
+            n.endpoints.iter().find(|e| e.id == 1).unwrap().clusters,
+            vec!["0x0006", "0x0008"]
+        );
         assert_eq!(n.manufacturer, "0x1037");
     }
 }

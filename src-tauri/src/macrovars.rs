@@ -85,20 +85,37 @@ impl VarContext {
     fn eval_zcl(&mut self, args: &[&str]) -> Result<String, String> {
         let target = parse_u16_hex(args.first().ok_or("zcl: missing target")?)?;
         let endpoint = parse_u8(args.get(1).ok_or("zcl: missing endpoint")?)?;
-        let cluster = match args.get(2).ok_or("zcl: missing cluster")?.to_ascii_lowercase().as_str() {
+        let cluster = match args
+            .get(2)
+            .ok_or("zcl: missing cluster")?
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "onoff" | "on_off" => CLUSTER_ON_OFF,
             "level" => CLUSTER_LEVEL,
             "color" => CLUSTER_COLOR,
             h => parse_u16_hex(h)?,
         };
-        let cmd = match args.get(3).ok_or("zcl: missing command")?.to_ascii_lowercase().as_str() {
+        let cmd = match args
+            .get(3)
+            .ok_or("zcl: missing command")?
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "off" => ONOFF_OFF,
             "on" => ONOFF_ON,
             "toggle" => ONOFF_TOGGLE,
             h => parse_u8(h)?,
         };
-        let payload: Vec<u8> = args.get(4..).unwrap_or(&[]).iter().map(|a| parse_u8(a)).collect::<Result<_, _>>()?;
-        let key = self.key.ok_or("zcl: no network key set (use NET <label>)")?;
+        let payload: Vec<u8> = args
+            .get(4..)
+            .unwrap_or(&[])
+            .iter()
+            .map(|a| parse_u8(a))
+            .collect::<Result<_, _>>()?;
+        let key = self
+            .key
+            .ok_or("zcl: no network key set (use NET <label>)")?;
         // Derive EVERY sequence/counter from the persistent, monotonic frame
         // counter — not the per-run seq (which resets to 0 each macro, so the APS
         // sublayer's (source, APS counter) duplicate table dropped repeats).
@@ -139,7 +156,9 @@ impl VarContext {
             }
             other => return Err(format!("zdp: unknown command '{other}'")),
         };
-        let key = self.key.ok_or("zdp: no network key set (use NET <label>)")?;
+        let key = self
+            .key
+            .ok_or("zdp: no network key set (use NET <label>)")?;
         // All counters from the persistent monotonic frame counter (see eval_zcl).
         let fc = self.take_fc();
         let frame = build_zdp_inject(&ZdpInject {
@@ -278,7 +297,10 @@ mod tests {
     #[test]
     fn scalars_and_literals() {
         let mut c = ctx();
-        assert_eq!(resolve_line(&mut c, "pan={$pan} ch={$channel}").unwrap(), "pan=0c84 ch=11");
+        assert_eq!(
+            resolve_line(&mut c, "pan={$pan} ch={$channel}").unwrap(),
+            "pan=0c84 ch=11"
+        );
         assert_eq!(resolve_line(&mut c, "src={$src}").unwrap(), "src=7fff");
         // a brace that isn't a token is literal
         assert_eq!(resolve_line(&mut c, "a {b} c").unwrap(), "a {b} c");
@@ -349,13 +371,17 @@ mod tests {
     #[test]
     fn var_directive_sets_and_uses() {
         let mut c = ctx();
-        let text = "VAR node abcd\nVAR label n-{$node}\nHEX {$zdp active_ep {$node}}\nSTRING {$label}";
+        let text =
+            "VAR node abcd\nVAR label n-{$node}\nHEX {$zdp active_ep {$node}}\nSTRING {$label}";
         let out = resolve_text(&mut c, text).unwrap();
         let lines: Vec<&str> = out.split('\n').collect();
         assert_eq!(lines[0], "#", "VAR line consumed to a comment");
         assert_eq!(lines[1], "#");
         assert!(lines[2].starts_with("HEX 61 88"), "zdp used {{$node}}");
-        assert_eq!(lines[3], "STRING n-abcd", "nested {{$node}} inside VAR value");
+        assert_eq!(
+            lines[3], "STRING n-abcd",
+            "nested {{$node}} inside VAR value"
+        );
     }
 
     #[test]

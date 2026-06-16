@@ -104,18 +104,21 @@ pub async fn connect(
     // INFO: read the device name + the default-credential flag (flags = body[9]).
     let (name, default_cred) = {
         let sh = shared.clone();
-        let info = tokio::task::spawn_blocking(move || crate::serial::send_cmd(&sh, msg::INFO, vec![]))
-            .await
-            .map_err(|e| e.to_string())??;
+        let info =
+            tokio::task::spawn_blocking(move || crate::serial::send_cmd(&sh, msg::INFO, vec![]))
+                .await
+                .map_err(|e| e.to_string())??;
         let default_cred = info.body.get(9).copied().unwrap_or(0) & 0x02 != 0;
         let nm = {
             let sh = shared.clone();
-            tokio::task::spawn_blocking(move || crate::serial::send_cmd(&sh, msg::DEVICE_NAME, vec![]))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .map(|r| String::from_utf8_lossy(r.body.get(1..).unwrap_or(&[])).into_owned())
-                .unwrap_or_else(|| "Duta".into())
+            tokio::task::spawn_blocking(move || {
+                crate::serial::send_cmd(&sh, msg::DEVICE_NAME, vec![])
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|r| String::from_utf8_lossy(r.body.get(1..).unwrap_or(&[])).into_owned())
+            .unwrap_or_else(|| "Duta".into())
         };
         (nm, default_cred)
     };
@@ -128,7 +131,9 @@ pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFram
     use std::time::{Duration, Instant};
     let _lock = shared.cmd_lock_guard();
     let seq = shared.next_seq();
-    let wire = F::new(typ, seq, body).to_mux_wire().map_err(|e| format!("encode: {e:?}"))?;
+    let wire = F::new(typ, seq, body)
+        .to_mux_wire()
+        .map_err(|e| format!("encode: {e:?}"))?;
 
     {
         let g = shared.mux_rx_slot();
@@ -189,7 +194,9 @@ pub struct DiscoveredDuta {
 pub fn discover(timeout_ms: u64) -> Result<Vec<DiscoveredDuta>, String> {
     use mdns_sd::{ServiceDaemon, ServiceEvent};
     let daemon = ServiceDaemon::new().map_err(|e| format!("mdns: {e}"))?;
-    let rx = daemon.browse("_skrit._tcp.local.").map_err(|e| format!("mdns browse: {e}"))?;
+    let rx = daemon
+        .browse("_skrit._tcp.local.")
+        .map_err(|e| format!("mdns browse: {e}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     let mut found: Vec<DiscoveredDuta> = Vec::new();
     while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
@@ -201,11 +208,18 @@ pub fn discover(timeout_ms: u64) -> Result<Vec<DiscoveredDuta>, String> {
                 };
                 let port = info.get_port();
                 let txt = |k: &str| {
-                    info.get_property_val_str(k).map(str::to_string).unwrap_or_default()
+                    info.get_property_val_str(k)
+                        .map(str::to_string)
+                        .unwrap_or_default()
                 };
                 let mut name = txt("name");
                 if name.is_empty() {
-                    name = info.get_fullname().split('.').next().unwrap_or("Duta").to_string();
+                    name = info
+                        .get_fullname()
+                        .split('.')
+                        .next()
+                        .unwrap_or("Duta")
+                        .to_string();
                 }
                 if !found.iter().any(|d| d.ip == ip && d.port == port) {
                     found.push(DiscoveredDuta {

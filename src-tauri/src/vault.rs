@@ -27,7 +27,12 @@ use age::secrecy::{ExposeSecret, SecretString};
 use tauri::{AppHandle, Manager};
 
 /// The workspace files we encrypt. Order is stable for deterministic packing.
-const SECRET_FILES: &[&str] = &["keys.json", "networks.json", "networks.json.bak", "macros.json"];
+const SECRET_FILES: &[&str] = &[
+    "keys.json",
+    "networks.json",
+    "networks.json.bak",
+    "macros.json",
+];
 
 const VAULT_FILE: &str = "secrets.age";
 const SECURITY_FILE: &str = "security.json";
@@ -98,8 +103,8 @@ pub struct SecurityStatus {
     pub app_key_pub: String, // "age1…" public key (empty if no app key yet)
     pub git_track_vault: bool,
     pub git_track_captures: bool,
-    pub git_hooks: bool,                 // pre-commit hook installed (blocks plaintext secrets)
-    pub recipients: Vec<RecipientCfg>,   // who the vault is encrypted to (sharing)
+    pub git_hooks: bool, // pre-commit hook installed (blocks plaintext secrets)
+    pub recipients: Vec<RecipientCfg>, // who the vault is encrypted to (sharing)
 }
 
 // ---- crypto primitives (standalone + unit-testable) ------------------------
@@ -128,15 +133,25 @@ fn encrypt_to(recipients: &[Box<dyn age::Recipient>], plaintext: &[u8]) -> Resul
 
 /// Classify a pasted public key: age (`age1…`) vs SSH (everything else).
 fn detect_kind(pubkey: &str) -> &'static str {
-    if pubkey.trim().starts_with("age1") { "age" } else { "ssh" }
+    if pubkey.trim().starts_with("age1") {
+        "age"
+    } else {
+        "ssh"
+    }
 }
 
 /// Build an age recipient from a config entry (None if the key doesn't parse).
 fn build_recipient(r: &RecipientCfg) -> Option<Box<dyn age::Recipient>> {
     let p = r.pubkey.trim();
     match r.kind.as_str() {
-        "ssh" => p.parse::<age::ssh::Recipient>().ok().map(|x| Box::new(x) as Box<dyn age::Recipient>),
-        _ => p.parse::<age::x25519::Recipient>().ok().map(|x| Box::new(x) as Box<dyn age::Recipient>),
+        "ssh" => p
+            .parse::<age::ssh::Recipient>()
+            .ok()
+            .map(|x| Box::new(x) as Box<dyn age::Recipient>),
+        _ => p
+            .parse::<age::x25519::Recipient>()
+            .ok()
+            .map(|x| Box::new(x) as Box<dyn age::Recipient>),
     }
 }
 
@@ -160,7 +175,8 @@ fn wrap_identity(passphrase: &str, id: &age::x25519::Identity) -> Result<Vec<u8>
     let enc = age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_owned()));
     let mut out = Vec::new();
     let mut w = enc.wrap_output(&mut out).map_err(|e| e.to_string())?;
-    w.write_all(id_to_string(id).as_bytes()).map_err(|e| e.to_string())?;
+    w.write_all(id_to_string(id).as_bytes())
+        .map_err(|e| e.to_string())?;
     w.finish().map_err(|e| e.to_string())?;
     Ok(out)
 }
@@ -179,10 +195,16 @@ fn unwrap_identity(passphrase: &str, blob: &[u8]) -> Result<age::x25519::Identit
 // ---- app identity (machine-local, in the app config dir) -------------------
 
 fn id_cleartext_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("identity.txt"))
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("identity.txt"))
 }
 fn id_scrypt_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("identity.age"))
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("identity.age"))
 }
 
 /// Whether the app identity is password-protected (scrypt store present, no cleartext).
@@ -233,7 +255,11 @@ pub fn app_key_pub(app: &AppHandle) -> String {
 
 /// The recipients the vault is (re-)encrypted to, from `security.json` (age + ssh).
 fn load_recipients(dot: &Path) -> Result<Vec<Box<dyn age::Recipient>>, String> {
-    let out: Vec<_> = load_cfg(dot).recipients.iter().filter_map(build_recipient).collect();
+    let out: Vec<_> = load_cfg(dot)
+        .recipients
+        .iter()
+        .filter_map(build_recipient)
+        .collect();
     if out.is_empty() {
         return Err("no recipients configured".into());
     }
@@ -246,7 +272,10 @@ fn reencrypt(app: &AppHandle, dot: &Path) -> Result<(), String> {
     let members = {
         let v = app.state::<Vault>();
         let g = v.inner.lock().unwrap();
-        g.as_ref().ok_or("unlock the workspace first")?.members.clone()
+        g.as_ref()
+            .ok_or("unlock the workspace first")?
+            .members
+            .clone()
     };
     let recipients = load_recipients(dot)?;
     let blob = encrypt_to(&recipients, &pack(&members))?;
@@ -279,7 +308,11 @@ pub fn add_recipient(app: &AppHandle, dot: &Path, pubkey: &str, label: &str) -> 
 pub fn remove_recipient(app: &AppHandle, dot: &Path, pubkey: &str) -> Result<(), String> {
     let target = pubkey.trim();
     let mut cfg = load_cfg(dot);
-    if cfg.recipients.iter().any(|r| r.pubkey == target && r.kind == "app") {
+    if cfg
+        .recipients
+        .iter()
+        .any(|r| r.pubkey == target && r.kind == "app")
+    {
         return Err("can't remove this app's own key".into());
     }
     let before = cfg.recipients.len();
@@ -385,7 +418,10 @@ pub fn disable(app: &AppHandle, dot: &Path) -> Result<(), String> {
     let v = app.state::<Vault>();
     let members = {
         let g = v.inner.lock().unwrap();
-        g.as_ref().ok_or("unlock before disabling encryption")?.members.clone()
+        g.as_ref()
+            .ok_or("unlock before disabling encryption")?
+            .members
+            .clone()
     };
     for (name, bytes) in &members {
         std::fs::write(dot.join(name), bytes).map_err(|e| e.to_string())?;
@@ -406,7 +442,9 @@ pub fn unlock(app: &AppHandle, dot: &Path, password: Option<String>) -> Result<(
     let identity = match load_cleartext_identity(app) {
         Some(id) => id,
         None => {
-            let pw = password.filter(|p| !p.is_empty()).ok_or("password required")?;
+            let pw = password
+                .filter(|p| !p.is_empty())
+                .ok_or("password required")?;
             let blob = id_scrypt_path(app)
                 .filter(|p| p.exists())
                 .and_then(|p| std::fs::read(p).ok())
@@ -434,7 +472,11 @@ pub fn auto_unlock(app: &AppHandle, dot: &Path) -> bool {
     unlock(app, dot, None).is_ok()
 }
 
-fn set_app_password_inner(app: &AppHandle, id: &age::x25519::Identity, new_pw: &str) -> Result<(), String> {
+fn set_app_password_inner(
+    app: &AppHandle,
+    id: &age::x25519::Identity,
+    new_pw: &str,
+) -> Result<(), String> {
     let blob = wrap_identity(new_pw, id)?;
     let scrypt = id_scrypt_path(app).ok_or("no app config dir")?;
     if let Some(parent) = scrypt.parent() {
@@ -448,12 +490,18 @@ fn set_app_password_inner(app: &AppHandle, id: &age::x25519::Identity, new_pw: &
 }
 
 /// Set, change, or clear the app password. `new` empty/None clears it (back to cleartext).
-pub fn set_password(app: &AppHandle, old: Option<String>, new: Option<String>) -> Result<(), String> {
+pub fn set_password(
+    app: &AppHandle,
+    old: Option<String>,
+    new: Option<String>,
+) -> Result<(), String> {
     // Recover the identity using whatever store currently exists.
     let identity = match load_cleartext_identity(app) {
         Some(id) => id,
         None => {
-            let pw = old.filter(|p| !p.is_empty()).ok_or("current password required")?;
+            let pw = old
+                .filter(|p| !p.is_empty())
+                .ok_or("current password required")?;
             let blob = id_scrypt_path(app)
                 .filter(|p| p.exists())
                 .and_then(|p| std::fs::read(p).ok())
@@ -497,7 +545,10 @@ pub fn regenerate_app_key(app: &AppHandle, dot: Option<&Path>) -> Result<(), Str
             let v = app.state::<Vault>();
             let members = {
                 let g = v.inner.lock().unwrap();
-                g.as_ref().ok_or("unlock before regenerating the app key")?.members.clone()
+                g.as_ref()
+                    .ok_or("unlock before regenerating the app key")?
+                    .members
+                    .clone()
             };
             let mut cfg = load_cfg(dot);
             cfg.recipients.retain(|r| r.kind != "app");
@@ -517,7 +568,11 @@ pub fn regenerate_app_key(app: &AppHandle, dot: Option<&Path>) -> Result<(), Str
 }
 
 /// Set the git-tracking toggles in `security.json` (the caller re-runs the .gitignore).
-pub fn set_git_track(dot: &Path, vault: Option<bool>, captures: Option<bool>) -> Result<(), String> {
+pub fn set_git_track(
+    dot: &Path,
+    vault: Option<bool>,
+    captures: Option<bool>,
+) -> Result<(), String> {
     let mut cfg = load_cfg(dot);
     if let Some(v) = vault {
         cfg.git_track_vault = v;
@@ -543,7 +598,10 @@ pub fn gitignore_flags(dot: &Path) -> (bool, bool, bool) {
 /// Status for the Security panel.
 pub fn status(app: &AppHandle, dot: Option<&Path>) -> SecurityStatus {
     let Some(dot) = dot else {
-        return SecurityStatus { has_workspace: false, ..Default::default() };
+        return SecurityStatus {
+            has_workspace: false,
+            ..Default::default()
+        };
     };
     let cfg = load_cfg(dot);
     let vault_present = vault_path(dot).exists();
@@ -623,7 +681,11 @@ pub fn set_git_hooks(app: &AppHandle, dot: &Path, on: bool) -> Result<(), String
     let root = git_root(&ws).ok_or("the workspace isn't inside a git repository")?;
     let hook = root.join(".git").join("hooks").join("pre-commit");
     let existing = std::fs::read_to_string(&hook).unwrap_or_default();
-    let merged = if on { install_hook_block(&existing) } else { remove_hook_block(&existing) };
+    let merged = if on {
+        install_hook_block(&existing)
+    } else {
+        remove_hook_block(&existing)
+    };
     if merged.trim().is_empty() {
         let _ = std::fs::remove_file(&hook);
     } else {
@@ -654,10 +716,16 @@ mod tests {
     fn x25519_member_roundtrip() {
         let id = age::x25519::Identity::generate();
         let mut members = BTreeMap::new();
-        members.insert("networks.json".to_string(), b"{\"key\":\"deadbeef\"}".to_vec());
+        members.insert(
+            "networks.json".to_string(),
+            b"{\"key\":\"deadbeef\"}".to_vec(),
+        );
         let blob = encrypt_to(&[rec(&id)], &pack(&members)).unwrap();
         let back = unpack(&decrypt_with(&id, &blob).unwrap()).unwrap();
-        assert_eq!(back.get("networks.json").unwrap(), members.get("networks.json").unwrap());
+        assert_eq!(
+            back.get("networks.json").unwrap(),
+            members.get("networks.json").unwrap()
+        );
     }
 
     #[test]
