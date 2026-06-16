@@ -29,6 +29,7 @@ import { MacroVars } from "@/components/MacroVars";
 import { clusterName } from "@/lib/zcl";
 import { RgbControl } from "@/components/RgbControl";
 import { WindowControls } from "@/components/WindowControls";
+import { UpdateBanner } from "@/components/UpdateBanner";
 import { BoardView } from "@/components/BoardView";
 import logoUrl from "../assets/logo.png";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
@@ -1479,6 +1480,8 @@ export default function App() {
           <WindowControls />
         </div>
       </div>
+
+      <UpdateBanner />
 
       {/* locked-workspace banner: secrets are hidden until the password unlocks them */}
       {security?.vaultPresent && !security?.unlocked && (
