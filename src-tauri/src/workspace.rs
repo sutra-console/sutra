@@ -11,7 +11,10 @@ use tauri_plugin_dialog::DialogExt;
 
 /// Where we remember the selected workspace path.
 fn marker_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("workspace.txt"))
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("workspace.txt"))
 }
 
 /// The currently selected workspace folder, if any (and it still exists).
@@ -87,7 +90,9 @@ fn rewrite_gitignore(dot: &Path) {
         b.push_str("keys.json\nnetworks.json\nnetworks.json.bak\nmacros.json\n");
     }
     if ignore_vault {
-        b.push_str("# Encrypted vault — enable git tracking in Security to share it:\nsecrets.age\n");
+        b.push_str(
+            "# Encrypted vault — enable git tracking in Security to share it:\nsecrets.age\n",
+        );
     }
     if ignore_captures {
         b.push_str("# Captures can contain unencrypted frames/packets:\ncaptures/\n");
@@ -181,7 +186,9 @@ widgets:
 /// to show; the user edits/adds JSON files describing their real devices.
 fn seed_i2c_example(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
-    let empty = std::fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+    let empty = std::fs::read_dir(dir)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true);
     if empty {
         let _ = std::fs::write(dir.join("example.json"), I2C_EXAMPLE);
     }
@@ -189,7 +196,9 @@ fn seed_i2c_example(dir: &Path) {
 
 /// Every I2C device definition in `<ws>/.sutra/i2c/*.json` (raw JSON values).
 pub fn list_i2c_defs(app: &AppHandle) -> Vec<serde_json::Value> {
-    let Some(dot) = dot_sutra(app) else { return Vec::new() };
+    let Some(dot) = dot_sutra(app) else {
+        return Vec::new();
+    };
     let dir = dot.join("i2c");
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -216,25 +225,43 @@ pub fn list_i2c_defs(app: &AppHandle) -> Vec<serde_json::Value> {
 
 #[derive(serde::Serialize)]
 pub struct YantraDoc {
-    pub file: String,             // filename, e.g. "gps.yantra"
-    pub doc: serde_json::Value,   // the parsed spec
+    pub file: String,           // filename, e.g. "gps.yantra"
+    pub doc: serde_json::Value, // the parsed spec
+    pub error: Option<String>,
 }
 
 /// Every .yantra in `<ws>/.sutra/yantra/`, parsed YAML→JSON. Invalid files are
 /// skipped (a bad one shouldn't hide the rest).
 pub fn list_yantras(app: &AppHandle) -> Vec<YantraDoc> {
-    let Some(dot) = dot_sutra(app) else { return Vec::new() };
+    let Some(dot) = dot_sutra(app) else {
+        return Vec::new();
+    };
     let dir = dot.join("yantra");
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.extension().is_some_and(|x| x == "yantra" || x == "yaml" || x == "yml") {
-                if let Some(doc) = std::fs::read_to_string(&p)
-                    .ok()
-                    .and_then(|s| serde_yaml::from_str::<serde_json::Value>(&s).ok())
+            if p.extension()
+                .is_some_and(|x| x == "yantra" || x == "yaml" || x == "yml")
+            {
+                let file = e.file_name().to_string_lossy().into_owned();
+                match std::fs::read_to_string(&p)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| {
+                        serde_yaml::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string())
+                    })
+                    .and_then(|doc| validate_yantra_schema(&doc).map(|()| doc))
                 {
-                    out.push(YantraDoc { file: e.file_name().to_string_lossy().into_owned(), doc });
+                    Ok(doc) => out.push(YantraDoc {
+                        file,
+                        doc,
+                        error: None,
+                    }),
+                    Err(error) => out.push(YantraDoc {
+                        doc: serde_json::json!({ "name": file }),
+                        file,
+                        error: Some(error),
+                    }),
                 }
             }
         }
@@ -249,7 +276,12 @@ fn safe_yantra_name(file: &str) -> Option<String> {
     let stem = std::path::Path::new(file.trim())
         .file_stem()
         .and_then(|s| s.to_str())
-        .map(|s| s.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'), "-"))
+        .map(|s| {
+            s.replace(
+                |c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "-",
+            )
+        })
         .map(|s| s.trim_matches('-').to_string())
         .filter(|s| !s.is_empty())?;
     Some(format!("{stem}.yantra"))
@@ -258,7 +290,10 @@ fn safe_yantra_name(file: &str) -> Option<String> {
 /// Write a control surface to `<ws>/.sutra/yantra/<file>` as YAML (the editor edits
 /// the JSON spec; we serialize it back to a `.yantra`). Returns the saved filename.
 pub fn save_yantra(app: &AppHandle, file: &str, spec: serde_json::Value) -> Result<String, String> {
-    let dir = dot_sutra(app).ok_or("no workspace selected")?.join("yantra");
+    validate_yantra_schema(&spec)?;
+    let dir = dot_sutra(app)
+        .ok_or("no workspace selected")?
+        .join("yantra");
     let _ = std::fs::create_dir_all(&dir);
     let name = safe_yantra_name(file).ok_or("invalid file name")?;
     let yaml = serde_yaml::to_string(&spec).map_err(|e| e.to_string())?;
@@ -282,12 +317,15 @@ pub fn create_yantra(app: &AppHandle, name: &str) -> Result<String, String> {
 /// de-duplicated so an import never clobbers an existing surface. Returns the
 /// saved filename.
 pub fn import_yantra(app: &AppHandle, path: &str) -> Result<String, String> {
-    let dir = dot_sutra(app).ok_or("no workspace selected")?.join("yantra");
+    let dir = dot_sutra(app)
+        .ok_or("no workspace selected")?
+        .join("yantra");
     let _ = std::fs::create_dir_all(&dir);
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     // YAML is a JSON superset, so this accepts .yantra/.yaml/.json alike.
-    let spec: serde_json::Value =
-        serde_yaml::from_str(&text).map_err(|_| "not a valid .yantra (YAML/JSON) file".to_string())?;
+    let spec: serde_json::Value = serde_yaml::from_str(&text)
+        .map_err(|_| "not a valid .yantra (YAML/JSON) file".to_string())?;
+    validate_yantra_schema(&spec)?;
     let base = safe_yantra_name(path).ok_or("invalid file name")?;
     let stem = base.trim_end_matches(".yantra");
     let mut name = format!("{stem}.yantra");
@@ -301,16 +339,83 @@ pub fn import_yantra(app: &AppHandle, path: &str) -> Result<String, String> {
     Ok(name)
 }
 
+fn validate_yantra_schema(doc: &serde_json::Value) -> Result<(), String> {
+    const DEPRECATED_RENDERER_KEYS: &[&str] = &[
+        "renderer",
+        "fill",
+        "background",
+        "bg",
+        "color",
+        "border",
+        "borderColor",
+        "borderWidth",
+        "stroke",
+        "strokeWidth",
+        "radius",
+        "cornerRadius",
+        "padding",
+    ];
+
+    fn check_node(node: &serde_json::Value, path: &str, keys: &[&str]) -> Result<(), String> {
+        let Some(obj) = node.as_object() else {
+            return Ok(());
+        };
+        if let Some(key) = keys.iter().find(|key| obj.contains_key(**key)) {
+            return Err(format!(
+                "{path} uses deprecated renderer key `{key}`; use renderers: [{{ fill, stroke, strokeWidth, radius, padding }}]"
+            ));
+        }
+        if let Some(renderers) = obj.get("renderers") {
+            let Some(items) = renderers.as_array() else {
+                return Err(format!("{path}.renderers must be an array"));
+            };
+            for (i, renderer) in items.iter().enumerate() {
+                let Some(renderer_obj) = renderer.as_object() else {
+                    return Err(format!("{path}.renderers[{i}] must be an object"));
+                };
+                for key in renderer_obj.keys() {
+                    if !matches!(
+                        key.as_str(),
+                        "fill" | "stroke" | "strokeWidth" | "radius" | "padding"
+                    ) {
+                        return Err(format!("{path}.renderers[{i}] has unknown key `{key}`"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(stage) = doc.get("stage") {
+        check_node(stage, "stage", DEPRECATED_RENDERER_KEYS)?;
+    }
+    if let Some(frames) = doc.get("frames").and_then(|v| v.as_array()) {
+        for (i, frame) in frames.iter().enumerate() {
+            check_node(frame, &format!("frames[{i}]"), DEPRECATED_RENDERER_KEYS)?;
+        }
+    }
+    if let Some(widgets) = doc.get("widgets").and_then(|v| v.as_array()) {
+        for (i, widget) in widgets.iter().enumerate() {
+            check_node(widget, &format!("widgets[{i}]"), DEPRECATED_RENDERER_KEYS)?;
+        }
+    }
+    Ok(())
+}
+
 /// Delete a control surface file from the workspace.
 pub fn delete_yantra(app: &AppHandle, file: &str) -> Result<(), String> {
-    let dir = dot_sutra(app).ok_or("no workspace selected")?.join("yantra");
+    let dir = dot_sutra(app)
+        .ok_or("no workspace selected")?
+        .join("yantra");
     let name = safe_yantra_name(file).ok_or("invalid file name")?;
     std::fs::remove_file(dir.join(name)).map_err(|e| e.to_string())
 }
 
 fn seed_yantra_example(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
-    let empty = std::fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+    let empty = std::fs::read_dir(dir)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true);
     if empty {
         let _ = std::fs::write(dir.join("gps.yantra"), GPS_YANTRA);
     }
@@ -360,7 +465,7 @@ fn ble_pcap(records: &[Vec<u8>]) -> Vec<u8> {
         data[0] = ch;
         data[1] = sig_power as u8;
         data[4..8].copy_from_slice(&0x8E89BED6u32.to_le_bytes()); // reference access address
-        // flags: dewhitened | sig-power-valid | ref-AA-valid | crc-checked | crc-valid
+                                                                  // flags: dewhitened | sig-power-valid | ref-AA-valid | crc-checked | crc-valid
         let flags: u16 = 0x0001 | 0x0002 | 0x0010 | 0x0040 | 0x0080;
         data[8..10].copy_from_slice(&flags.to_le_bytes());
         data.extend_from_slice(aa); // LL packet: access address â€¦
@@ -420,7 +525,11 @@ fn ieee154_pcap(records: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Save the given raw ieee802154 records as a pcap (workspace or save dialog).
-pub fn save_ieee154_pcap(app: &AppHandle, name: &str, records: Vec<Vec<u8>>) -> Result<String, String> {
+pub fn save_ieee154_pcap(
+    app: &AppHandle,
+    name: &str,
+    records: Vec<Vec<u8>>,
+) -> Result<String, String> {
     if records.is_empty() {
         return Err("no frames to save".into());
     }
@@ -429,7 +538,13 @@ pub fn save_ieee154_pcap(app: &AppHandle, name: &str, records: Vec<Vec<u8>>) -> 
     let path = if let Some(dot) = dot_sutra(app) {
         dot.join("captures").join(format!("{safe}.pcap"))
     } else {
-        match app.dialog().file().add_filter("pcap", &["pcap"]).set_file_name(format!("{safe}.pcap")).blocking_save_file() {
+        match app
+            .dialog()
+            .file()
+            .add_filter("pcap", &["pcap"])
+            .set_file_name(format!("{safe}.pcap"))
+            .blocking_save_file()
+        {
             Some(p) => p.into_path().map_err(|e| e.to_string())?,
             None => return Err("cancelled".into()),
         }
@@ -470,20 +585,20 @@ pub fn load_keys(app: &AppHandle) -> WorkspaceKeys {
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 pub struct NetNode {
-    pub addr: String,             // short address, "0x1234"
+    pub addr: String, // short address, "0x1234"
     #[serde(default)]
-    pub name: String,             // user nickname ("Living-room lamp"); "" = show the addr
+    pub name: String, // user nickname ("Living-room lamp"); "" = show the addr
     #[serde(default)]
-    pub role: String,             // Coordinator / Router / End Device / Node (inferred)
+    pub role: String, // Coordinator / Router / End Device / Node (inferred)
     #[serde(default)]
-    pub channels: Vec<u8>,        // 802.15.4 channels it's been heard on
+    pub channels: Vec<u8>, // 802.15.4 channels it's been heard on
     #[serde(default)]
-    pub count: u32,               // frames observed
+    pub count: u32, // frames observed
     #[serde(default)]
-    pub last_seen: String,        // ISO-ish stamp set by the host when saved
+    pub last_seen: String, // ISO-ish stamp set by the host when saved
     // -- enriched by active discovery (Phase B+), absent from passive capture --
     #[serde(default)]
-    pub ieee: String,             // 64-bit IEEE/EUI address
+    pub ieee: String, // 64-bit IEEE/EUI address
     #[serde(default)]
     pub manufacturer: String,
     #[serde(default)]
@@ -493,20 +608,20 @@ pub struct NetNode {
 pub struct NetEndpoint {
     pub id: u8,
     #[serde(default)]
-    pub clusters: Vec<String>,    // input cluster ids, "0x0006"
+    pub clusters: Vec<String>, // input cluster ids, "0x0006"
 }
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 pub struct Network {
     #[serde(default)]
-    pub label: String,            // human name
+    pub label: String, // human name
     #[serde(default)]
-    pub pan: String,              // PAN id, "0x39fd" ("" until known)
+    pub pan: String, // PAN id, "0x39fd" ("" until known)
     #[serde(default)]
-    pub channel: u8,              // 0 = unknown
+    pub channel: u8, // 0 = unknown
     #[serde(default)]
-    pub key: String,              // network/trust-center key, 32 hex (decryption)
+    pub key: String, // network/trust-center key, 32 hex (decryption)
     #[serde(default)]
-    pub protocol: String,         // "" / "zigbee" (default) or "thread" — picks the tshark key table
+    pub protocol: String, // "" / "zigbee" (default) or "thread" — picks the tshark key table
     #[serde(default)]
     pub nodes: Vec<NetNode>,
     // -- host-side injector state (phase B): when Sutra builds + transmits
@@ -515,11 +630,11 @@ pub struct Network {
     //    never reuse a (key, counter) pair. Coordinator-safety: src/eui must stay
     //    distinct from any real node's. Assigned on first use (see serial.rs).
     #[serde(default)]
-    pub inject_src: u16,          // our short address (0 = unassigned)
+    pub inject_src: u16, // our short address (0 = unassigned)
     #[serde(default)]
-    pub inject_eui: String,       // our EUI-64, 16 hex ("" = unassigned)
+    pub inject_eui: String, // our EUI-64, 16 hex ("" = unassigned)
     #[serde(default)]
-    pub frame_counter: u32,       // next NWK frame counter to use
+    pub frame_counter: u32, // next NWK frame counter to use
 }
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Networks {
@@ -564,7 +679,11 @@ pub fn load_networks(app: &AppHandle) -> Networks {
         networks: legacy
             .zigbee
             .into_iter()
-            .map(|k| Network { label: k.label, key: k.key, ..Default::default() })
+            .map(|k| Network {
+                label: k.label,
+                key: k.key,
+                ..Default::default()
+            })
             .collect(),
         ..Default::default()
     }
@@ -577,7 +696,11 @@ pub fn set_node_name(app: &AppHandle, addr: &str, name: &str) -> Result<(), Stri
     let mut nets = load_networks(app);
     let idx = active_network_index(&nets).ok_or("no active network")?;
     let net = &mut nets.networks[idx];
-    match net.nodes.iter_mut().find(|n| n.addr.eq_ignore_ascii_case(addr)) {
+    match net
+        .nodes
+        .iter_mut()
+        .find(|n| n.addr.eq_ignore_ascii_case(addr))
+    {
         Some(n) => n.name = name.to_string(),
         None => net.nodes.push(NetNode {
             addr: addr.to_string(),
@@ -603,7 +726,11 @@ pub fn dissect_keys(app: &AppHandle) -> Vec<(String, String, String)> {
         .into_iter()
         .filter(|n| !n.key.trim().is_empty())
         .map(|n| {
-            let label = if n.label.is_empty() { n.pan.clone() } else { n.label.clone() };
+            let label = if n.label.is_empty() {
+                n.pan.clone()
+            } else {
+                n.label.clone()
+            };
             (n.key, label, n.protocol)
         })
         .collect()
@@ -618,7 +745,11 @@ pub fn dissect_keys(app: &AppHandle) -> Vec<(String, String, String)> {
 /// Resolve the tshark binary: an explicit override (a file or its directory)
 /// from Sutra's settings, else autodetect â€” PATH, then the usual install dirs.
 fn resolve_tshark(explicit: Option<&str>) -> Option<PathBuf> {
-    let exe = if cfg!(windows) { "tshark.exe" } else { "tshark" };
+    let exe = if cfg!(windows) {
+        "tshark.exe"
+    } else {
+        "tshark"
+    };
     if let Some(p) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         let pb = PathBuf::from(p);
         if pb.is_file() {
@@ -656,8 +787,8 @@ fn resolve_tshark(explicit: Option<&str>) -> Option<PathBuf> {
 #[derive(serde::Serialize)]
 pub struct DecodedRow {
     pub num: u32,
-    pub protocol: String,              // Wireshark's Protocol column (ZigBee, Thread, â€¦)
-    pub summary: String,               // Wireshark's Info column â€” the "what happened" line
+    pub protocol: String, // Wireshark's Protocol column (ZigBee, Thread, â€¦)
+    pub summary: String,  // Wireshark's Info column â€” the "what happened" line
     pub fields: Vec<(String, String)>, // (name, value) â€” the decoded field tree, drill-down
 }
 
@@ -665,12 +796,31 @@ pub struct DecodedRow {
 /// whether the payload is encrypted (most Zigbee is, so only the NWK header shows
 /// unless a network key is configured).
 const FIELD_WHITELIST: &[&str] = &[
-    "wpan.src16", "wpan.dst16", "wpan.dst_pan", "wpan.src64", "wpan.dst64",
-    "zbee_nwk.src", "zbee_nwk.dst", "zbee_nwk.radius", "zbee_nwk.seqno", "zbee_nwk.cmd",
-    "zbee_aps.cluster", "zbee_aps.profile", "zbee_aps.src", "zbee_aps.dst", "zbee_aps.cmd",
-    "zbee_zcl.cmd.id", "zbee_zcl.attr.id",
+    "wpan.src16",
+    "wpan.dst16",
+    "wpan.dst_pan",
+    "wpan.src64",
+    "wpan.dst64",
+    "zbee_nwk.src",
+    "zbee_nwk.dst",
+    "zbee_nwk.radius",
+    "zbee_nwk.seqno",
+    "zbee_nwk.cmd",
+    "zbee_aps.cluster",
+    "zbee_aps.profile",
+    "zbee_aps.src",
+    "zbee_aps.dst",
+    "zbee_aps.cmd",
+    "zbee_zcl.cmd.id",
+    "zbee_zcl.attr.id",
     // Thread / Matter (Matter-over-Thread = 6LoWPAN · IPv6 · UDP · CoAP/Matter)
-    "mle.cmd", "coap.code", "coap.mid", "coap.token", "ipv6.src", "ipv6.dst", "udp.port",
+    "mle.cmd",
+    "coap.code",
+    "coap.mid",
+    "coap.token",
+    "ipv6.src",
+    "ipv6.dst",
+    "udp.port",
 ];
 
 /// A Zigbee key as a tshark `uat:zigbee_pc_keys` preference (Key, Byte Order,
@@ -678,14 +828,21 @@ const FIELD_WHITELIST: &[&str] = &[
 /// "Command" to the real ZCL command/cluster.
 fn zigbee_key_pref(key: &str, label: &str) -> String {
     let label = label.replace(['"', ','], " ");
-    format!("uat:zigbee_pc_keys:\"{}\",\"Normal\",\"{}\"", key.trim(), label)
+    format!(
+        "uat:zigbee_pc_keys:\"{}\",\"Normal\",\"{}\"",
+        key.trim(),
+        label
+    )
 }
 
 /// A Thread network (master) key as a tshark `uat:ieee802154_keys` entry with
 /// "Thread hash" — Wireshark derives the rotating MAC keys from it. Paired with
 /// thr_auto_acq_thr_seq_ctr so the key-sequence counter is picked up from MLE.
 fn thread_key_pref(key: &str) -> String {
-    format!("uat:ieee802154_keys:\"{}\",\"0\",\"Thread hash\"", key.trim())
+    format!(
+        "uat:ieee802154_keys:\"{}\",\"0\",\"Thread hash\"",
+        key.trim()
+    )
 }
 
 /// Whether tshark is reachable (gates/loads the Decode action in the UI).
@@ -703,9 +860,18 @@ fn tshark_columns(
 ) -> Result<Vec<(u32, String, String)>, String> {
     let mut cmd = std::process::Command::new(bin);
     cmd.args([
-        "-r", pcap, "-T", "fields",
-        "-e", "frame.number", "-e", "_ws.col.Protocol", "-e", "_ws.col.Info",
-        "-E", "separator=/t",
+        "-r",
+        pcap,
+        "-T",
+        "fields",
+        "-e",
+        "frame.number",
+        "-e",
+        "_ws.col.Protocol",
+        "-e",
+        "_ws.col.Info",
+        "-E",
+        "separator=/t",
     ]);
     for p in key_prefs {
         cmd.arg("-o").arg(p);
@@ -719,7 +885,11 @@ fn tshark_columns(
         .map(|line| {
             let mut it = line.splitn(3, '\t');
             let num = it.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-            (num, it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string())
+            (
+                num,
+                it.next().unwrap_or("").to_string(),
+                it.next().unwrap_or("").to_string(),
+            )
         })
         .collect())
 }
@@ -737,7 +907,10 @@ pub fn dissect_ieee154(
     }
     let bin = resolve_tshark(tshark_path.as_deref())
         .ok_or("Wireshark (tshark) not found â€” set its path in Settings")?;
-    let dir = bin.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let dir = bin
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     let bytes = ieee154_pcap(&records);
     let tmp = std::env::temp_dir().join("sutra_dissect.pcap");
@@ -757,13 +930,18 @@ pub fn dissect_ieee154(
         .collect();
     // Thread derives its MAC keys from a rotating sequence counter — let tshark
     // auto-acquire it from MLE so the derived keys line up with the traffic.
-    if keys.iter().any(|(k, _, p)| !k.trim().is_empty() && p.eq_ignore_ascii_case("thread")) {
+    if keys
+        .iter()
+        .any(|(k, _, p)| !k.trim().is_empty() && p.eq_ignore_ascii_case("thread"))
+    {
         key_prefs.push("thread.thr_auto_acq_thr_seq_ctr:TRUE".to_string());
     }
 
     // Field tree (rtshark), decrypted when a key matches. PATH points at the
     // resolved Wireshark dir so a non-PATH install + its DLLs both resolve.
-    let mut b = rtshark::RTSharkBuilder::builder().input_path(&tmp_str).env_path(&dir);
+    let mut b = rtshark::RTSharkBuilder::builder()
+        .input_path(&tmp_str)
+        .env_path(&dir);
     for p in &key_prefs {
         b = b.option(p);
     }
@@ -793,7 +971,12 @@ pub fn dissect_ieee154(
     let mut rows = Vec::with_capacity(cols.len());
     for (num, protocol, summary) in cols {
         let fields = by_num.remove(&num).unwrap_or_default();
-        rows.push(DecodedRow { num, protocol, summary, fields });
+        rows.push(DecodedRow {
+            num,
+            protocol,
+            summary,
+            fields,
+        });
     }
     Ok(rows)
 }
@@ -846,7 +1029,13 @@ pub fn save_ble_pcap(app: &AppHandle, name: &str, records: Vec<Vec<u8>>) -> Resu
     let path = if let Some(dot) = dot_sutra(app) {
         dot.join("captures").join(format!("{safe}.pcap"))
     } else {
-        match app.dialog().file().add_filter("pcap", &["pcap"]).set_file_name(format!("{safe}.pcap")).blocking_save_file() {
+        match app
+            .dialog()
+            .file()
+            .add_filter("pcap", &["pcap"])
+            .set_file_name(format!("{safe}.pcap"))
+            .blocking_save_file()
+        {
             Some(p) => p.into_path().map_err(|e| e.to_string())?,
             None => return Err("cancelled".into()),
         }
@@ -870,8 +1059,9 @@ mod tests {
         // record: ts(4)Â·chÂ·rssiÂ·lqiÂ·flagsÂ·plenÂ·psdu (psdu = MAC frame + 2 FCS bytes).
         // MAC: FCF 0x8841 (data, PAN-compressed, short addrs), seq 1, dst PAN abcd,
         // dst ffff (bcast), src 0000, payload, + FCS.
-        let psdu: &[u8] =
-            &[0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34];
+        let psdu: &[u8] = &[
+            0x41, 0x88, 0x01, 0xcd, 0xab, 0xff, 0xff, 0x00, 0x00, 0xde, 0xad, 0x12, 0x34,
+        ];
         let mut rec = vec![0u8, 0, 0, 0, 15, 0xD0, 0xFF, 0x01, psdu.len() as u8];
         rec.extend_from_slice(psdu);
 
@@ -880,12 +1070,22 @@ mod tests {
 
         // A Zigbee key must be ACCEPTED by tshark (format check) even if it doesn't
         // decrypt this frame â€” a bad -o would make tshark exit non-zero -> Err.
-        let key = ("5A6967426565416C6C69616E63653039".to_string(), "ZLL".to_string(), String::new());
+        let key = (
+            "5A6967426565416C6C69616E63653039".to_string(),
+            "ZLL".to_string(),
+            String::new(),
+        );
         match dissect_ieee154(vec![rec], None, vec![key]) {
-            Ok(r) => eprintln!("with-key ok: protocol={} summary={}", r[0].protocol, r[0].summary),
+            Ok(r) => eprintln!(
+                "with-key ok: protocol={} summary={}",
+                r[0].protocol, r[0].summary
+            ),
             Err(e) => panic!("tshark rejected the zigbee key preference: {e}"),
         }
-        eprintln!("protocol={} summary={} fields={:?}", rows[0].protocol, rows[0].summary, rows[0].fields);
+        eprintln!(
+            "protocol={} summary={} fields={:?}",
+            rows[0].protocol, rows[0].summary, rows[0].fields
+        );
         assert!(
             rows[0].fields.iter().any(|(k, _)| k == "wpan.src16"),
             "extracted the wpan source address"

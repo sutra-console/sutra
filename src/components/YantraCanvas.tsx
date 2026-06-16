@@ -9,7 +9,7 @@ import { type CSSProperties, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   axisStyle, evalCell,
-  type AnchorMode, type YantraAction, type YantraFrame, type YantraSpec, type YantraWidget,
+  type AnchorMode, type YantraAction, type YantraChrome, type YantraFrame, type YantraSpec, type YantraWidget,
 } from "@/lib/skrit";
 import { useYantraRuntime } from "@/hooks/useYantraRuntime";
 
@@ -20,7 +20,7 @@ export function YantraCanvas({ spec, disabled }: { spec: YantraSpec; disabled?: 
       <div className="scroll-stable min-h-0 flex-1 overflow-auto">
         {/* inner surface = the content area (scrollbar gutter excluded); widgets'
             % resolves against this, matching the editor's measured surface. */}
-        <div className="relative h-full">
+        <div className="relative h-full" style={chromeStyle(spec.stage)}>
           <CanvasNodes
             container="root" widgets={rt.widgets} frames={rt.frames}
             activeTabOf={rt.activeTabOf} setActiveTabs={rt.setActiveTabs}
@@ -61,6 +61,37 @@ function nodeStyle(n: YantraWidget | YantraFrame): CSSProperties {
   } as CSSProperties;
 }
 
+function chromeStyle(n?: YantraChrome, ov?: Record<string, unknown>): CSSProperties {
+  if (!n && !ov) return {};
+  const renderers = n?.renderers ?? [];
+  const style: CSSProperties = {};
+  const fills = [...renderers.map((r) => r.fill).filter(Boolean), ov?.fill as string | undefined].filter(Boolean);
+  if (fills.length) style.backgroundColor = fills[fills.length - 1];
+  const strokes = renderers
+    .map((renderer) => {
+      if (renderer.stroke === false || renderer.strokeWidth === 0) return undefined;
+      if (!renderer.stroke && renderer.strokeWidth === undefined) return undefined;
+      return `0 0 0 ${renderer.strokeWidth ?? 1}px ${typeof renderer.stroke === "string" ? renderer.stroke : "currentColor"}`;
+    })
+    .filter(Boolean) as string[];
+  if (strokes.length) style.boxShadow = strokes.join(", ");
+  const radius = [...renderers].reverse().find((renderer) => renderer.radius !== undefined)?.radius;
+  if (radius !== undefined) style.borderRadius = radius;
+  const pad = renderers.reduce((acc, renderer) => {
+    const padding = renderer.padding;
+    if (typeof padding === "number") return { x: acc.x + padding, y: acc.y + padding };
+    if (!padding) return acc;
+    return {
+      x: acc.x + (padding.x ?? padding.horizontal ?? 0),
+      y: acc.y + (padding.y ?? padding.vertical ?? 0),
+    };
+  }, { x: 0, y: 0 });
+  if (pad.x || pad.y) {
+    style.padding = `${pad.y}px ${pad.x}px`;
+  }
+  return style;
+}
+
 // Recursively render the children of one container (root | a frame id | a tab-pane id).
 function CanvasNodes({
   container, widgets, frames, activeTabOf, setActiveTabs, disabled, fire, valueOf, rowsOf, publish, ovOf, frameOvOf,
@@ -99,7 +130,7 @@ function CanvasNodes({
   return (
     <>
       {childFrames.map((f) => (
-        <div key={f.id} style={nodeStyle(f)} className={`rounded ${f.clip === false ? "" : "overflow-hidden"}`}>
+        <div key={f.id} style={{ ...nodeStyle(f), ...chromeStyle(f) }} className={`rounded ${f.clip === false ? "" : "overflow-hidden"}`}>
           {sub(f.id)}
         </div>
       ))}
@@ -108,7 +139,7 @@ function CanvasNodes({
         if (w.type === "tabs") {
           const active = activeTabOf(i);
           return (
-            <div key={i} style={nodeStyle(w)} className="flex flex-col overflow-hidden rounded border bg-card">
+            <div key={i} style={{ ...nodeStyle(w), ...chromeStyle(w) }} className="flex flex-col overflow-hidden rounded border bg-card">
               <div className="flex flex-wrap gap-1 border-b p-1">
                 {(w.tabs ?? []).map((t) => (
                   <button key={t.id} type="button"
@@ -123,9 +154,8 @@ function CanvasNodes({
           );
         }
         const ov = ovOf(w);
-        const bg = (ov?.color as string) ?? w.color;
         return (
-          <div key={i} style={{ ...nodeStyle(w), ...(bg ? { background: bg } : {}) }}>
+          <div key={i} style={{ ...nodeStyle(w), ...chromeStyle(w, ov) }}>
             <Widget w={w} disabled={disabled || !!ov?.disabled} fire={fire} value={ov?.value ?? valueOf(w)} rows={rowsOf(w)} publish={publish} ov={ov} />
           </div>
         );
