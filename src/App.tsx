@@ -1,7 +1,7 @@
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import {
-  Usb, Plug, PlugZap, Play, Plus, Trash2, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth, Globe, ChevronDown, PanelRight,
-  Radio, Activity, Terminal as TerminalIcon, FolderOpen, LayoutGrid, ShieldCheck,
+  Usb, Plug, PlugZap, Play, Plus, Trash2, Settings2, Bot, Database, Copy, Lock, LockOpen, Pencil, GripVertical, Cog, CircleHelp, Bookmark, X, Download, Upload, Bluetooth, Globe, ChevronDown, PanelRight, Cpu,
+  Radio, Activity, Terminal as TerminalIcon, FolderOpen, LayoutGrid, ShieldCheck, Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -29,13 +29,16 @@ import { MacroVars } from "@/components/MacroVars";
 import { clusterName } from "@/lib/zcl";
 import { RgbControl } from "@/components/RgbControl";
 import { WindowControls } from "@/components/WindowControls";
+import { BoardView } from "@/components/BoardView";
 import logoUrl from "../assets/logo.png";
 import { MacroColorStrip } from "@/components/MacroColorStrip";
 import { PwmConfigBadge } from "@/components/PwmConfigBadge";
 import { BleSnifferPanel } from "@/components/BleSnifferPanel";
 import { Ieee154Panel, type NodeSnapshot } from "@/components/Ieee154Panel";
 import { YantraCanvas } from "@/components/YantraCanvas";
-import { YantraEditor } from "@/components/YantraEditor";
+import { WasmYantraCanvas } from "@/components/WasmYantraCanvas";
+// YantraEditor (React) retired — editing now uses the egui/WASM editor (WasmYantraCanvas).
+import { applyTheme, watchSystemTheme, ACCENTS, DEFAULT_THEME, type Mode, type Theme } from "@/lib/theme";
 import { ConfigureDevice } from "@/components/ConfigureDevice";
 import { I2cPanel } from "@/components/I2cPanel";
 import { NetworkConfig } from "@/components/NetworkConfig";
@@ -58,6 +61,7 @@ import {
   wsConnect,
   disconnect as serialDisconnect,
   listPorts,
+  probeBoards,
   connState,
   outputToggle,
   outputsBitmap,
@@ -108,6 +112,7 @@ import {
   saveYantra,
   createYantra,
   deleteYantra,
+  importYantra,
   type YantraDoc,
   type YantraSpec,
   pickWorkspace,
@@ -181,6 +186,7 @@ interface Settings {
   tsharkPath: string; // optional override for Wireshark's tshark (empty = autodetect)
   autoSave: boolean; // placeholder preference (not yet wired to a behavior)
   mcpTools: McpToolFlags;
+  theme: Theme; // app-wide light/dark/system mode + accent
 }
 const DEFAULT_SETTINGS: Settings = {
   autoStartMcp: false,
@@ -197,6 +203,7 @@ const DEFAULT_SETTINGS: Settings = {
     macrosCreate: true,
     connection: true,
   },
+  theme: DEFAULT_THEME,
 };
 const loadSettings = (): Settings => {
   try {
@@ -205,6 +212,7 @@ const loadSettings = (): Settings => {
       ...DEFAULT_SETTINGS,
       ...s,
       mcpTools: { ...DEFAULT_SETTINGS.mcpTools, ...(s.mcpTools || {}) },
+      theme: { ...DEFAULT_SETTINGS.theme, ...(s.theme || {}) },
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -248,6 +256,7 @@ const SETTINGS_SECTIONS: { id: SettingsTab; label: string; icon: typeof Bot }[] 
 
 export default function App() {
   const [ports, setPorts] = useState<PortDesc[]>([]);
+  const [boardNames, setBoardNames] = useState<Record<string, string>>({}); // port → probed board name
   const [connected, setConnected] = useState(false);
   const [linkOnline, setLinkOnline] = useState(true); // target present on the wire
   const [dataPort, setDataPort] = useState<string | null>(null); // connected DATA port name
@@ -260,6 +269,7 @@ export default function App() {
   const [wsFound, setWsFound] = useState<DiscoveredDuta[]>([]); // mDNS scan results
   const [wsScanning, setWsScanning] = useState(false);
   const [wsConnecting, setWsConnecting] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [hasCmd, setHasCmd] = useState(false);
   const [selectedPort, setSelectedPort] = useState("auto");
   const [profiles, setProfiles] = useState<Profile[]>(loadProfiles);
@@ -289,7 +299,8 @@ export default function App() {
   const [yantras, setYantras] = useState<YantraDoc[]>([]); // workspace .yantra control surfaces
   const [yantraSel, setYantraSel] = useState(0); // which .yantra is shown
   const [editingYantra, setEditingYantra] = useState(false); // Controls view: edit vs render
-  const [savingYantra, setSavingYantra] = useState(false);
+  const [wasmRender, setWasmRender] = useState(false); // interact renderer: React (default) vs egui/WASM (experimental)
+  const [, setSavingYantra] = useState(false); // edit-mode save flag (egui editor owns the UI now)
   const [outBitmap, setOutBitmap] = useState(0); // device output states (bit i = control i)
   const [controls, setControls] = useState<ControlDesc[]>([]); // self-described controls
   const [pwmVals, setPwmVals] = useState<Record<number, number>>({}); // index -> duty 0..1023
@@ -342,6 +353,7 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [boardOpen, setBoardOpen] = useState(false); // Board view dialog
   const [rightBarOpen, setRightBarOpen] = useState(() => localStorage.getItem("sutra.rightBar") !== "0");
   const [rightBarWidth, setRightBarWidth] = useState(() => +(localStorage.getItem("sutra.rightBarWidth") || 320));
   const resizingBar = useRef(false);
@@ -429,8 +441,14 @@ export default function App() {
     setOverName(null);
   }
 
+  // Apply the theme (mode + accent) and keep it in sync with the OS scheme while
+  // in "system" mode. Re-runs when the chosen theme changes.
   useEffect(() => {
-    document.documentElement.classList.add("dark");
+    applyTheme(settings.theme);
+    return watchSystemTheme(() => settings.theme);
+  }, [settings.theme]);
+
+  useEffect(() => {
     refreshPorts();
     getWorkspace().then(setWorkspace).catch(() => {});
     listI2cDefs().then(setI2cDefs).catch(() => {});
@@ -500,15 +518,26 @@ export default function App() {
     }
   }
 
-  async function refreshPorts() {
+  // `probe` opens each Duta candidate to read its board name (the "· Duta S3-Zero"
+  // label). That's an unsolicited port open, so it's OFF by default — on launch we
+  // only list ports. Opening a fragile CDC just to label it can wedge it or block
+  // a connect behind the IO gate; the explicit Rescan button asks for it.
+  async function refreshPorts(probe = false) {
     try {
       setPorts(await listPorts());
+      if (probe) {
+        probeBoards()
+          .then((pairs) => setBoardNames(Object.fromEntries(pairs)))
+          .catch(() => {});
+      }
     } catch (e) {
       setStatus(`port scan failed: ${e}`);
     }
   }
 
   async function handleConnect() {
+    if (connecting) return; // ignore double-clicks: overlapping opens race the COM port
+    setConnecting(true);
     setStatus("connecting…");
     try {
       await setDataParams({ baud, data_bits: 8, parity, stop_bits: stopBits });
@@ -559,8 +588,14 @@ export default function App() {
       if (settings.rememberLastPort) setSetting("lastPort", selectedPort);
       focusTerm();
     } catch (e) {
+      // Tear down anything a partial connect left open (a spawned reader still
+      // holding the port, or a connected-but-mute link) — otherwise the COM port
+      // stays busy until the next connect attempt or a manual Disconnect.
+      await serialDisconnect().catch(() => {});
       setStatus(`connect failed: ${e}`);
       setConnected(false);
+    } finally {
+      setConnecting(false);
     }
   }
 
@@ -834,7 +869,7 @@ export default function App() {
   /** Persist the edited control surface back to its .yantra file. */
   async function saveYantraDoc(spec: YantraSpec) {
     const cur = yantras[yantraSel];
-    if (!cur) return;
+    if (!cur || cur.error) return;
     setSavingYantra(true);
     try {
       const f = await saveYantra(cur.file, spec);
@@ -856,6 +891,23 @@ export default function App() {
       setStatus("new control surface");
     } catch (e) {
       setStatus(`create failed: ${e}`);
+    }
+  }
+  /** Pick an external .yantra/.yaml/.json file and import it into the workspace. */
+  async function openYantra() {
+    try {
+      const picked = await open({
+        multiple: false,
+        filters: [{ name: "Yantra", extensions: ["yantra", "yaml", "yml", "json"] }],
+      });
+      if (typeof picked !== "string") return; // cancelled
+      const f = await importYantra(picked);
+      await reloadYantras(f);
+      setMainView("controls");
+      setEditingYantra(false);
+      setStatus(`opened ${f}`);
+    } catch (e) {
+      setStatus(`open failed: ${e}`);
     }
   }
   /** Delete the current surface (with confirm) and leave edit mode. */
@@ -1355,6 +1407,9 @@ export default function App() {
 
             <DropdownMenuSeparator />
 
+            <DropdownMenuItem disabled={!connected} onSelect={() => setBoardOpen(true)}>
+              <Cpu className="size-3.5" /> Board…
+            </DropdownMenuItem>
             <DropdownMenuCheckboxItem
               checked={settings.autoSave}
               onCheckedChange={(v) => setSetting("autoSave", v)}
@@ -1576,7 +1631,9 @@ export default function App() {
               {ports.map((p) => (
                 <SelectItem key={p.name} value={p.name}>
                   {p.name}
-                  {p.is_duta ? " · Duta" : p.product ? ` · ${p.product}` : ""}
+                  {boardNames[p.name]
+                    ? ` · ${boardNames[p.name]}`
+                    : p.is_duta ? " · Duta" : p.product ? ` · ${p.product}` : ""}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -1634,7 +1691,7 @@ export default function App() {
               </div>
             </PopoverContent>
           </Popover>
-          <Button variant="outline" size="sm" onClick={refreshPorts} title="Rescan ports">
+          <Button variant="outline" size="sm" onClick={() => refreshPorts(true)} title="Rescan ports (probe names)" disabled={connecting}>
             <Usb />
           </Button>
           {!connected && (
@@ -1642,6 +1699,7 @@ export default function App() {
               variant="outline"
               size="sm"
               title="Connect over Bluetooth LE"
+              disabled={connecting}
               onClick={() => {
                 setBleOpen(true);
                 handleBleScan();
@@ -1651,7 +1709,7 @@ export default function App() {
             </Button>
           )}
           {!connected && (
-            <Button variant="outline" size="sm" title="Connect over the network (WebSocket)" onClick={() => setWsOpen(true)}>
+            <Button variant="outline" size="sm" title="Connect over the network (WebSocket)" disabled={connecting} onClick={() => setWsOpen(true)}>
               <Globe />
             </Button>
           )}
@@ -1660,8 +1718,13 @@ export default function App() {
               <PlugZap /> Disconnect
             </Button>
           ) : (
-            <Button size="sm" onClick={handleConnect} disabled={selectedPort === "auto" && dutaPorts.length < 1}>
-              <Plug /> Connect
+            <Button
+              size="sm"
+              onClick={handleConnect}
+              disabled={connecting || (selectedPort === "auto" && dutaPorts.length < 1)}
+            >
+              {connecting ? <Loader2 className="animate-spin" /> : <Plug />}
+              {connecting ? "Connecting…" : "Connect"}
             </Button>
           )}
           <Button
@@ -1719,7 +1782,7 @@ export default function App() {
                 <select className="h-7 rounded border bg-background px-1 text-xs"
                   value={yantraSel} onChange={(e) => { setYantraSel(Number(e.target.value)); setEditingYantra(false); }}>
                   {yantras.map((y, i) => (
-                    <option key={y.file} value={i}>{y.doc.name || y.file}</option>
+                    <option key={y.file} value={i}>{y.error ? `! ${y.file}` : y.doc.name || y.file}</option>
                   ))}
                 </select>
               )}
@@ -1729,9 +1792,14 @@ export default function App() {
                     onClick={newYantra} title="New control surface">
                     <Plus className="size-3.5" /> New
                   </Button>
+                  <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs"
+                    onClick={openYantra} title="Open a .yantra file into this workspace">
+                    <FolderOpen className="size-3.5" /> Open
+                  </Button>
                   {yantras[yantraSel] && (
                     <Button size="sm" variant={editingYantra ? "default" : "outline"}
-                      className="h-7 gap-1 px-2 text-xs" onClick={() => setEditingYantra((v) => !v)}>
+                      className="h-7 gap-1 px-2 text-xs" disabled={!!yantras[yantraSel].error}
+                      onClick={() => setEditingYantra((v) => !v)}>
                       <Pencil className="size-3.5" /> {editingYantra ? "Done" : "Edit"}
                     </Button>
                   )}
@@ -1739,6 +1807,12 @@ export default function App() {
                     <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-destructive"
                       onClick={deleteYantraDoc} title="Delete this surface">
                       <Trash2 className="size-3.5" />
+                    </Button>
+                  )}
+                  {yantras[yantraSel] && !editingYantra && !yantras[yantraSel].error && (
+                    <Button size="sm" variant={wasmRender ? "default" : "outline"} className="h-7 gap-1 px-2 text-xs"
+                      onClick={() => setWasmRender((v) => !v)} title="Toggle the experimental egui/WASM renderer">
+                      <Cpu className="size-3.5" /> WASM
                     </Button>
                   )}
                 </div>
@@ -1778,26 +1852,41 @@ export default function App() {
           {/* flex flex-col so the panel child's flex-1/min-h-0 actually
               constrains its height — otherwise a tall list (802.15.4 grouped)
               overflows with no scroll instead of scrolling internally. */}
-          <CardContent className="flex min-h-0 flex-1 flex-col bg-[#0a0a0b] p-2">
+          <CardContent className="flex min-h-0 flex-1 flex-col bg-background p-2">
             {mainView === "controls" ? (
               yantras[yantraSel] ? (
-                editingYantra ? (
-                  <YantraEditor
+                yantras[yantraSel].error ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-2 text-sm">
+                    <div className="font-medium text-destructive">Could not load {yantras[yantraSel].file}</div>
+                    <div className="max-w-xl rounded border border-destructive/30 bg-destructive/5 p-3 font-mono text-xs text-destructive">
+                      {yantras[yantraSel].error}
+                    </div>
+                  </div>
+                ) : editingYantra ? (
+                  // Editing is always the egui/WASM editor now (React editor removed).
+                  <WasmYantraCanvas
                     key={yantras[yantraSel].file}
-                    file={yantras[yantraSel].file}
                     spec={yantras[yantraSel].doc}
+                    editing
                     onSave={saveYantraDoc}
-                    saving={savingYantra}
+                    disabled={!connected}
                   />
+                ) : wasmRender ? (
+                  <WasmYantraCanvas spec={yantras[yantraSel].doc} disabled={!connected} />
                 ) : (
                   <YantraCanvas spec={yantras[yantraSel].doc} disabled={!connected} />
                 )
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
                   No control surfaces yet.
-                  <Button size="sm" variant="outline" className="gap-1" onClick={newYantra}>
-                    <Plus className="size-3.5" /> New control surface
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="outline" className="gap-1" onClick={newYantra}>
+                      <Plus className="size-3.5" /> New control surface
+                    </Button>
+                    <Button size="sm" variant="outline" className="gap-1" onClick={openYantra}>
+                      <FolderOpen className="size-3.5" /> Open…
+                    </Button>
+                  </div>
                 </div>
               )
             ) : dataDesc?.kind === DATA_KIND.I2C ? (
@@ -2200,6 +2289,9 @@ export default function App() {
         <span>{macros.length} macro{macros.length === 1 ? "" : "s"}</span>
       </footer>
 
+      {/* Board view (app-side pinout from the boards database) */}
+      <BoardView open={boardOpen} onOpenChange={setBoardOpen} deviceName={deviceName} connected={connected} />
+
       {/* Configure-device (runtime IO provisioning) modal */}
       <ConfigureDevice
         open={configOpen}
@@ -2454,6 +2546,42 @@ export default function App() {
                       <p className="text-[10px] leading-tight text-muted-foreground">
                         Macros, captures, and network keys are saved under the workspace's{" "}
                         <code>.sutra/</code> folder.
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {settingsTab === "general" && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm">Appearance</CardTitle>
+                    </CardHeader>
+                    <CardContent className="flex flex-col gap-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm">Mode</div>
+                        <div className="flex items-center overflow-hidden rounded border text-xs">
+                          {(["light", "dark", "system"] as Mode[]).map((m) => (
+                            <button key={m} type="button"
+                              className={`px-3 py-1 capitalize ${settings.theme.mode === m ? "bg-accent font-medium" : "text-muted-foreground hover:bg-accent/50"}`}
+                              onClick={() => setSettings((s) => ({ ...s, theme: { ...s.theme, mode: m } }))}>
+                              {m}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm">Accent</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {ACCENTS.map((a) => (
+                            <button key={a.id} type="button" title={a.label}
+                              onClick={() => setSettings((s) => ({ ...s, theme: { ...s.theme, accent: a.id } }))}
+                              className={`size-6 rounded-full border-2 transition ${settings.theme.accent === a.id ? "border-foreground" : "border-transparent hover:border-muted-foreground"}`}
+                              style={{ background: a.swatch }} />
+                          ))}
+                        </div>
+                      </div>
+                      <p className="text-[10px] leading-tight text-muted-foreground">
+                        Theme applies app-wide (including the WASM control surface) and is saved locally.
                       </p>
                     </CardContent>
                   </Card>
