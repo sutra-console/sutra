@@ -40,10 +40,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: wasm32-unknown-unknown${{ matrix.platform == 'macos-latest' && ',aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+
+      # tauri's beforeBuildCommand is `bun run build`, which builds yantra-wasm
+      # (egui→wasm) first — so every bundle host needs wasm-pack too.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
       - uses: tauri-apps/tauri-action@v0
         env:

@@ -7,14 +7,25 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ---- frontend: typecheck + vite build ----
+  # ---- frontend: wasm runtime + typecheck + vite build ----
   frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
+      # `bun run build` builds yantra-wasm (egui→wasm) first, so the runner
+      # needs the Rust wasm toolchain + wasm-pack.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: yantra-wasm
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
       - run: bun install --frozen-lockfile
-      - run: bun run build # tsc && vite build
+      - run: bun run build # wasm-pack + tsc + vite build
 
   # ---- backend: protocol/serial/mcp unit tests ----
   backend:
