@@ -56,6 +56,11 @@ drives any plain COM port.
   delivered as pcap packets. A WiFi capture coexists with a Sutra USB session, so
   you can drive the target while Wireshark watches. See [EXTCAP.md](EXTCAP.md).
 
+<div align="center">
+  <img src="assets/zigbeeDecode.png" alt="Live 802.15.4 / Zigbee capture from a Duta, dissected in Wireshark via sutra-extcap" width="640">
+  <br><sub>Live 802.15.4 / Zigbee capture from a Duta, dissected in Wireshark via <code>sutra-extcap</code>.</sub>
+</div>
+
 ## Run
 
 ```sh
