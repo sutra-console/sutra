@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { init, Terminal as Ghostty, FitAddon } from "ghostty-web";
-import { onData, dataWrite, readConsole } from "@/lib/skrit";
+import { onData, onConsole, dataWrite, readConsole } from "@/lib/skrit";
 
 // WASM init is shared across all Terminal instances; run it once.
 let initialized: Promise<void> | null = null;
@@ -10,8 +10,8 @@ export interface TerminalHandle {
   focus: () => void;
 }
 
-export const Terminal = forwardRef<TerminalHandle, { connected: boolean }>(function Terminal(
-  { connected },
+export const Terminal = forwardRef<TerminalHandle, { connected: boolean; channel?: "data" | "console" }>(function Terminal(
+  { connected, channel = "data" },
   ref
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -60,8 +60,9 @@ export const Terminal = forwardRef<TerminalHandle, { connected: boolean }>(funct
       });
       ro.observe(hostRef.current);
 
-      // target console bytes -> terminal
-      onData((bytes) => term.write(bytes)).then((u) => (unlisten = u));
+      // target console bytes -> terminal (the active source's stream)
+      const subscribe = channel === "console" ? onConsole : onData;
+      subscribe((bytes) => term.write(bytes)).then((u) => (unlisten = u));
       // keystrokes -> DATA/UART
       sub = term.onData((d: string) => {
         dataWrite(Array.from(new TextEncoder().encode(d))).catch(() => {});

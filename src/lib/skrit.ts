@@ -9,6 +9,7 @@ export const MSG = {
   DEVICE_NAME: 0x03,
   REBOOT: 0x04,
   DATA_DESC: 0x07,
+  SOURCE_DESC: 0x08,
   OUTPUT_SET: 0x10,
   OUTPUT_GET: 0x11,
   OUTPUT_TOGGLE: 0x12,
@@ -45,7 +46,7 @@ export const MSG = {
 
 export const OUTPUT = { R1: 0, R2: 1, LED: 2 } as const;
 /** Output control types (OUTPUT_DESC type byte), by behavior, not fixture. */
-export const CTRL = { IO: 0, PWM: 1, RGB: 2 } as const;
+export const CTRL = { IO: 0, PWM: 1, RGB: 2, SELECT: 3 } as const;
 /** duta_io row flag: output is active-low (driven LOW = on). */
 export const DUTA_ACTIVE_LOW = 0x01;
 export const RESP_FLAG = 0x80;
@@ -196,9 +197,13 @@ export const dataWrite = (bytes: number[]) => invoke<void>("data_write", { bytes
 export const sendCmd = (typ: number, body: number[] = []) =>
   invoke<RespFrame>("send_cmd", { typ, body });
 
-/** Subscribe to raw DATA-port bytes (target console). */
+/** Subscribe to raw DATA-port bytes (the active sniffer / non-console source). */
 export async function onData(cb: (bytes: Uint8Array) => void): Promise<UnlistenFn> {
   return listen<number[]>("sutra://data", (e) => cb(Uint8Array.from(e.payload)));
+}
+/** Subscribe to the console DATA source (source 0) — live, on a multi-source device. */
+export async function onConsole(cb: (bytes: Uint8Array) => void): Promise<UnlistenFn> {
+  return listen<number[]>("sutra://console", (e) => cb(Uint8Array.from(e.payload)));
 }
 
 /** Target link state: fires false when the DATA port drops (unplug / device
@@ -218,6 +223,9 @@ export async function onConnected(cb: () => void): Promise<UnlistenFn> {
 export const ping = () => sendCmd(MSG.PING);
 export const outputSet = (index: number, on: boolean) =>
   sendCmd(MSG.OUTPUT_SET, [index, on ? 1 : 0]);
+/** Set a SKRIT_CTRL_SELECT control to option index `option` (OUTPUT_SET value = option). */
+export const outputSelect = (index: number, option: number) =>
+  sendCmd(MSG.OUTPUT_SET, [index, option & 0xff]);
 export const outputToggle = (index: number) => sendCmd(MSG.OUTPUT_TOGGLE, [index]);
 
 export async function outputGet(): Promise<{ r1: boolean; r2: boolean; led: boolean }> {
@@ -1332,8 +1340,10 @@ export async function wifiConfigure(ssid: string, password: string): Promise<voi
 const dec = new TextDecoder();
 export interface ControlDesc {
   index: number;
-  type: number; // outputs: 0 = io, 1 = pwm, 2 = rgb · inputs: 0 = digital, 1 = analog
+  type: number; // outputs: 0 = io, 1 = pwm, 2 = rgb, 3 = select · inputs: 0 = digital, 1 = analog
   name: string;
+  current?: number; // SELECT: the currently-selected option index
+  options?: string[]; // SELECT: the option labels (a dropdown)
 }
 export async function getDeviceName(): Promise<string> {
   const b = (await sendCmd(MSG.DEVICE_NAME)).body; // [status, name...]
@@ -1341,7 +1351,7 @@ export async function getDeviceName(): Promise<string> {
 }
 
 /** What the device's DATA channel carries (so the app can pick a viewer). */
-export const DATA_KIND = { UART: 0, CAN: 1, RS485: 2, SPI: 3, BLE_SNIFF: 4, LOGIC: 5, I2C: 6, IEEE802154: 7 } as const;
+export const DATA_KIND = { UART: 0, CAN: 1, RS485: 2, SPI: 3, BLE_SNIFF: 4, LOGIC: 5, I2C: 6, IEEE802154: 7, ZIGBEE: 8, THREAD: 9 } as const;
 export interface DataDesc {
   kind: number;
   name: string;
@@ -1350,9 +1360,44 @@ export async function getDataDesc(): Promise<DataDesc> {
   const b = (await sendCmd(MSG.DATA_DESC)).body; // [status, kind, name...]
   return { kind: b[1] ?? 0, name: dec.decode(Uint8Array.from(b.slice(2))) || "UART" };
 }
+
+/** A DATA source (SOURCE_DESC): a named, typed device→host stream. */
+export interface SourceDesc {
+  id: number;
+  kind: number; // DATA_KIND
+  flags: number; // SKRIT_SRC_* (bit0 = toggleable, bit1 = active)
+  name: string;
+}
+/** Enumerate the device's DATA sources. Returns [] for a single-source / non-Sources device. */
+export async function getSources(): Promise<SourceDesc[]> {
+  let total = 0;
+  try {
+    const b = (await sendCmd(MSG.SOURCE_DESC, [0])).body; // [status, index, total, id, kind, flags, name]
+    if ((b[0] ?? 1) !== 0) return [];
+    total = b[2] ?? 0;
+  } catch {
+    return [];
+  }
+  const out: SourceDesc[] = [];
+  for (let i = 0; i < total; i++) {
+    try {
+      const b = (await sendCmd(MSG.SOURCE_DESC, [i])).body;
+      out.push({ id: b[3] ?? i, kind: b[4] ?? 0, flags: b[5] ?? 0, name: dec.decode(Uint8Array.from(b.slice(6))) });
+    } catch {
+      /* skip a source that fails to describe */
+    }
+  }
+  return out;
+}
 export async function getOutputDesc(index: number): Promise<ControlDesc> {
   const b = (await sendCmd(MSG.OUTPUT_DESC, [index])).body; // [status, index, type, name...]
-  return { index: b[1] ?? index, type: b[2] ?? 0, name: dec.decode(Uint8Array.from(b.slice(3))) };
+  const type = b[2] ?? 0;
+  if (type === CTRL.SELECT) {
+    // SELECT body: [status, index, type, current, name\0opt0\0opt1\0…]
+    const parts = dec.decode(Uint8Array.from(b.slice(4))).split("\0").filter((s) => s.length > 0);
+    return { index: b[1] ?? index, type, name: parts[0] ?? "", current: b[3] ?? 0, options: parts.slice(1) };
+  }
+  return { index: b[1] ?? index, type, name: dec.decode(Uint8Array.from(b.slice(3))) };
 }
 /** Enumerate the device's named controls (count from INFO, label/type per index). */
 export async function getControls(): Promise<ControlDesc[]> {

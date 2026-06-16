@@ -83,11 +83,14 @@ import {
   getDeviceName,
   getControls,
   getDataDesc,
+  getSources,
+  type SourceDesc,
   DATA_KIND,
   type DataDesc,
   CAP,
   FLAG,
   CTRL,
+  outputSelect,
   outputPwm,
   outputPwmGet,
   pwmConfigGet,
@@ -307,6 +310,13 @@ export default function App() {
   const [pwmCfg, setPwmCfg] = useState<Record<number, PwmConfig>>({}); // index -> {freq, res}
   const [rgbVals, setRgbVals] = useState<Record<number, Rgb[]>>({}); // index -> per-pixel colors
   const [dataDesc, setDataDesc] = useState<DataDesc | null>(null); // what the DATA channel carries
+  // Zigbee/Thread ride the 802.15.4 PHY → same viewer + DATA-pin UI. Keep
+  // dataDesc.kind raw (the nav label + extcap DLT distinguish them), but fold
+  // them into IEEE802154 wherever we pick which viewer to render.
+  const viewKind =
+    dataDesc?.kind === DATA_KIND.ZIGBEE || dataDesc?.kind === DATA_KIND.THREAD
+      ? DATA_KIND.IEEE802154
+      : dataDesc?.kind;
   const [deviceName, setDeviceName] = useState("");
   const [caps, setCaps] = useState(0); // device capability bits (Duta only)
   const [provision, setProvision] = useState(false); // device accepts runtime IO provisioning
@@ -320,6 +330,8 @@ export default function App() {
   const [bleTotal, setBleTotal] = useState(0); // total received (the buffer is capped)
   const [ieee154Frames, setIeee154Frames] = useState<Ieee154Frame[]>([]); // decoded 802.15.4 frames (last 2000)
   const [ieee154Total, setIeee154Total] = useState(0); // total received (the buffer is capped)
+  const [sources, setSources] = useState<SourceDesc[]>([]); // device DATA sources (multi-source: editor-tab views)
+  const [activeSource, setActiveSource] = useState(0); // the open "view" tab's source id
   const [ch154, setCh154] = useState(0); // 802.15.4 sniffer channel (0 = auto-hop, 11..26 = pinned)
   const ch154Ref = useRef(0); // latest channel for the (non-re-subscribing) TX echo listener
   ch154Ref.current = ch154;
@@ -703,6 +715,15 @@ export default function App() {
       })
       .catch(() => {});
     getDataDesc().then(setDataDesc).catch(() => setDataDesc(null)); // UART if unsupported
+    getSources() // multi-source devices open one "view" tab per stream
+      .then((srcs) => {
+        setSources(srcs);
+        if (srcs.length > 1) {
+          const sniff = srcs.find((s) => s.kind !== DATA_KIND.UART); // default to a sniffer view if present
+          setActiveSource((sniff ?? srcs[0]).id);
+        }
+      })
+      .catch(() => setSources([]));
     dataPins().then(setDataSrcPins).catch(() => setDataSrcPins(null)); // which Duta pins the source rides
     cfgGet(CFG.DATA_KIND).then(() => setHasKindSwitch(true)).catch(() => setHasKindSwitch(false));
     wifiStatus().then(() => setHasWifi(true)).catch(() => setHasWifi(false));
@@ -740,6 +761,7 @@ export default function App() {
   function clearDevice() {
     setDeviceName("");
     setControls([]);
+    setSources([]);
     setOutBitmap(0);
     setPwmVals({});
     setPwmCfg({});
@@ -754,7 +776,10 @@ export default function App() {
   // to React on an interval (not per-record) so a high-rate stream can't
   // saturate the renderer (which would starve the disconnect click → "freeze").
   useEffect(() => {
-    const kind = dataDesc?.kind;
+    // Zigbee/Thread share the 802.15.4 record format (only the Wireshark dissector
+    // differs), so fold them into the IEEE802154 viewer path.
+    const raw = dataDesc?.kind;
+    const kind = raw === DATA_KIND.ZIGBEE || raw === DATA_KIND.THREAD ? DATA_KIND.IEEE802154 : raw;
     if (kind !== DATA_KIND.I2C && kind !== DATA_KIND.BLE_SNIFF && kind !== DATA_KIND.IEEE802154) return;
     const bleBuf: BleSniffPacket[] = [];
     const i2cBuf: I2cRecord[] = [];
@@ -823,7 +848,7 @@ export default function App() {
 
   // Read the 802.15.4 sniffer's current channel when its viewer becomes active.
   useEffect(() => {
-    if (dataDesc?.kind === DATA_KIND.IEEE802154 && connected) {
+    if (viewKind === DATA_KIND.IEEE802154 && connected) {
       getIeee154Channel().then(setCh154).catch(() => {});
     }
   }, [dataDesc?.kind, connected]);
@@ -1224,6 +1249,22 @@ export default function App() {
     }
   }
 
+  // SELECT control change (a device mode dropdown, e.g. the sniffer radio).
+  // Optimistic local update of the descriptor's `current`, then fire to device.
+  async function selectControl(index: number, option: number) {
+    setControls((cs) => cs.map((c) => (c.index === index ? { ...c, current: option } : c)));
+    try {
+      await outputSelect(index, option);
+      // A radio SELECT changes what DATA carries (the dissector kind) — refresh so
+      // the live viewer re-inits for the newly-selected PHY, and re-read the source
+      // list so the stream tab relabels to it (the Radio source kind = HAL.data_kind).
+      getDataDesc().then(setDataDesc).catch(() => {});
+      getSources().then(setSources).catch(() => {});
+    } catch (e) {
+      setStatus(`cmd failed: ${e}`);
+    }
+  }
+
   function openAdd() {
     setEditOrig(null);
     setDraftName("");
@@ -1472,7 +1513,7 @@ export default function App() {
               <Settings2 className="size-3.5" />
               {!connected
                 ? "serial"
-                : dataDesc?.kind === DATA_KIND.IEEE802154
+                : viewKind === DATA_KIND.IEEE802154
                   ? `802.15.4 · ${ch154 ? `ch ${ch154}` : "hop"}`
                   : `${dataPort ?? selectedPort} @ ${baud}`}
               {connected && (
@@ -1480,18 +1521,18 @@ export default function App() {
               )}
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="start" className={dataDesc?.kind === DATA_KIND.IEEE802154 ? "w-80" : "w-72"}>
+          <PopoverContent align="start" className={viewKind === DATA_KIND.IEEE802154 ? "w-80" : "w-72"}>
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
                 <Settings2 className="size-4" />
                 <span className="text-sm font-semibold">
-                  {dataDesc?.kind === DATA_KIND.IEEE802154 ? "802.15.4 radio" : "Serial: DATA"}
+                  {viewKind === DATA_KIND.IEEE802154 ? "802.15.4 radio" : "Serial: DATA"}
                 </span>
                 {dataPort && (
                   <Badge variant="secondary" className="ml-auto">{dataPort}</Badge>
                 )}
               </div>
-              {dataDesc?.kind === DATA_KIND.IEEE802154 ? (
+              {viewKind === DATA_KIND.IEEE802154 ? (
                 <>
                   {/* The bridged medium is a radio, not a UART — so this slot configures
                       the 802.15.4 channel (PROTO_SET) instead of baud/parity/stop. */}
@@ -1746,33 +1787,54 @@ export default function App() {
           <CardHeader className="flex-row items-center gap-2 border-b py-0 pl-2 pr-3">
             <div className="flex items-center self-end">
               {(() => {
-                const kind = dataDesc?.kind ?? DATA_KIND.UART;
-                const Icon =
-                  kind === DATA_KIND.BLE_SNIFF || kind === DATA_KIND.IEEE802154
-                    ? Radio
-                    : kind === DATA_KIND.I2C
-                      ? Activity
-                      : TerminalIcon;
-                const label =
-                  kind === DATA_KIND.BLE_SNIFF
-                    ? "BLE sniffer"
-                    : kind === DATA_KIND.IEEE802154
-                      ? "802.15.4"
-                      : kind === DATA_KIND.I2C
-                        ? "I²C"
-                        : "Console";
                 const tab = (active: boolean) =>
                   `flex items-center gap-1.5 border-b-2 px-2 py-2 text-sm font-medium ${active ? "border-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`;
+                const iconFor = (k: number) =>
+                  k === DATA_KIND.BLE_SNIFF || k === DATA_KIND.IEEE802154 ||
+                  k === DATA_KIND.ZIGBEE || k === DATA_KIND.THREAD
+                    ? Radio
+                    : k === DATA_KIND.I2C ? Activity : TerminalIcon;
+                const kindLabel = (k: number) =>
+                  k === DATA_KIND.BLE_SNIFF ? "BLE sniffer"
+                    : k === DATA_KIND.ZIGBEE ? "Zigbee"
+                      : k === DATA_KIND.THREAD ? "Thread"
+                        : k === DATA_KIND.IEEE802154 ? "802.15.4"
+                          : k === DATA_KIND.I2C ? "I²C" : "Console";
+                const controlsTab = (yantras.length > 0 || !!workspace) && (
+                  <button type="button" className={tab(mainView === "controls")} onClick={() => setMainView("controls")}>
+                    <LayoutGrid className="size-3.5" /> Controls
+                  </button>
+                );
+                // Multi-source: one top-level tab per DATA stream (peer to Controls).
+                if (sources.length > 1) {
+                  return (
+                    <>
+                      {sources.map((s) => {
+                        const Icon = iconFor(s.kind);
+                        return (
+                          <button key={s.id} type="button" title={s.name}
+                            className={tab(mainView === "data" && activeSource === s.id)}
+                            onClick={() => { setMainView("data"); setActiveSource(s.id); }}>
+                            {/* label by the stream's kind (BLE sniffer/Zigbee/Thread/
+                                802.15.4/Console), not the generic source name; the name
+                                is the tooltip. Radio kind tracks the PHY via SELECT. */}
+                            <Icon className="size-3.5" /> {kindLabel(s.kind)}
+                          </button>
+                        );
+                      })}
+                      {controlsTab}
+                    </>
+                  );
+                }
+                // Single-source: the one data view, labeled by its kind.
+                const kind = dataDesc?.kind ?? DATA_KIND.UART;
+                const Icon = iconFor(kind);
                 return (
                   <>
                     <button type="button" className={tab(mainView === "data")} onClick={() => setMainView("data")}>
-                      <Icon className="size-3.5" /> {label}
+                      <Icon className="size-3.5" /> {kindLabel(kind)}
                     </button>
-                    {(yantras.length > 0 || !!workspace) && (
-                      <button type="button" className={tab(mainView === "controls")} onClick={() => setMainView("controls")}>
-                        <LayoutGrid className="size-3.5" /> Controls
-                      </button>
-                    )}
+                    {controlsTab}
                   </>
                 );
               })()}
@@ -1889,6 +1951,9 @@ export default function App() {
                   </div>
                 </div>
               )
+            ) : sources.length > 1 && sources.find((s) => s.id === activeSource)?.kind === DATA_KIND.UART ? (
+              // multi-source: the Console "view" tab (source 0) — its own live stream
+              <Terminal connected={connected} channel="console" />
             ) : dataDesc?.kind === DATA_KIND.I2C ? (
               <I2cPanel
                 records={i2cRecords}
@@ -1905,7 +1970,7 @@ export default function App() {
                 onClear={() => { setBlePackets([]); setBleTotal(0); }}
                 onSavePcap={saveSniffPcap}
               />
-            ) : dataDesc?.kind === DATA_KIND.IEEE802154 ? (
+            ) : viewKind === DATA_KIND.IEEE802154 ? (
               <Ieee154Panel
                 frames={ieee154Frames}
                 total={ieee154Total}
@@ -1941,10 +2006,11 @@ export default function App() {
           className="-mx-1 w-1.5 shrink-0 cursor-col-resize rounded bg-transparent hover:bg-border"
         />
         <div style={{ width: rightBarWidth }} className="flex shrink-0 flex-col gap-3 overflow-y-auto">
-          {/* controls: self-described by the device */}
+          {/* hardware: the device's self-described raw IO (toggles, SELECT,
+              provisioning) — distinct from the yantra "Controls" view tab. */}
           <Card>
             <CardHeader className="flex-row flex-wrap items-center gap-y-1.5 py-3">
-              <CardTitle>Controls</CardTitle>
+              <CardTitle>Hardware</CardTitle>
               <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
                 {hasWifi && connected && (
                   <NetworkConfig
@@ -2068,6 +2134,27 @@ export default function App() {
                         </ContextMenuItem>
                       </ContextMenuContent>
                       </ContextMenu>
+                    ))}
+
+                  {/* select (dropdown) controls: device mode pickers (e.g. sniffer radio) */}
+                  {controls
+                    .filter((c) => c.type === CTRL.SELECT)
+                    .map((c) => (
+                      <div key={c.index} className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium" title={c.name}>{c.name}</span>
+                        <Select
+                          value={String(c.current ?? 0)}
+                          disabled={!connected || !hasCmd}
+                          onValueChange={(v) => selectControl(c.index, Number(v))}
+                        >
+                          <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {(c.options ?? []).map((label, i) => (
+                              <SelectItem key={i} value={String(i)} className="text-xs">{label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
                     ))}
                 </div>
               ) : (
@@ -2242,7 +2329,7 @@ export default function App() {
         {connected && dataDesc?.kind === DATA_KIND.UART && (
           <span>{baud} 8{parity[0].toUpperCase()}{stopBits}</span>
         )}
-        {connected && dataDesc?.kind === DATA_KIND.IEEE802154 && (
+        {connected && viewKind === DATA_KIND.IEEE802154 && (
           <span>802.15.4 · {ch154 ? `ch ${ch154}` : "hop"}</span>
         )}
         <span className="truncate">{status}</span>

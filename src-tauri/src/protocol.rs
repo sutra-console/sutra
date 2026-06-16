@@ -18,6 +18,7 @@ pub mod msg {
     pub const AUTH: u8 = 0x05;
     pub const AUTH_SET: u8 = 0x06;
     pub const DATA_DESC: u8 = 0x07;
+    pub const SOURCE_DESC: u8 = 0x08; // index -> index, total, source_id, kind, flags, name
     pub const OUTPUT_SET: u8 = 0x10;
     pub const OUTPUT_GET: u8 = 0x11;
     pub const OUTPUT_TOGGLE: u8 = 0x12;

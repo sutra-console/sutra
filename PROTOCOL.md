@@ -358,6 +358,48 @@ target. So a network device requires authentication:
 network bridge over `wss://` so the password and console aren't on the wire in the clear;
 the default-password gate is a usability backstop, not a substitute for TLS.
 
+## Capability model: Controls · Inputs · Invoke · Sources
+
+A device's surface splits four ways, along two questions — *is it a standing value or a
+call?*, and (for values) *how does it flow?*
+
+| contract | category | examples | messages |
+|---|---|---|---|
+| set & read | **Control** (output) | relay, PWM, RGB, a mode SELECT | `OUT_*` + `SKRIT_CTRL_*` |
+| read-only | **Input** | analog sensor, button | `INPUT_*` + `SKRIT_IN_*` |
+| call (args → reply) | **Invoke** | `get_temp()`, `reboot()` | `INVOKE_DESC` / `INVOKE` |
+| subscribe | **Source** (stream) | the DATA console, a sniffer | `SOURCE_DESC` + the DATA channel |
+
+Controls and Inputs are CLOSED, finite primitive sets — the curated "tool" side. Invoke and
+Sources are OPEN, device-defined sets, self-described and rendered generically — the "platform"
+side. **Invoke returns data** (it's RPC), but its result is computed per-call, not a standing
+value with identity — *that*, not "returns data", is what separates it from a Control/Input/Source.
+The same reading can be modeled more than one way (a temperature as an Input, an `Invoke`, or a
+Source); the category encodes the *interaction contract*, not the data's nature. Rule of thumb: if
+you're tempted to add a Control type that encodes *behavior* rather than a *value-shape*, it's an
+Invoke (or host-side logic) instead — that keeps Controls from rotting into a scripting surface.
+
+## Sources — multiplexed DATA streams
+
+The DATA channel is not limited to one stream. A device self-describes its sources with
+`SOURCE_DESC` (`index → total, source_id, kind, flags, name` — iterate like `PIN_CAPS`); `kind`
+is a `SKRIT_DATA_*`, `flags` is `SKRIT_SRC_*` (toggleable / active).
+
+- **`total ≤ 1`** — every device today, and all dumb low-end MCUs: DATA is one **raw, unframed**
+  stream, so a plain terminal / COM passthrough still works. Nothing changes. A device may still
+  *describe* its single source (name/kind) without prefixing anything.
+- **`total > 1`** — sources are tagged on the wire **transport-natively**:
+  - **mux (USB) and byte-stream links (WebSocket, dual-CDC)**: each DATA record is length-framed
+    `[len(2 LE)][source_id(1)][payload]`, so a byte stream self-delimits and the host runs one
+    transport-agnostic demux.
+  - **BLE GATT**: one DATA characteristic **per source** — the characteristic *is* the source
+    (native subscribe + per-stream flow control); no `source_id` byte on that link.
+
+The model (`source_id` + `SOURCE_DESC`) is transport-agnostic; only the framing differs. A Source
+descriptor is read-only — turning a source on/off and any mode (e.g. a radio's PHY) are **Controls**
+(a toggle, a `SELECT`). The host binds widgets to sources by `source_id`, so e.g. a console viewer
+and a sniffer viewer render side by side from one device.
+
 ## I²C — the first typed DATA stream
 
 A device whose bridge supports I²C advertises it via `CFG_GET 0x14` and switches

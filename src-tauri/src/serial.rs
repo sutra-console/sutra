@@ -207,6 +207,15 @@ pub struct Shared {
     ble: Mutex<Option<crate::ble::BleLink>>,
     // Active WebSocket link, if connected over the network.
     ws: Mutex<Option<crate::ws::WsLink>>,
+    // DATA sources: >1 => each DATA record is length-framed [len][source_id][payload]
+    // (the reader demuxes by source). Set on muxed connect from SOURCE_DESC; 0 = a
+    // single legacy console stream.
+    n_sources: std::sync::atomic::AtomicU8,
+    // Cleared on connect; set true once connect_muxed's SOURCE_DESC handshake has
+    // run. The reader holds DATA frames until then, so frames arriving in the
+    // connect window aren't mis-pushed raw (a multi-source device's [len][sid]
+    // framing would otherwise land verbatim in the console as garbage).
+    sources_known: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Shared {
@@ -228,6 +237,8 @@ impl Default for Shared {
             resolve_lock: Mutex::new(()),
             ble: Mutex::new(None),
             ws: Mutex::new(None),
+            n_sources: std::sync::atomic::AtomicU8::new(0),
+            sources_known: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -241,6 +252,21 @@ impl Shared {
 
     pub(crate) fn push_console(&self, bytes: &[u8]) {
         self.console.lock().unwrap().push(bytes);
+    }
+
+    pub(crate) fn set_n_sources(&self, n: u8) {
+        self.n_sources.store(n, std::sync::atomic::Ordering::Relaxed);
+        self.sources_known.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub(crate) fn n_sources(&self) -> u8 {
+        self.n_sources.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub(crate) fn sources_known(&self) -> bool {
+        self.sources_known.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub(crate) fn reset_sources(&self) {
+        self.n_sources.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.sources_known.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Accessors so the BLE module can share the response matcher + cmd serialization.
@@ -666,6 +692,29 @@ pub fn probe_boards(shared: &Arc<Shared>) -> Vec<(String, String)> {
         .collect()
 }
 
+// Route one DATA-channel payload to the UI. A multi-source frame (n_sources>1)
+// is [len(2 LE)][source_id(1)][record]: console (source 0) feeds the console
+// buffer + a live event; every other source feeds the data viewer. A
+// single-source device is one raw console stream.
+fn demux_data(app: &AppHandle, shared: &Arc<Shared>, payload: Vec<u8>) {
+    if shared.n_sources() > 1 {
+        if payload.len() >= 3 {
+            let len = payload[0] as usize | ((payload[1] as usize) << 8);
+            let end = (3 + len).min(payload.len());
+            let rec = &payload[3..end];
+            if payload[2] == 0 {
+                shared.push_console(rec); // console backlog (for new tabs)
+                let _ = app.emit("sutra://console", rec.to_vec()); // live console tab
+            } else {
+                let _ = app.emit("sutra://data", rec.to_vec()); // sniffer tab(s)
+            }
+        }
+    } else {
+        shared.push_console(&payload);
+        let _ = app.emit("sutra://data", payload);
+    }
+}
+
 fn spawn_mux_reader(
     app: AppHandle,
     mut port: Box<dyn SerialPort>,
@@ -677,6 +726,10 @@ fn spawn_mux_reader(
         let mut reader = MuxReader::new();
         let mut buf = [0u8; 256];
         let mut online = true;
+        // DATA frames seen before connect_muxed's SOURCE_DESC handshake resolves
+        // the source layout: held here, then demuxed once known — so a
+        // multi-source device's [len][sid] framing never lands raw in the console.
+        let mut pending: Vec<Vec<u8>> = Vec::new();
         while !stop.load(Ordering::Relaxed) {
             match port.read(&mut buf) {
                 Ok(0) => {}
@@ -685,10 +738,20 @@ fn spawn_mux_reader(
                         online = true;
                         let _ = app.emit("sutra://link", true);
                     }
+                    // Layout now known: flush anything captured during the connect
+                    // window, demuxed with the correct framing.
+                    if shared.sources_known() && !pending.is_empty() {
+                        for p in pending.drain(..) {
+                            demux_data(&app, &shared, p);
+                        }
+                    }
                     for (ch, payload) in reader.push(&buf[..n]) {
                         if ch == crate::protocol::mux::DATA {
-                            shared.push_console(&payload);
-                            let _ = app.emit("sutra://data", payload);
+                            if shared.sources_known() {
+                                demux_data(&app, &shared, payload);
+                            } else if pending.len() < 2048 {
+                                pending.push(payload); // hold until the handshake resolves
+                            }
                         } else if let Ok(f) = Frame::from_raw(&payload) {
                             if is_event(f.typ) {
                                 let _ = app.emit("sutra://event", (f.typ, f.body));
@@ -773,6 +836,30 @@ pub fn connect_muxed(shared: &Arc<Shared>, app: AppHandle, name: &str) -> Result
         muxed: true,
         reader: Some(handle),
     });
+    // Learn the DATA source layout so the reader can demux multi-source DATA frames
+    // ([len][source_id][payload]). Retry on timeout: a device that's already
+    // streaming (a sniffer left capturing) can briefly bury this response, and
+    // falling back to the single raw console stream would dump framed records into
+    // the terminal as garbage. An explicit non-OK status = a genuine single-source
+    // device (no SOURCE_DESC support) and correctly stays n_sources = 0.
+    let mut learned: Option<u8> = None;
+    for _ in 0..5 {
+        match send_cmd(shared, crate::protocol::msg::SOURCE_DESC, vec![0]) {
+            Ok(r) if r.body.first() == Some(&0) => {
+                learned = Some(r.body.get(2).copied().unwrap_or(0)); // total
+                break;
+            }
+            Ok(_) => { learned = Some(0); break; } // explicit non-OK (UNSUPPORTED) => single source
+            Err(_) => continue,                    // timeout — retry
+        }
+    }
+    if let Some(n) = learned {
+        shared.set_n_sources(n);
+    }
+    // else: the layout never resolved (all retries timed out). Leave it UNKNOWN so
+    // the reader keeps HOLDING DATA frames rather than dumping raw [len][sid][payload]
+    // records into the console as garbage (a multi-source device misread as one
+    // raw stream). It self-heals on the next reconnect / a later successful query.
     let _ = app.emit("sutra://connected", ()); // sync the UI (esp. for MCP-initiated connects)
     Ok(())
 }
@@ -893,6 +980,7 @@ pub fn disconnect(shared: &Arc<Shared>) {
     crate::ble::disconnect(shared);
     crate::ws::disconnect(shared);
     *shared.mux_rx.lock().unwrap() = None;
+    shared.reset_sources(); // next connect re-learns the layout (reader holds DATA until then)
 }
 
 pub fn state(shared: &Arc<Shared>) -> ConnState {
@@ -2143,6 +2231,76 @@ mod hw_tests {
         Frame::new(msg::INFO, 1, vec![]).to_mux_wire().expect("encode INFO")
     }
     const HW_INFO_RESP: u8 = msg::INFO | crate::protocol::RESP_FLAG;
+
+    // One single-handle CMD round-trip over skrit-mux: write the framed request,
+    // read the matching-seq response (retried, like send_cmd_mux).
+    fn hw_cmd(
+        port: &mut Box<dyn SerialPort>,
+        reader: &mut MuxReader,
+        typ: u8,
+        seq: u8,
+        body: Vec<u8>,
+    ) -> Option<Frame> {
+        let wire = Frame::new(typ, seq, body).to_mux_wire().expect("encode");
+        let mut buf = [0u8; 256];
+        for _ in 0..6 {
+            let _ = port.write_all(&wire);
+            let _ = port.flush();
+            let dl = Instant::now() + Duration::from_millis(400);
+            while Instant::now() < dl {
+                if let Ok(n) = port.read(&mut buf) {
+                    for (ch, payload) in reader.push(&buf[..n]) {
+                        if ch == crate::protocol::mux::CMD {
+                            if let Ok(f) = Frame::from_raw(&payload) {
+                                if f.seq == seq && f.is_response() {
+                                    return Some(f);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // The connect_muxed handshake against the real board: SOURCE_DESC must report
+    // total=2 (Console + Radio) at body[2] — the exact byte connect_muxed reads
+    // into n_sources. This is what makes the reader demux multi-source DATA instead
+    // of dumping raw [len][sid] records into the console. (Run with the multi-sniffer
+    // flashed and COM6 free; set DUTA_PORT to override the port.)
+    #[test]
+    #[ignore]
+    fn hw_source_desc_reports_two_sources() {
+        let params = SerialParams::default();
+        let mut port = open_retry(|| open_data(&hw_port(), &params)).expect("open");
+        let _ = port.write_data_terminal_ready(true);
+        std::thread::sleep(Duration::from_millis(400));
+        let mut reader = MuxReader::new();
+
+        let r = hw_cmd(&mut port, &mut reader, msg::SOURCE_DESC, 1, vec![0])
+            .expect("SOURCE_DESC(0) response");
+        eprintln!("SOURCE_DESC(0) body = {:02x?}", r.body);
+        assert_eq!(r.body.first(), Some(&0), "status should be OK");
+        assert_eq!(
+            r.body.get(2).copied(),
+            Some(2),
+            "device should report 2 DATA sources (connect_muxed reads body[2] into n_sources)"
+        );
+
+        let s0 = hw_cmd(&mut port, &mut reader, msg::SOURCE_DESC, 2, vec![0]).expect("src0");
+        let s1 = hw_cmd(&mut port, &mut reader, msg::SOURCE_DESC, 3, vec![1]).expect("src1");
+        let name0 = String::from_utf8_lossy(s0.body.get(6..).unwrap_or(&[])).to_string();
+        let name1 = String::from_utf8_lossy(s1.body.get(6..).unwrap_or(&[])).to_string();
+        eprintln!("source0 sid={:?} name={name0:?}", s0.body.get(3));
+        eprintln!("source1 sid={:?} name={name1:?}", s1.body.get(3));
+        assert_eq!(s0.body.get(3).copied(), Some(0), "source 0 sid");
+        assert_eq!(name0, "Console", "source 0 name");
+        assert_eq!(s1.body.get(3).copied(), Some(1), "source 1 sid");
+        assert_eq!(name1, "Radio", "source 1 name");
+
+        let _ = port.write_data_terminal_ready(false);
+    }
 
     #[test]
     #[ignore]
