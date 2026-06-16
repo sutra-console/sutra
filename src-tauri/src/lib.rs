@@ -38,28 +38,44 @@ struct McpStatus {
     url: Option<String>,
 }
 
+// NOTE: every command that opens / probes a serial port (or scans a radio) is an
+// `async fn` that offloads the blocking work via `spawn_blocking`. Synchronous
+// Tauri commands run on the MAIN (UI) thread, so a slow Windows COM `open()` — a
+// contended port stalls multiple seconds on the OS serial semaphore — would
+// freeze the whole app. spawn_blocking keeps that off the UI thread.
 #[tauri::command]
-fn list_ports() -> Vec<PortDesc> {
-    serial::list_ports()
+async fn list_ports() -> Vec<PortDesc> {
+    tauri::async_runtime::spawn_blocking(serial::list_ports)
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-fn autodetect() -> Result<DetectResult, String> {
-    serial::autodetect().map(|(data, cmd)| DetectResult { data, cmd })
+async fn autodetect() -> Result<DetectResult, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        serial::autodetect().map(|(data, cmd)| DetectResult { data, cmd })
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
 }
 
 /// Find a single-port muxed Duta: probe every candidate port (ESP32 / Pico /
 /// nRF vendor ids) with a skrit-mux PING and return the first that answers.
 #[tauri::command]
-fn autodetect_mux() -> Result<String, String> {
-    serial::autodetect_mux()
+async fn autodetect_mux() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(serial::autodetect_mux)
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
 }
 
 /// Probe Duta-candidate ports for their board name (skips the connected port) so
 /// the ports list can show e.g. "COM5 · Duta S3-Zero". Returns (port, name) pairs.
 #[tauri::command]
-fn probe_boards(state: tauri::State<AppState>) -> Vec<(String, String)> {
-    serial::probe_boards(&state.shared)
+async fn probe_boards(state: tauri::State<'_, AppState>) -> Result<Vec<(String, String)>, String> {
+    let shared = state.shared.clone();
+    Ok(tauri::async_runtime::spawn_blocking(move || serial::probe_boards(&shared))
+        .await
+        .unwrap_or_default())
 }
 
 /// Local board-def JSON files (<app_data>/boards/) that extend/override the
@@ -70,62 +86,89 @@ fn list_boards(app: tauri::AppHandle) -> Vec<serde_json::Value> {
 }
 
 #[tauri::command]
-fn connect(
+async fn connect(
     app: tauri::AppHandle,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     data_port: String,
     cmd_port: Option<String>,
 ) -> Result<(), String> {
-    serial::connect(&state.shared, app, &data_port, cmd_port.as_deref())
+    let shared = state.shared.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        serial::connect(&shared, app, &data_port, cmd_port.as_deref())
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
 }
 
 /// Connect a single-port muxed Duta (ESP32 / Pico / nRF52840): DATA + CMD share
 /// one stream via skrit-mux.
 #[tauri::command]
-fn connect_muxed(
+async fn connect_muxed(
     app: tauri::AppHandle,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     port: String,
 ) -> Result<(), String> {
-    serial::connect_muxed(&state.shared, app, &port)
+    let shared = state.shared.clone();
+    tauri::async_runtime::spawn_blocking(move || serial::connect_muxed(&shared, app, &port))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
 }
 
+// Async because disconnect() join()s the reader thread, which can take up to the
+// reader's read timeout (and a CDC port can lag releasing) — off the UI thread.
 #[tauri::command]
-fn disconnect(state: tauri::State<AppState>) {
-    serial::disconnect(&state.shared);
+async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let shared = state.shared.clone();
+    tauri::async_runtime::spawn_blocking(move || serial::disconnect(&shared))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))
 }
 
-/// Scan for Duta peripherals over Bluetooth LE (blocks ~3s).
+/// Scan for Duta peripherals over Bluetooth LE (blocks ~3s — off the UI thread).
 #[tauri::command]
-fn ble_scan() -> Result<Vec<ble::BleDevice>, String> {
-    tauri::async_runtime::block_on(ble::scan(3))
+async fn ble_scan() -> Result<Vec<ble::BleDevice>, String> {
+    tauri::async_runtime::spawn_blocking(|| tauri::async_runtime::block_on(ble::scan(3)))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
 }
 
 /// Connect a Duta over BLE by scanned device id (dual skrit GATT services: DATA + CMD).
 #[tauri::command]
-fn ble_connect(
+async fn ble_connect(
     app: tauri::AppHandle,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<String, String> {
-    tauri::async_runtime::block_on(ble::connect(state.shared.clone(), app, id))
+    let shared = state.shared.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(ble::connect(shared, app, id))
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
 }
 
 /// Browse the LAN for Dutas advertising _skrit._tcp (mDNS); blocks ~timeout_ms.
 #[tauri::command]
-fn ws_discover(timeout_ms: Option<u64>) -> Result<Vec<ws::DiscoveredDuta>, String> {
-    ws::discover(timeout_ms.unwrap_or(2500))
+async fn ws_discover(timeout_ms: Option<u64>) -> Result<Vec<ws::DiscoveredDuta>, String> {
+    tauri::async_runtime::spawn_blocking(move || ws::discover(timeout_ms.unwrap_or(2500)))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
 }
 
 /// Connect a Duta over the network (WebSocket), authenticating with `password`.
 #[tauri::command]
-fn ws_connect(
+async fn ws_connect(
     app: tauri::AppHandle,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     url: String,
     password: String,
 ) -> Result<ws::WsConnectResult, String> {
-    tauri::async_runtime::block_on(ws::connect(state.shared.clone(), app, url, password))
+    let shared = state.shared.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(ws::connect(shared, app, url, password))
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -135,17 +178,26 @@ fn conn_state(state: tauri::State<AppState>) -> ConnState {
 
 /// Apply DATA serial params (baud/parity/stop/databits); reconnects the DATA port.
 #[tauri::command]
-fn set_data_params(
+async fn set_data_params(
     app: tauri::AppHandle,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     params: SerialParams,
 ) -> Result<(), String> {
-    serial::set_params(&state.shared, app, params)
+    let shared = state.shared.clone();
+    tauri::async_runtime::spawn_blocking(move || serial::set_params(&shared, app, params))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
 }
 
 #[tauri::command]
-fn reconnect_data(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
-    serial::reconnect_data(&state.shared, app)
+async fn reconnect_data(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let shared = state.shared.clone();
+    tauri::async_runtime::spawn_blocking(move || serial::reconnect_data(&shared, app))
+        .await
+        .map_err(|e| format!("background task failed: {e}"))?
 }
 
 #[tauri::command]

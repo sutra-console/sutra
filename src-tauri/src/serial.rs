@@ -18,15 +18,18 @@ use crate::protocol::{is_event, msg, mux_wrap, Frame, FrameReader, MuxReader};
 
 pub const DUTA_VID: u16 = 0x1209; // pid.codes: CH552 dual-CDC (+ the Zephyr nRF builds)
 pub const DUTA_PID: u16 = 0xC550; // the CH552 dual-CDC product id
-// VIDs the single-port muxed boards enumerate as. These mark a port as a Duta
-// *candidate* — autodetect confirms with a skrit-mux PING before claiming it.
+                                  // VIDs the single-port muxed boards enumerate as. These mark a port as a Duta
+                                  // *candidate* — autodetect confirms with a skrit-mux PING before claiming it.
 const VID_ESPRESSIF: u16 = 0x303A; // ESP32-S3/C3 native USB-Serial/JTAG
 const VID_RASPBERRY_PI: u16 = 0x2E8A; // RP2040/RP2350 (arduino-pico)
 
 /// Could this port be a Duta? Exact ids plus the vendor ids our muxed boards
 /// use; a candidate is only *claimed* after it answers a skrit-mux PING.
 fn duta_candidate(vid: Option<u16>) -> bool {
-    matches!(vid, Some(DUTA_VID) | Some(VID_ESPRESSIF) | Some(VID_RASPBERRY_PI))
+    matches!(
+        vid,
+        Some(DUTA_VID) | Some(VID_ESPRESSIF) | Some(VID_RASPBERRY_PI)
+    )
 }
 const CONSOLE_CAP: usize = 64 * 1024; // rolling DATA-console buffer for the UI/MCP
 
@@ -51,7 +54,12 @@ pub struct RespFrame {
 
 impl From<Frame> for RespFrame {
     fn from(f: Frame) -> Self {
-        RespFrame { status: f.status(), typ: f.typ, seq: f.seq, body: f.body }
+        RespFrame {
+            status: f.status(),
+            typ: f.typ,
+            seq: f.seq,
+            body: f.body,
+        }
     }
 }
 
@@ -65,7 +73,12 @@ pub struct SerialParams {
 
 impl Default for SerialParams {
     fn default() -> Self {
-        SerialParams { baud: 115_200, data_bits: 8, parity: "none".into(), stop_bits: 1 }
+        SerialParams {
+            baud: 115_200,
+            data_bits: 8,
+            parity: "none".into(),
+            stop_bits: 1,
+        }
     }
 }
 
@@ -161,7 +174,11 @@ impl ConsoleBuf {
     /// Bytes received since `seq`, plus the new total.
     fn since(&self, seq: u64) -> (Vec<u8>, u64) {
         let oldest = self.total - self.buf.len() as u64;
-        let start = if seq < oldest { 0 } else { (seq - oldest) as usize };
+        let start = if seq < oldest {
+            0
+        } else {
+            (seq - oldest) as usize
+        };
         (self.buf.iter().skip(start).copied().collect(), self.total)
     }
 }
@@ -251,15 +268,67 @@ pub fn list_ports() -> Vec<PortDesc> {
         .into_iter()
         .map(|p| {
             let (vid, pid, product, manufacturer, serial_number) = match p.port_type {
-                SerialPortType::UsbPort(u) => {
-                    (Some(u.vid), Some(u.pid), u.product, u.manufacturer, u.serial_number)
-                }
+                SerialPortType::UsbPort(u) => (
+                    Some(u.vid),
+                    Some(u.pid),
+                    u.product,
+                    u.manufacturer,
+                    u.serial_number,
+                ),
                 _ => (None, None, None, None, None),
             };
             let is_duta = duta_candidate(vid);
-            PortDesc { name: p.port_name, vid, pid, product, manufacturer, serial_number, is_duta }
+            PortDesc {
+                name: p.port_name,
+                vid,
+                pid,
+                product,
+                manufacturer,
+                serial_number,
+                is_duta,
+            }
         })
         .collect()
+}
+
+/// Serializes port-touching operations across the whole process. Since the Tauri
+/// commands now run on the blocking pool (not the single UI thread), a background
+/// board-name probe and a user connect — or two probes — can otherwise open the
+/// same port at the same instant and one gets "Access is denied". Every probe and
+/// connect takes this gate around its open, so they queue instead of colliding.
+/// NOT taken by the reader thread's reconnect (which runs while a connect holds
+/// the gate — that would deadlock); the names are cleared first so it won't loop.
+static IO_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Retry an open on *transient* Windows contention — "Access is denied." / "The
+/// semaphore timeout period has expired." These fire when a prior handle to the
+/// same port hasn't been released by the OS yet: our own just-closed reader, or a
+/// concurrent board-name probe (opens run on the blocking pool now, so a probe
+/// and a connect can momentarily race). Bounded to ~1.2s; other errors (port
+/// missing, bad params) fail fast. Used ONLY on the user-initiated connect path —
+/// the background reader's reconnect loop has its own stop-aware nap, and keeping
+/// its open single-shot keeps `disconnect`'s join() snappy.
+fn open_retry<F>(mut open: F) -> Result<Box<dyn SerialPort>, String>
+where
+    F: FnMut() -> Result<Box<dyn SerialPort>, String>,
+{
+    let mut last = String::new();
+    for attempt in 0..8 {
+        match open() {
+            Ok(p) => return Ok(p),
+            Err(e) => {
+                let m = e.to_ascii_lowercase();
+                if !(m.contains("denied") || m.contains("semaphore") || m.contains("access")) {
+                    return Err(e);
+                }
+                last = e;
+                if attempt < 7 {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+        }
+    }
+    Err(last)
 }
 
 fn open_cmd(name: &str, timeout_ms: u64) -> Result<Box<dyn SerialPort>, String> {
@@ -281,7 +350,11 @@ fn open_data(name: &str, p: &SerialParams) -> Result<Box<dyn SerialPort>, String
         "even" => Parity::Even,
         _ => Parity::None,
     };
-    let stop_bits = if p.stop_bits == 2 { StopBits::Two } else { StopBits::One };
+    let stop_bits = if p.stop_bits == 2 {
+        StopBits::Two
+    } else {
+        StopBits::One
+    };
     serialport::new(name, p.baud)
         .data_bits(data_bits)
         .parity(parity)
@@ -311,6 +384,7 @@ fn read_response(port: &mut Box<dyn SerialPort>, timeout_ms: u64) -> Result<Fram
 }
 
 pub fn probe_is_cmd(name: &str) -> bool {
+    let _gate = IO_GATE.lock().unwrap(); // serialize vs a concurrent connect/probe
     let mut port = match open_cmd(name, 250) {
         Ok(p) => p,
         Err(_) => return false,
@@ -349,8 +423,11 @@ pub fn autodetect() -> Result<(String, String), String> {
 
 /// Probe every Duta-candidate port with a skrit-mux PING; first to answer wins.
 pub fn autodetect_mux() -> Result<String, String> {
-    let cands: Vec<String> =
-        list_ports().into_iter().filter(|p| p.is_duta).map(|p| p.name).collect();
+    let cands: Vec<String> = list_ports()
+        .into_iter()
+        .filter(|p| p.is_duta)
+        .map(|p| p.name)
+        .collect();
     if cands.is_empty() {
         return Err("no Duta-capable ports found".into());
     }
@@ -359,7 +436,10 @@ pub fn autodetect_mux() -> Result<String, String> {
             return Ok(name.clone());
         }
     }
-    Err(format!("no candidate port answered skrit-mux (probed {})", cands.join(", ")))
+    Err(format!(
+        "no candidate port answered skrit-mux (probed {})",
+        cands.join(", ")
+    ))
 }
 
 // ---- connection ------------------------------------------------------------
@@ -436,14 +516,18 @@ pub fn connect(
     cmd_name: Option<&str>,
 ) -> Result<(), String> {
     disconnect(shared);
+    // Hold the gate through open + registration so a concurrent board-probe can't
+    // grab the port mid-connect (it's released when this returns; the reader then
+    // owns the OS handle and probe_boards skips the now-busy port).
+    let _gate = IO_GATE.lock().unwrap();
     let params = shared.params.lock().unwrap().clone();
 
-    let mut data = open_data(data_name, &params)?;
+    let mut data = open_retry(|| open_data(data_name, &params))?;
     let _ = data.write_data_terminal_ready(true);
 
     let cmd = match cmd_name {
         Some(n) => {
-            let mut c = open_cmd(n, 500)?;
+            let mut c = open_retry(|| open_cmd(n, 500))?;
             // firmware gates CMD replies on DTR
             let _ = c.write_data_terminal_ready(true);
             let _ = c.write_request_to_send(true);
@@ -459,8 +543,13 @@ pub fn connect(
     *shared.mux_rx.lock().unwrap() = None;
     *shared.data_name.lock().unwrap() = Some(data_name.to_string());
     *shared.cmd_name.lock().unwrap() = cmd_name.map(|s| s.to_string());
-    *shared.conn.lock().unwrap() =
-        Some(Connection { cmd, data_writer: data, stop, muxed: false, reader: Some(handle) });
+    *shared.conn.lock().unwrap() = Some(Connection {
+        cmd,
+        data_writer: data,
+        stop,
+        muxed: false,
+        reader: Some(handle),
+    });
     let _ = app.emit("sutra://connected", ()); // sync the UI (esp. for MCP-initiated connects)
     Ok(())
 }
@@ -497,25 +586,84 @@ fn read_mux_response(port: &mut Box<dyn SerialPort>, timeout_ms: u64) -> Option<
 /// True if `name` answers a skrit-mux PING with a PONG, i.e. it's a single-port
 /// (ESP32 / Pico / nRF) Duta rather than a dual-CDC one or a plain console.
 pub fn probe_is_mux(name: &str) -> bool {
+    let _gate = IO_GATE.lock().unwrap(); // serialize vs a concurrent connect/probe
     let params = SerialParams::default();
     let mut port = match open_data(name, &params) {
         Ok(p) => p,
         Err(_) => return false,
     };
     let _ = port.write_data_terminal_ready(true);
+    // Settle after asserting DTR: a device_next CDC ACM (nRF) only brings its OUT
+    // endpoint live a beat after the host's line-state change lands. Until then a
+    // host->device write is dropped or errors, so retry several times WITHOUT
+    // bailing on a write error (an early write failure is expected, not fatal).
+    std::thread::sleep(Duration::from_millis(150));
     let wire = match Frame::new(msg::PING, 0xA6, vec![]).to_mux_wire() {
         Ok(w) => w,
         Err(_) => return false,
     };
-    if port.write_all(&wire).is_err() {
-        return false;
+    let mut ok = false;
+    for _ in 0..6 {
+        if port.write_all(&wire).is_ok() {
+            let _ = port.flush();
+            if matches!(read_mux_response(&mut port, 250),
+                        Some(f) if f.typ == (msg::PING | crate::protocol::RESP_FLAG)) {
+                ok = true;
+                break;
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(120)); // OUT endpoint not live yet — back off
+        }
     }
-    let _ = port.flush();
-    let ok = matches!(read_mux_response(&mut port, 400),
-             Some(f) if f.typ == (msg::PING | crate::protocol::RESP_FLAG));
     // park the lines so the close can't form the ESP32 USJ reset pattern
     let _ = port.write_data_terminal_ready(false);
     ok
+}
+
+/// Probe a muxed Duta candidate for its self-described device name (BOARD_NAME),
+/// so the ports list can label it. Opens the port, asks DEVICE_NAME over skrit-
+/// mux, returns the string. Parks DTR on close (USJ reset-pattern safety).
+pub fn probe_board_name(name: &str) -> Option<String> {
+    let _gate = IO_GATE.lock().unwrap(); // serialize vs a concurrent connect/probe
+    let params = SerialParams::default();
+    let mut port = open_data(name, &params).ok()?;
+    let _ = port.write_data_terminal_ready(true);
+    let wire = Frame::new(msg::DEVICE_NAME, 0xA7, vec![])
+        .to_mux_wire()
+        .ok()?;
+    let got = if port.write_all(&wire).is_ok() {
+        let _ = port.flush();
+        read_mux_response(&mut port, 400)
+    } else {
+        None
+    };
+    let _ = port.write_data_terminal_ready(false);
+    let f = got?;
+    if f.typ != (msg::DEVICE_NAME | crate::protocol::RESP_FLAG) {
+        return None;
+    }
+    // response body is [status, name…]; the name is the rest
+    let s = String::from_utf8_lossy(f.body.get(1..).unwrap_or_default())
+        .trim()
+        .to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// Probe every Duta-candidate port (except the one we're connected to) for its
+/// board name. Used to label the ports list; sequential + best-effort.
+pub fn probe_boards(shared: &Arc<Shared>) -> Vec<(String, String)> {
+    let busy: std::collections::HashSet<String> = [
+        shared.data_name.lock().unwrap().clone(),
+        shared.cmd_name.lock().unwrap().clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    list_ports()
+        .into_iter()
+        .filter(|p| p.is_duta && !busy.contains(&p.name))
+        .filter_map(|p| probe_board_name(&p.name).map(|n| (p.name, n)))
+        .collect()
 }
 
 fn spawn_mux_reader(
@@ -594,12 +742,21 @@ fn spawn_mux_reader(
 /// one stream via skrit-mux. The reader demuxes; `send_cmd` works as on dual.
 pub fn connect_muxed(shared: &Arc<Shared>, app: AppHandle, name: &str) -> Result<(), String> {
     disconnect(shared);
+    // Hold the gate through open + registration so a concurrent board-probe can't
+    // grab the port mid-connect (released on return; the reader then owns the OS
+    // handle and probe_boards skips the now-busy port).
+    let _gate = IO_GATE.lock().unwrap();
     let params = shared.params.lock().unwrap().clone();
-    let mut port = open_data(name, &params)?;
+    let mut port = open_retry(|| open_data(name, &params))?;
     // DTR only — NEVER raise RTS on a muxed board: the ESP32 USB-Serial/JTAG
     // turns DTR/RTS edge patterns into chip reset / download-mode entry
     // (rst:0x15), bricking the session until a reflash. Hardware-verified.
     let _ = port.write_data_terminal_ready(true);
+    // Let the line-state change land before the first CMD (INFO): a device_next
+    // CDC ACM (nRF) brings its OUT endpoint live only a beat after DTR is
+    // processed, so an immediately-sent command is dropped and the device looks
+    // mute (empty controls). Wait it out.
+    std::thread::sleep(Duration::from_millis(400));
 
     let reader = port.try_clone().map_err(|e| format!("clone port: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -609,8 +766,13 @@ pub fn connect_muxed(shared: &Arc<Shared>, app: AppHandle, name: &str) -> Result
     *shared.mux_rx.lock().unwrap() = Some(rx);
     *shared.data_name.lock().unwrap() = Some(name.to_string());
     *shared.cmd_name.lock().unwrap() = Some(name.to_string());
-    *shared.conn.lock().unwrap() =
-        Some(Connection { cmd: None, data_writer: port, stop, muxed: true, reader: Some(handle) });
+    *shared.conn.lock().unwrap() = Some(Connection {
+        cmd: None,
+        data_writer: port,
+        stop,
+        muxed: true,
+        reader: Some(handle),
+    });
     let _ = app.emit("sutra://connected", ()); // sync the UI (esp. for MCP-initiated connects)
     Ok(())
 }
@@ -633,7 +795,12 @@ pub fn autodetect_any() -> Result<Detected, String> {
 /// MCP/auto connect: detect a Duta (dual or muxed) and connect it. Returns a
 /// short human description of what it connected.
 pub fn mcp_connect_auto(shared: &Arc<Shared>) -> Result<String, String> {
-    let app = shared.app.lock().unwrap().clone().ok_or("app handle not ready")?;
+    let app = shared
+        .app
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("app handle not ready")?;
     match autodetect_any()? {
         Detected::Dual { data, cmd } => {
             connect(shared, app, &data, Some(&cmd))?;
@@ -648,7 +815,12 @@ pub fn mcp_connect_auto(shared: &Arc<Shared>) -> Result<String, String> {
 
 /// Re-open just the DATA port with the current serial params (keeps CMD).
 pub fn reconnect_data(shared: &Arc<Shared>, app: AppHandle) -> Result<(), String> {
-    let data_name = shared.data_name.lock().unwrap().clone().ok_or("not connected")?;
+    let data_name = shared
+        .data_name
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("not connected")?;
     let params = shared.params.lock().unwrap().clone();
     // Stop + join the old reader BEFORE reopening: its cloned handle keeps the
     // port busy and the fresh open would fail.
@@ -676,7 +848,11 @@ pub fn reconnect_data(shared: &Arc<Shared>, app: AppHandle) -> Result<(), String
     Ok(())
 }
 
-pub fn set_params(shared: &Arc<Shared>, app: AppHandle, params: SerialParams) -> Result<(), String> {
+pub fn set_params(
+    shared: &Arc<Shared>,
+    app: AppHandle,
+    params: SerialParams,
+) -> Result<(), String> {
     *shared.params.lock().unwrap() = params;
     if shared.conn.lock().unwrap().is_some() {
         reconnect_data(shared, app)?;
@@ -741,8 +917,12 @@ pub fn state(shared: &Arc<Shared>) -> ConnState {
         };
     }
     // A muxed link has the CMD channel too (INFO/relays available over the mux).
-    let has_cmd =
-        shared.conn.lock().unwrap().as_ref().is_some_and(|c| c.cmd.is_some() || c.muxed);
+    let has_cmd = shared
+        .conn
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|c| c.cmd.is_some() || c.muxed);
     ConnState {
         connected: shared.conn.lock().unwrap().is_some(),
         data_port: shared.data_name.lock().unwrap().clone(),
@@ -771,13 +951,27 @@ pub fn set_mcp_tools(shared: &Arc<Shared>, flags: McpToolFlags) {
 
 /// connect/set_params variants the MCP server can call: they pull the AppHandle
 /// stashed in Shared (set during app setup) so the reader thread can be spawned.
-pub fn mcp_connect(shared: &Arc<Shared>, data_name: &str, cmd_name: Option<&str>) -> Result<(), String> {
-    let app = shared.app.lock().unwrap().clone().ok_or("app handle not ready")?;
+pub fn mcp_connect(
+    shared: &Arc<Shared>,
+    data_name: &str,
+    cmd_name: Option<&str>,
+) -> Result<(), String> {
+    let app = shared
+        .app
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("app handle not ready")?;
     connect(shared, app, data_name, cmd_name)
 }
 
 pub fn mcp_set_params(shared: &Arc<Shared>, params: SerialParams) -> Result<(), String> {
-    let app = shared.app.lock().unwrap().clone().ok_or("app handle not ready")?;
+    let app = shared
+        .app
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("app handle not ready")?;
     set_params(shared, app, params)
 }
 
@@ -796,7 +990,9 @@ pub fn data_write(shared: &Arc<Shared>, bytes: &[u8]) -> Result<(), String> {
             .write_all(&mux_wrap(crate::protocol::mux::DATA, bytes))
             .map_err(|e| format!("data write: {e}"))?;
     } else {
-        conn.data_writer.write_all(bytes).map_err(|e| format!("data write: {e}"))?;
+        conn.data_writer
+            .write_all(bytes)
+            .map_err(|e| format!("data write: {e}"))?;
     }
     conn.data_writer.flush().ok();
     drop(guard);
@@ -817,18 +1013,26 @@ pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFram
         return crate::ble::send_cmd(shared, typ, body);
     }
     let seq = shared.next_seq();
-    let muxed = shared.conn.lock().unwrap().as_ref().is_some_and(|c| c.muxed);
+    let muxed = shared
+        .conn
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|c| c.muxed);
     if muxed {
         return send_cmd_mux(shared, typ, seq, body);
     }
-    let wire = Frame::new(typ, seq, body).to_wire().map_err(|e| format!("encode: {e:?}"))?;
+    let wire = Frame::new(typ, seq, body)
+        .to_wire()
+        .map_err(|e| format!("encode: {e:?}"))?;
     let mut guard = shared.conn.lock().unwrap();
     let conn = guard.as_mut().ok_or("not connected")?;
     let cmd = conn
         .cmd
         .as_mut()
         .ok_or("no command port: connect a Duta for relay/LED/INFO")?;
-    cmd.write_all(&wire).map_err(|e| format!("cmd write: {e}"))?;
+    cmd.write_all(&wire)
+        .map_err(|e| format!("cmd write: {e}"))?;
     cmd.flush().ok();
     let resp = read_response(cmd, 1000)?;
     Ok(resp.into())
@@ -837,30 +1041,50 @@ pub fn send_cmd(shared: &Arc<Shared>, typ: u8, body: Vec<u8>) -> Result<RespFram
 /// Send a CMD on a muxed link: write the wrapped frame, then wait for the
 /// reader thread to deliver the matching-seq response. `cmd_lock` serializes the
 /// whole round-trip so concurrent callers don't steal each other's replies.
-fn send_cmd_mux(shared: &Arc<Shared>, typ: u8, seq: u8, body: Vec<u8>) -> Result<RespFrame, String> {
+fn send_cmd_mux(
+    shared: &Arc<Shared>,
+    typ: u8,
+    seq: u8,
+    body: Vec<u8>,
+) -> Result<RespFrame, String> {
     let _lock = shared.cmd_lock.lock().unwrap();
-    let wire = Frame::new(typ, seq, body).to_mux_wire().map_err(|e| format!("encode: {e:?}"))?;
+    let wire = Frame::new(typ, seq, body)
+        .to_mux_wire()
+        .map_err(|e| format!("encode: {e:?}"))?;
     // Hold the receiver for the whole round-trip; drain any stale frame BEFORE we
     // write, so a fast reader can't have its real response discarded afterwards.
     let rx_guard = shared.mux_rx.lock().unwrap();
     let rx = rx_guard.as_ref().ok_or("not connected")?;
     while rx.try_recv().is_ok() {}
-    {
-        let mut guard = shared.conn.lock().unwrap();
-        let conn = guard.as_mut().ok_or("not connected")?;
-        conn.data_writer.write_all(&wire).map_err(|e| format!("cmd write: {e}"))?;
-        conn.data_writer.flush().ok();
-    }
-    let deadline = Instant::now() + Duration::from_millis(1000);
+    // Re-write within the budget until a matching response arrives. The nRF
+    // device_next CDC ACM silently DROPS the first host->device write(s) while its
+    // OUT endpoint comes live after connect — a single write then vanishes and the
+    // command times out (this was the "connects but no controls" bug). All retries
+    // carry the same SEQ, so any matching-seq response is valid and a late
+    // duplicate is harmless (drained as stale by the next send_cmd). Hardware A/B
+    // tested: a single write fails, a retried write gets the INFO response.
+    let overall = Instant::now() + Duration::from_millis(1500);
+    let mut next_write = Instant::now(); // write now, then re-write every 300ms
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        let now = Instant::now();
+        if now >= overall {
             return Err("timeout waiting for CMD response".into());
         }
-        match rx.recv_timeout(remaining) {
+        if now >= next_write {
+            let mut guard = shared.conn.lock().unwrap();
+            let conn = guard.as_mut().ok_or("not connected")?;
+            conn.data_writer
+                .write_all(&wire)
+                .map_err(|e| format!("cmd write: {e}"))?;
+            conn.data_writer.flush().ok();
+            drop(guard);
+            next_write = now + Duration::from_millis(300);
+        }
+        let wait = next_write.min(overall).saturating_duration_since(Instant::now());
+        match rx.recv_timeout(wait) {
             Ok(f) if f.seq == seq && f.is_response() => return Ok(f.into()),
-            Ok(_) => continue, // a response to some other request; keep waiting
-            Err(_) => return Err("timeout waiting for CMD response".into()),
+            Ok(_) => continue,        // response to some other request; keep waiting
+            Err(_) => continue,       // sub-window elapsed; the loop re-writes
         }
     }
 }
@@ -919,7 +1143,10 @@ pub fn reload_macros(shared: &Arc<Shared>) {
     if let (Some(app), Some(path)) = (app.as_ref(), path.as_ref()) {
         if let Some(dir) = path.parent() {
             match crate::vault::read_secret(app, dir, "macros.json") {
-                Some(data) => *shared.macros.lock().unwrap() = serde_json::from_slice(&data).unwrap_or_default(),
+                Some(data) => {
+                    *shared.macros.lock().unwrap() =
+                        serde_json::from_slice(&data).unwrap_or_default()
+                }
                 None => shared.macros.lock().unwrap().clear(),
             }
         }
@@ -971,15 +1198,16 @@ pub fn secret_literals(shared: &Arc<Shared>) -> Vec<String> {
             let literal: Option<String> = match kw.as_str() {
                 "STRING" | "STRINGLN" => Some(rest.to_string()),
                 // command-only lines carry no typed secret
-                "REM" | "#" | "ENTER" | "CR" | "LF" | "CRLF" | "TAB" | "ESC" | "SPACE" | "DELAY"
-                | "WAIT" | "CTRL" | "CONTROL" | "HEX" | "REPEAT" | "TIMEOUT" | "WAITFOR"
-                | "EXPECT" | "RUN" | "SMARTWAIT" | "DO" | "WAITOK" | "IF" | "ELSE" | "END"
-                | "ENDIF" | "FI" => None,
+                "REM" | "#" | "ENTER" | "CR" | "LF" | "CRLF" | "TAB" | "ESC" | "SPACE"
+                | "DELAY" | "WAIT" | "CTRL" | "CONTROL" | "HEX" | "REPEAT" | "TIMEOUT"
+                | "WAITFOR" | "EXPECT" | "RUN" | "SMARTWAIT" | "DO" | "WAITOK" | "IF" | "ELSE"
+                | "END" | "ENDIF" | "FI" => None,
                 _ => Some(line.trim().to_string()), // bare line
             };
             if let Some(lit) = literal {
-                let processed =
-                    String::from_utf8_lossy(&process_escapes(&lit)).trim().to_string();
+                let processed = String::from_utf8_lossy(&process_escapes(&lit))
+                    .trim()
+                    .to_string();
                 if processed.len() >= 3 {
                     out.push(processed);
                 }
@@ -998,7 +1226,10 @@ pub fn macro_metas(shared: &Arc<Shared>) -> Vec<MacroMeta> {
         .lock()
         .unwrap()
         .iter()
-        .map(|s| MacroMeta { name: s.name.clone(), secret: s.secret })
+        .map(|s| MacroMeta {
+            name: s.name.clone(),
+            secret: s.secret,
+        })
         .collect()
 }
 
@@ -1090,10 +1321,10 @@ enum Step {
     If(bool), // true = IF OK, false = IF FAIL
     Else,
     End,
-    Call(String),         // $Name: run another macro inline
-    SetOut(String, u16),       // SET <name|index> <0|1|duty>: 0/1 = digital, 2..1023 = PWM duty
+    Call(String),               // $Name: run another macro inline
+    SetOut(String, u16),        // SET <name|index> <0|1|duty>: 0/1 = digital, 2..1023 = PWM duty
     SetRgb(String, u8, u8, u8), // RGB <name|index> <#RRGGBB>: fill an addressable output
-    WaitIo(String, Cmp, i64), // WAITIO <name> <op> <value>: wait on an input
+    WaitIo(String, Cmp, i64),   // WAITIO <name> <op> <value>: wait on an input
 }
 
 #[derive(Clone, Copy)]
@@ -1178,7 +1409,14 @@ fn parse_command(kw: &str, rest: &str) -> Option<Vec<Step>> {
         "TAB" => bytes(vec![b'\t']),
         "ESC" | "ESCAPE" => bytes(vec![0x1b]),
         "SPACE" => bytes(vec![b' ']),
-        "DELAY" | "WAIT" => Some(rest.trim().parse::<u64>().ok().map(Step::Delay).into_iter().collect()),
+        "DELAY" | "WAIT" => Some(
+            rest.trim()
+                .parse::<u64>()
+                .ok()
+                .map(Step::Delay)
+                .into_iter()
+                .collect(),
+        ),
         "CTRL" | "CONTROL" => Some(
             rest.trim()
                 .chars()
@@ -1187,7 +1425,11 @@ fn parse_command(kw: &str, rest: &str) -> Option<Vec<Step>> {
                 .into_iter()
                 .collect(),
         ),
-        "HEX" => bytes(rest.split_whitespace().filter_map(|h| u8::from_str_radix(h, 16).ok()).collect()),
+        "HEX" => bytes(
+            rest.split_whitespace()
+                .filter_map(|h| u8::from_str_radix(h, 16).ok())
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -1311,7 +1553,11 @@ fn parse_macro(s: &str) -> Vec<Step> {
                 let p: Vec<&str> = rest.split_whitespace().collect();
                 match (p.first(), p.get(1).and_then(|o| parse_cmp(o)), p.get(2)) {
                     (Some(name), Some(cmp), Some(val)) => {
-                        vec![Step::WaitIo(name.to_string(), cmp, val.parse::<i64>().unwrap_or(0))]
+                        vec![Step::WaitIo(
+                            name.to_string(),
+                            cmp,
+                            val.parse::<i64>().unwrap_or(0),
+                        )]
                     }
                     _ => vec![],
                 }
@@ -1386,7 +1632,11 @@ pub fn macro_runs(shared: &Arc<Shared>) -> Vec<MacroRunInfo> {
         .lock()
         .unwrap()
         .iter()
-        .map(|r| MacroRunInfo { id: r.id, name: r.name.clone(), status: r.status.clone() })
+        .map(|r| MacroRunInfo {
+            id: r.id,
+            name: r.name.clone(),
+            status: r.status.clone(),
+        })
         .collect()
 }
 
@@ -1520,7 +1770,10 @@ fn load_output_names(shared: &Arc<Shared>) -> Vec<String> {
 }
 
 fn norm_name(s: &str) -> String {
-    s.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect()
+    s.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
 /// index -> name for the device's inputs (via INFO n_inputs + INPUT_DESC).
@@ -1571,7 +1824,10 @@ fn wait_io(
             *in_loaded = true;
         }
         let want = norm_name(name);
-        in_names.iter().position(|n| norm_name(n) == want).map(|p| p as u8)
+        in_names
+            .iter()
+            .position(|n| norm_name(n) == want)
+            .map(|p| p as u8)
     };
     let idx = match idx {
         Some(i) => i,
@@ -1614,7 +1870,11 @@ fn run_steps(ctx: &MacroCtx, steps: &[Step], depth: u32) {
                 let parent = active(&stack);
                 let cond = (last_exit == Some(0)) == *want_ok;
                 let a = parent && cond;
-                stack.push(IfFrame { active: a, taken: a, parent });
+                stack.push(IfFrame {
+                    active: a,
+                    taken: a,
+                    parent,
+                });
                 continue;
             }
             Step::Else => {
@@ -1675,7 +1935,10 @@ fn run_steps(ctx: &MacroCtx, steps: &[Step], depth: u32) {
                         out_loaded = true;
                     }
                     let want = norm_name(target);
-                    out_names.iter().position(|nm| norm_name(nm) == want).map(|p| p as u8)
+                    out_names
+                        .iter()
+                        .position(|nm| norm_name(nm) == want)
+                        .map(|p| p as u8)
                 };
                 if let Some(i) = idx {
                     if *val > 1 {
@@ -1686,8 +1949,11 @@ fn run_steps(ctx: &MacroCtx, steps: &[Step], depth: u32) {
                             vec![i, (*val & 0xFF) as u8, (*val >> 8) as u8],
                         );
                     } else {
-                        let _ =
-                            send_cmd(shared, crate::protocol::msg::OUTPUT_SET, vec![i, *val as u8]);
+                        let _ = send_cmd(
+                            shared,
+                            crate::protocol::msg::OUTPUT_SET,
+                            vec![i, *val as u8],
+                        );
                     }
                 }
             }
@@ -1700,16 +1966,31 @@ fn run_steps(ctx: &MacroCtx, steps: &[Step], depth: u32) {
                         out_loaded = true;
                     }
                     let want = norm_name(target);
-                    out_names.iter().position(|nm| norm_name(nm) == want).map(|p| p as u8)
+                    out_names
+                        .iter()
+                        .position(|nm| norm_name(nm) == want)
+                        .map(|p| p as u8)
                 };
                 if let Some(i) = idx {
                     // 4-byte body = fill the whole strip
-                    let _ = send_cmd(shared, crate::protocol::msg::OUTPUT_RGB, vec![i, *r, *g, *b]);
+                    let _ = send_cmd(
+                        shared,
+                        crate::protocol::msg::OUTPUT_RGB,
+                        vec![i, *r, *g, *b],
+                    );
                 }
             }
             Step::WaitIo(name, cmp, threshold) => {
                 set_run_status(ctx, &format!("waiting: {name}"));
-                if !wait_io(ctx, name, *cmp, *threshold, timeout, &mut in_names, &mut in_loaded) {
+                if !wait_io(
+                    ctx,
+                    name,
+                    *cmp,
+                    *threshold,
+                    timeout,
+                    &mut in_names,
+                    &mut in_loaded,
+                ) {
                     break; // timeout/cancel/unknown input aborts the macro
                 }
             }
@@ -1749,9 +2030,11 @@ fn parse_u16_prefixed(s: &str) -> u16 {
 fn resolve_macro_text(shared: &Arc<Shared>, text: &str) -> Result<String, String> {
     use crate::macrovars::{resolve_text, VarContext};
     // fast path: nothing to resolve and no VAR directive → no workspace I/O.
-    let has_var = text
-        .lines()
-        .any(|l| l.split_whitespace().next().is_some_and(|w| w.eq_ignore_ascii_case("VAR")));
+    let has_var = text.lines().any(|l| {
+        l.split_whitespace()
+            .next()
+            .is_some_and(|w| w.eq_ignore_ascii_case("VAR"))
+    });
     if !text.contains("{$") && !has_var {
         return Ok(text.to_string());
     }
@@ -1816,7 +2099,12 @@ pub fn play(shared: &Arc<Shared>, name: &str, text: &str) -> Result<(), String> 
     });
     emit_runs(&shared, &app);
     std::thread::spawn(move || {
-        let ctx = MacroCtx { shared: shared.clone(), app: app.clone(), id, cancel };
+        let ctx = MacroCtx {
+            shared: shared.clone(),
+            app: app.clone(),
+            id,
+            cancel,
+        };
         run_steps(&ctx, &steps, 0);
         shared.runs.lock().unwrap().retain(|r| r.id != id);
         emit_runs(&shared, &app);
@@ -1839,4 +2127,116 @@ mod hw_tests {
         let port = autodetect_mux().expect("a muxed Duta should answer the probe");
         println!("muxed Duta on {port}");
     }
+
+    // ---- device_next CDC bisector: single-handle vs concurrent-clone -----------
+    // A/B for "Sutra connects but gets no CMD response". Set DUTA_PORT (e.g. COM6);
+    // both send an INFO over skrit-mux and look for the INFO response.
+    //   hw_mux_single_handle    — one handle, sequential write->read (like the .NET
+    //                             probe that WORKS) — proves the device answers.
+    //   hw_mux_concurrent_clone — reader thread on a try_clone'd handle + write on
+    //                             the original (exactly Sutra's connect_muxed). If
+    //                             single passes and this fails, the bug is host-side
+    //                             concurrent overlapped I/O on the cloned handle.
+    use std::io::{Read, Write};
+    fn hw_port() -> String { std::env::var("DUTA_PORT").unwrap_or_else(|_| "COM6".into()) }
+    fn hw_info_wire() -> Vec<u8> {
+        Frame::new(msg::INFO, 1, vec![]).to_mux_wire().expect("encode INFO")
+    }
+    const HW_INFO_RESP: u8 = msg::INFO | crate::protocol::RESP_FLAG;
+
+    #[test]
+    #[ignore]
+    fn hw_mux_single_handle() {
+        let params = SerialParams::default();
+        let mut port = open_retry(|| open_data(&hw_port(), &params)).expect("open");
+        let _ = port.write_data_terminal_ready(true);
+        std::thread::sleep(Duration::from_millis(400));
+        let wire = hw_info_wire();
+        let mut reader = MuxReader::new();
+        let mut buf = [0u8; 256];
+        let mut got = None;
+        'outer: for _ in 0..6 {
+            let _ = port.write_all(&wire);
+            let _ = port.flush();
+            let dl = Instant::now() + Duration::from_millis(400);
+            while Instant::now() < dl {
+                match port.read(&mut buf) {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        for (ch, payload) in reader.push(&buf[..n]) {
+                            if ch == crate::protocol::mux::CMD {
+                                if let Ok(f) = Frame::from_raw(&payload) {
+                                    eprintln!("[single] resp type=0x{:02x} seq={} body={}", f.typ, f.seq, f.body.len());
+                                    if f.typ == HW_INFO_RESP { got = Some(f); break 'outer; }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                    Err(e) => panic!("read: {e}"),
+                }
+            }
+        }
+        let _ = port.write_data_terminal_ready(false);
+        eprintln!("[single] got_response = {}", got.is_some());
+        assert!(got.is_some(), "single-handle: no INFO response (device/firmware mute)");
+    }
+
+    #[test]
+    #[ignore]
+    fn hw_mux_concurrent_clone() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let params = SerialParams::default();
+        let mut port = open_retry(|| open_data(&hw_port(), &params)).expect("open");
+        let _ = port.write_data_terminal_ready(true);
+        std::thread::sleep(Duration::from_millis(400));
+        let mut rd = port.try_clone().expect("clone");
+        let (tx, rx) = std::sync::mpsc::channel::<Frame>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let h = std::thread::spawn(move || {
+            let mut reader = MuxReader::new();
+            let mut buf = [0u8; 256];
+            while !stop2.load(Ordering::Relaxed) {
+                match rd.read(&mut buf) {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        for (ch, payload) in reader.push(&buf[..n]) {
+                            if ch == crate::protocol::mux::CMD {
+                                if let Ok(f) = Frame::from_raw(&payload) { let _ = tx.send(f); }
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        let wire = hw_info_wire();
+        let mut got = false;
+        'outer: for _ in 0..6 {
+            let _ = port.write_all(&wire);
+            let _ = port.flush();
+            let dl = Instant::now() + Duration::from_millis(400);
+            while Instant::now() < dl {
+                if let Ok(f) = rx.recv_timeout(Duration::from_millis(80)) {
+                    eprintln!("[clone] resp type=0x{:02x} seq={} body={}", f.typ, f.seq, f.body.len());
+                    if f.typ == HW_INFO_RESP { got = true; break 'outer; }
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = port.write_data_terminal_ready(false);
+        let _ = h.join();
+        eprintln!("[clone] got_response = {}", got);
+        assert!(got, "concurrent-clone (Sutra's pattern): no INFO response");
+    }
+
+    // NOTE: a fuller test that drives the real send_cmd -> send_cmd_mux path was
+    // tried, but constructing `Shared` pulls Tauri/WebView2 into the test exe's
+    // imports and it won't load standalone (STATUS_ENTRYPOINT_NOT_FOUND). The A/B
+    // pair above already proves the diagnosis: a SINGLE write to the device_next
+    // CDC is dropped on first contact; retrying the write recovers the response —
+    // which is exactly what send_cmd_mux now does.
 }
