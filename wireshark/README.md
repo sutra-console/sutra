@@ -11,11 +11,11 @@ The extcap probes what the device bridges and picks the link type to match. For 
 **BLE sniffer** it emits `LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR`, so **Wireshark's
 own `btle` dissector** decodes everything natively — PDU types, advertising
 addresses with vendor names, AD structures, CRC status. **No plugin required.**
-Other (untyped) streams come through as raw `USER0`. Background: [`../EXTCAP.md`](../EXTCAP.md).
+Other (untyped) streams come through as raw `USER0`. Background: [`../wiki/EXTCAP.md`](../wiki/EXTCAP.md).
 
 > The [`skrit-ble-sniff.lua`](skrit-ble-sniff.lua) dissector in this folder is
 > **optional** — it predates the native BTLE path and is now kept as the reference
-> parser for Sutra's own decoder layer ([`../DECODERS.md`](../DECODERS.md)). You do
+> parser for Sutra's own decoder layer ([`../wiki/DECODERS.md`](../wiki/DECODERS.md)). You do
 > *not* need it for live BLE capture anymore.
 
 ---
@@ -106,5 +106,5 @@ $bin = "sutra\src-tauri\target\release\sutra-extcap.exe"
 It's no longer needed for capture (native BTLE supersedes it), but it stays as the
 reference for Sutra's `mlua` decoder layer: the **same parsing logic** will power
 the in-app viewer and filters — Lua is the shared language between the two tools.
-The contract is sketched in [`../DECODERS.md`](../DECODERS.md); the
+The contract is sketched in [`../wiki/DECODERS.md`](../wiki/DECODERS.md); the
 record-layout/AD-walk logic in this file ports almost directly.
