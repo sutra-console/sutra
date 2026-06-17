@@ -13,6 +13,31 @@ It pairs with **[Duta](https://github.com/sutra-console/duta)** firmware over th
 shared **[skrit](https://github.com/sutra-console/skrit)** protocol, but also
 drives any plain COM port.
 
+## What you can do with it
+
+A Duta + Sutra is a general-purpose bridge between you — or an LLM — and whatever
+hardware is in front of you. A few of the things people reach for it to do:
+
+- **A real KVM for the rack** — drop a Duta on your homelab's console ports (a
+  headless box's serial header, a switch/router/PDU console) and reach them
+  remotely over WiFi (mDNS-discovered) or Bluetooth: out-of-band serial access,
+  the equivalent of KVM-over-IP, with no OpenGear/Avocent appliance or trudging
+  over to the rack with a USB-serial dongle. An LLM can hold the console too.
+- **Turn an MCU into a Wireshark capture board** — port a Duta build to your own
+  radio/bus hardware and it becomes a live, *named* Wireshark interface
+  (BLE · 802.15.4/Zigbee/Thread · I²C · raw serial), dissected in real time over
+  `sutra-extcap` — no proprietary sniffer app required.
+- **Automate arduous hardware testing** — script the tedious bring-up/QA loops
+  with macros (`WAITFOR` · `RUN` with exit-code capture · `IF/ELSE` · `SET` ·
+  `WAITIO`), watch the run queue, record results to pcap, and hand the whole thing
+  to an LLM over MCP to run unattended.
+- **Replace sketchy manufacturer apps** — instead of a vendor's one-off
+  configurator, describe a board's panel once as a `.yantra` (buttons/sliders/
+  readouts, scripted in Lua) and get a clean, reusable control surface that travels
+  with your project.
+- **…or just use it as a serial console** — point it at any plain COM port and
+  you've got a fast, modern terminal. No Duta required.
+
 ## Features
 
 - **Universal serial console** (ghostty-web): connect a Duta device *or* any
